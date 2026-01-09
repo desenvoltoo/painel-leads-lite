@@ -9,7 +9,7 @@ venv/
 env/
 *.log
 
-# Flask
+# Flask 
 instance/
 *.sqlite3
 
