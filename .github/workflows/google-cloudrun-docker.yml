@@ -1,20 +1,49 @@
-steps:
-  - name: 'gcr.io/cloud-builders/docker'
-    args: ['build', '-t', 'us-central1-docker.pkg.dev/$PROJECT_ID/painel/painel-leads-lite:$COMMIT_SHA', '.']
+name: Deploy to Cloud Run (Docker)
 
-  - name: 'gcr.io/cloud-builders/docker'
-    args: ['push', 'us-central1-docker.pkg.dev/$PROJECT_ID/painel/painel-leads-lite:$COMMIT_SHA']
+on:
+  push:
+    branches: ["main"]
 
-  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
-    entrypoint: gcloud
-    args:
-      [
-        'run','deploy','painel-leads-lite',
-        '--image','us-central1-docker.pkg.dev/$PROJECT_ID/painel/painel-leads-lite:$COMMIT_SHA',
-        '--region','us-central1',
-        '--platform','managed',
-        '--allow-unauthenticated'
-      ]
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
 
-images:
-  - 'us-central1-docker.pkg.dev/$PROJECT_ID/painel/painel-leads-lite:$COMMIT_SHA'
+    permissions:
+      contents: read
+      id-token: write
+
+    env:
+      PROJECT_ID: painel-universidade
+      REGION: us-central1
+      SERVICE: painel-leads-lite
+      REPO: painel
+      IMAGE: painel-leads-lite
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Authenticate to Google Cloud (Workload Identity)
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WIF_PROVIDER }}
+          service_account: ${{ secrets.GCP_SA_EMAIL }}
+
+      - name: Set up gcloud
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Configure Docker auth for Artifact Registry
+        run: gcloud auth configure-docker $REGION-docker.pkg.dev --quiet
+
+      - name: Build Docker image
+        run: |
+          docker build -t $REGION-docker.pkg.dev/$PROJECT_ID/$REPO/$IMAGE:${{ github.sha }} .
+
+      - name: Push Docker image
+        run: |
+          docker push $REGION-docker.pkg.dev/$PROJECT_ID/$REPO/$IMAGE:${{ github.sha }}
+
+      - name: Deploy to Cloud Run
+        run: |
+          gcloud run deploy $SERVICE \
+            --image $REGION-docker.pkg.dev/$PROJE
