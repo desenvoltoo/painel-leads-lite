@@ -1,8 +1,24 @@
+@"
+# Python
 __pycache__/
 *.pyc
+*.pyo
+*.pyd
 .venv/
 venv/
-.env
+env/
+*.log
+
+# Flask
+instance/
+*.sqlite3
+
+# OS/Editor
 .DS_Store
-.idea/
+Thumbs.db
 .vscode/
+
+# Secrets
+.env
+.env.*
+"@ | Out-File -Encoding utf8 .gitignore

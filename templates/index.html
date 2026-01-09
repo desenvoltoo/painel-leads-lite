@@ -6,15 +6,17 @@
   <title>Painel Leads Lite</title>
   <link rel="stylesheet" href="{{ url_for('static', filename='css/styles.css') }}">
 </head>
+
 <body>
   <header class="topbar">
     <div class="brand">
       <div class="logo">PL</div>
       <div>
         <div class="title">Painel Leads Lite</div>
-        <div class="subtitle">Leve • Intuitivo • Direto no BigQuery</div>
+        <div class="subtitle">Leve • Intuitivo • BigQuery First</div>
       </div>
     </div>
+
     <div class="actions">
       <button id="btnReload" class="btn">Recarregar</button>
       <button id="btnExport" class="btn btn-ghost">Exportar CSV</button>
@@ -22,13 +24,15 @@
   </header>
 
   <main class="container">
-    <section class="kpis" id="kpis">
+
+    <!-- KPIs -->
+    <section class="kpis">
       <div class="kpi">
-        <div class="kpi-label">Leads</div>
+        <div class="kpi-label">Total de leads</div>
         <div class="kpi-value" id="kpiCount">—</div>
       </div>
       <div class="kpi">
-        <div class="kpi-label">Status mais comum</div>
+        <div class="kpi-label">Status predominante</div>
         <div class="kpi-value" id="kpiTopStatus">—</div>
       </div>
       <div class="kpi">
@@ -37,33 +41,68 @@
       </div>
     </section>
 
+    <!-- Upload -->
+    <section class="card">
+      <div class="card-header">
+        <h2>Importar planilha</h2>
+        <p>Envie CSV ou XLSX. O arquivo será carregado no BigQuery (staging).</p>
+      </div>
+
+      <div class="filters" style="grid-template-columns: repeat(6, minmax(0,1fr));">
+        <div class="field" style="grid-column: span 4;">
+          <label>Arquivo (CSV/XLSX)</label>
+          <input id="uploadFile" type="file" accept=".csv,.xlsx,.xls" />
+        </div>
+
+        <div class="field" style="grid-column: span 2;">
+          <label>Origem do upload (opcional)</label>
+          <input id="uploadSource" placeholder="Ex: CAPTACAO_JANEIRO" />
+        </div>
+
+        <div class="field field-actions" style="grid-column: span 6;">
+          <button id="btnUpload" class="btn btn-primary">Importar</button>
+          <span id="uploadStatus" class="muted"></span>
+        </div>
+      </div>
+    </section>
+
+    <!-- Filtros -->
     <section class="card">
       <div class="card-header">
         <h2>Filtros</h2>
-        <p>Use filtros rápidos. O painel consulta a VIEW no BigQuery e traz só o necessário.</p>
+        <p>Refine os dados diretamente no BigQuery.</p>
       </div>
 
       <div class="filters">
         <div class="field">
           <label>Status</label>
-          <input id="fStatus" placeholder="Ex: NOVO" />
+          <input id="fStatus" list="dlStatus" placeholder="Ex: NOVO" />
+          <datalist id="dlStatus"></datalist>
         </div>
+
         <div class="field">
           <label>Curso</label>
-          <input id="fCurso" placeholder="Ex: Administração" />
+          <input id="fCurso" list="dlCurso" placeholder="Ex: Administração" />
+          <datalist id="dlCurso"></datalist>
         </div>
+
         <div class="field">
           <label>Polo</label>
-          <input id="fPolo" placeholder="Ex: Tatuapé" />
+          <input id="fPolo" list="dlPolo" placeholder="Ex: Tatuapé" />
+          <datalist id="dlPolo"></datalist>
         </div>
+
         <div class="field">
           <label>Origem</label>
-          <input id="fOrigem" placeholder="Ex: Meta Ads" />
+          <input id="fOrigem" list="dlOrigem" placeholder="Ex: Meta Ads" />
+          <datalist id="dlOrigem"></datalist>
         </div>
+
         <div class="field">
           <label>Data inicial</label>
           <input id="fIni" type="date" />
         </div>
+
         <div class="field">
           <label>Data final</label>
           <input id="fFim" type="date" />
@@ -81,6 +120,7 @@
       </div>
     </section>
 
+    <!-- Resultados -->
     <section class="card">
       <div class="card-header">
         <h2>Resultados</h2>
@@ -110,8 +150,9 @@
 
     <footer class="footer">
       <span>© Painel Leads Lite</span>
-      <span class="muted">Dica: coloque a inteligência no BigQuery (views), e mantenha o painel rápido.</span>
+      <span class="muted">Dados do BigQuery • Upload em staging</span>
     </footer>
+
   </main>
 
   <script src="{{ url_for('static', filename='js/app.js') }}"></script>
