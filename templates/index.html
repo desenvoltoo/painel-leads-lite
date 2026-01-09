@@ -1,0 +1,119 @@
+<!doctype html>
+<html lang="pt-br">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Painel Leads Lite</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/styles.css') }}">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <div class="logo">PL</div>
+      <div>
+        <div class="title">Painel Leads Lite</div>
+        <div class="subtitle">Leve • Intuitivo • Direto no BigQuery</div>
+      </div>
+    </div>
+    <div class="actions">
+      <button id="btnReload" class="btn">Recarregar</button>
+      <button id="btnExport" class="btn btn-ghost">Exportar CSV</button>
+    </div>
+  </header>
+
+  <main class="container">
+    <section class="kpis" id="kpis">
+      <div class="kpi">
+        <div class="kpi-label">Leads</div>
+        <div class="kpi-value" id="kpiCount">—</div>
+      </div>
+      <div class="kpi">
+        <div class="kpi-label">Status mais comum</div>
+        <div class="kpi-value" id="kpiTopStatus">—</div>
+      </div>
+      <div class="kpi">
+        <div class="kpi-label">Última inscrição</div>
+        <div class="kpi-value" id="kpiLastDate">—</div>
+      </div>
+    </section>
+
+    <section class="card">
+      <div class="card-header">
+        <h2>Filtros</h2>
+        <p>Use filtros rápidos. O painel consulta a VIEW no BigQuery e traz só o necessário.</p>
+      </div>
+
+      <div class="filters">
+        <div class="field">
+          <label>Status</label>
+          <input id="fStatus" placeholder="Ex: NOVO" />
+        </div>
+        <div class="field">
+          <label>Curso</label>
+          <input id="fCurso" placeholder="Ex: Administração" />
+        </div>
+        <div class="field">
+          <label>Polo</label>
+          <input id="fPolo" placeholder="Ex: Tatuapé" />
+        </div>
+        <div class="field">
+          <label>Origem</label>
+          <input id="fOrigem" placeholder="Ex: Meta Ads" />
+        </div>
+        <div class="field">
+          <label>Data inicial</label>
+          <input id="fIni" type="date" />
+        </div>
+        <div class="field">
+          <label>Data final</label>
+          <input id="fFim" type="date" />
+        </div>
+
+        <div class="field field-wide">
+          <label>Limite</label>
+          <input id="fLimit" type="number" min="50" step="50" value="500" />
+        </div>
+
+        <div class="field field-actions">
+          <button id="btnApply" class="btn btn-primary">Aplicar filtros</button>
+          <button id="btnClear" class="btn btn-ghost">Limpar</button>
+        </div>
+      </div>
+    </section>
+
+    <section class="card">
+      <div class="card-header">
+        <h2>Resultados</h2>
+        <p id="statusLine">—</p>
+      </div>
+
+      <div class="table-wrap">
+        <table id="tbl">
+          <thead>
+            <tr>
+              <th>Data</th>
+              <th>Nome</th>
+              <th>CPF</th>
+              <th>Celular</th>
+              <th>Email</th>
+              <th>Origem</th>
+              <th>Polo</th>
+              <th>Curso</th>
+              <th>Status</th>
+              <th>Consultor</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
+
+    <footer class="footer">
+      <span>© Painel Leads Lite</span>
+      <span class="muted">Dica: coloque a inteligência no BigQuery (views), e mantenha o painel rápido.</span>
+    </footer>
+  </main>
+
+  <script src="{{ url_for('static', filename='js/app.js') }}"></script>
+</body>
+</html>
