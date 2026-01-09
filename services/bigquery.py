@@ -133,6 +133,6 @@ def query_leads(filters: Dict[str, Any]) -> List[Dict[str, Any]]:
             out.append({k: r.get(k) for k in r.keys()})
         return out
 
-    except Exception:
-        # Se der erro (permissão, view inexistente etc.), não quebra o painel
+    except Exception as e:
+        print("🚨 BigQuery ERROR:", repr(e))
         return _mock_rows(filters)
