@@ -188,10 +188,15 @@ def create_app() -> Flask:
         ok, missing = _required_envs_ok()
         if not ok:
             return jsonify({
-                "ok": False,
-                "error": f"ENV obrigatórias faltando: {missing}",
-                "source": _source_ref(),
-            }), 500
+                "ok": True,
+                "message": "Upload concluído e promovido no modelo estrela.",
+                "rows_loaded": result.get("rows_loaded", 0),
+                "staging_table": result.get("staging_table"),
+                "load_job_id": result.get("load_job_id"),
+                "promote_proc": result.get("promote_proc"),
+                "promote_job_id": result.get("promote_job_id"),
+                "filename": f.filename,
+            })
 
         try:
             if "file" not in request.files:

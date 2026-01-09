@@ -1,10 +1,15 @@
 # -*- coding: utf-8 -*-
 import os
 import io
+from datetime import datetime
 from typing import Any, Dict, List
+
 import pandas as pd
 
 
+# ============================================================
+# ENV / CLIENT
+# ============================================================
 def _env(name: str, default: str = "") -> str:
     v = os.getenv(name)
     return v if v else default
@@ -13,9 +18,7 @@ def _env(name: str, default: str = "") -> str:
 def _client():
     from google.cloud import bigquery
     project = _env("GCP_PROJECT_ID")
-    if project:
-        return bigquery.Client(project=project)
-    return bigquery.Client()
+    return bigquery.Client(project=project) if project else bigquery.Client()
 
 
 def _table_ref() -> str:
@@ -28,17 +31,66 @@ def _table_ref() -> str:
 
 
 def _date_field() -> str:
-    # sua view usa data_inscricao_dt, então esse é o padrão
-    return _env("BQ_DATE_FIELD", "data_inscricao_dt")
+    # Para vw_painel_leads / vw_leads_painel_lite normalmente é DATE
+    return _env("BQ_DATE_FIELD", "data_inscricao")
 
 
 def _date_expr() -> str:
-    # converte DATETIME/TIMESTAMP em DATE para filtros/ordenar
-    # para DATE já funciona também
     return f"DATE({_date_field()})"
 
 
-# ===================== LEADS =====================
+# ============================================================
+# NORMALIZAÇÃO
+# ============================================================
+def _normalize_cols(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
+    df.columns = [c.strip().lower() for c in df.columns]
+    return df
+
+
+def _clean_str(x) -> str:
+    if x is None:
+        return ""
+    s = str(x).strip()
+    if s.lower() in ("nan", "nat", "none", "<na>"):
+        return ""
+    return s
+
+
+def _to_bool(v):
+    if v is None:
+        return None
+    s = str(v).strip().lower()
+    if s in ("true", "t", "1", "sim", "s", "yes", "y"):
+        return True
+    if s in ("false", "f", "0", "nao", "não", "n", "no"):
+        return False
+    if s == "" or s.lower() in ("nan", "nat", "none", "<na>"):
+        return None
+    return None
+
+
+def _normalize_datetime_cols(df: pd.DataFrame) -> pd.DataFrame:
+    # DATETIME (vira string padrão)
+    dt_cols = ("data_envio_dt", "data_inscricao_dt", "data_disparo_dt", "data_contato_dt")
+    for col in dt_cols:
+        if col in df.columns:
+            parsed = pd.to_datetime(df[col], errors="coerce")
+            df[col] = parsed.dt.strftime("%Y-%m-%d %H:%M:%S").fillna("")
+
+    # DATE (vira string padrão)
+    d_cols = ("data_matricula_d", "data_nascimento_d")
+    for col in d_cols:
+        if col in df.columns:
+            parsed = pd.to_datetime(df[col], errors="coerce")
+            df[col] = parsed.dt.strftime("%Y-%m-%d").fillna("")
+
+    return df
+
+
+# ============================================================
+# LEADS
+# ============================================================
 def query_leads(filters: Dict[str, Any]) -> List[Dict[str, Any]]:
     from google.cloud import bigquery
 
@@ -84,7 +136,9 @@ def query_leads(filters: Dict[str, Any]) -> List[Dict[str, Any]]:
     return [{k: r.get(k) for k in r.keys()} for r in rows]
 
 
-# ===================== KPIs =====================
+# ============================================================
+# KPIs
+# ============================================================
 def query_kpis(filters: Dict[str, Any]) -> Dict[str, Any]:
     from google.cloud import bigquery
 
@@ -108,7 +162,7 @@ def query_kpis(filters: Dict[str, Any]) -> Dict[str, Any]:
         AND (@data_fim IS NULL OR {dt} <= DATE(@data_fim))
     ),
     agg AS (
-      SELECT status, COUNT(*) cnt
+      SELECT status, COUNT(*) AS cnt
       FROM base
       GROUP BY status
     )
@@ -143,7 +197,9 @@ def query_kpis(filters: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-# ===================== OPTIONS =====================
+# ============================================================
+# OPTIONS
+# ============================================================
 def _distinct(column: str, limit: int = 250) -> List[str]:
     from google.cloud import bigquery
 
@@ -154,11 +210,13 @@ def _distinct(column: str, limit: int = 250) -> List[str]:
     ORDER BY v
     LIMIT @limit
     """
+
     job_config = bigquery.QueryJobConfig(
         query_parameters=[bigquery.ScalarQueryParameter("limit", "INT64", int(limit))]
     )
+
     rows = _client().query(sql, job_config=job_config).result()
-    return [str(r.get("v")) for r in rows if r.get("v") is not None]
+    return [str(r.get("v")) for r in rows if r.get("v")]
 
 
 def query_options() -> Dict[str, List[str]]:
@@ -170,18 +228,10 @@ def query_options() -> Dict[str, List[str]]:
     }
 
 
-# ===================== UPLOAD + PROMOTE =====================
-def _normalize_cols(df: pd.DataFrame) -> pd.DataFrame:
-    df = df.copy()
-    df.columns = [c.strip().lower() for c in df.columns]
-    return df
-
-
+# ============================================================
+# UPLOAD (CSV BYTES, SCHEMA FIXO) + PROMOTE
+# ============================================================
 def ingest_upload_file(file_storage, source: str = "UPLOAD_PAINEL") -> Dict[str, Any]:
-    """
-    Upload -> stg_leads_upload -> CALL sp_promote_stg_leads_upload()
-    Usa dataset atual (BQ_DATASET), pois você já tem tudo pronto no modelo_estrela.
-    """
     from google.cloud import bigquery
 
     filename = (file_storage.filename or "").lower()
@@ -194,25 +244,88 @@ def ingest_upload_file(file_storage, source: str = "UPLOAD_PAINEL") -> Dict[str,
     stg_table_id = f"{project}.{dataset}.{upload_table}"
     proc_id = f"{project}.{dataset}.{promote_proc}"
 
+    # ---------- READ ----------
     if filename.endswith(".csv"):
-        content = file_storage.read()
-        df = pd.read_csv(io.BytesIO(content), dtype=str, sep=None, engine="python")
+        df = pd.read_csv(file_storage, dtype=str, sep=None, engine="python")
     elif filename.endswith(".xlsx") or filename.endswith(".xls"):
-        content = file_storage.read()
-        df = pd.read_excel(io.BytesIO(content), dtype=str)
+        df = pd.read_excel(file_storage, dtype=str)
     else:
         raise ValueError("Formato inválido. Envie CSV ou XLSX.")
 
+    # ---------- NORMALIZE ----------
     df = _normalize_cols(df)
+
+    # booleanos (mantém compatível com BOOL no schema)
+    for col in ("matriculado", "inscrito", "ativo"):
+        if col in df.columns:
+            df[col] = df[col].apply(_to_bool)
+
+    # datas -> string padrão (para não quebrar e bater no schema)
+    df = _normalize_datetime_cols(df)
+
+    # origem_upload + data_ingestao (TIMESTAMP)
     df["origem_upload"] = source
-    df["data_ingestao"] = pd.Timestamp.utcnow()
+    df["data_ingestao"] = datetime.utcnow().isoformat()
+
+    # limpeza final (strings)
+    for c in df.columns:
+        if df[c].dtype == "object":
+            df[c] = df[c].apply(_clean_str)
+
+    # ---------- DF -> CSV BYTES ----------
+    csv_bytes = df.to_csv(index=False, encoding="utf-8").encode("utf-8")
+
+    # ---------- SCHEMA FIXO (evita autodetect conflitante) ----------
+    schema = [
+        bigquery.SchemaField("origem", "STRING"),
+        bigquery.SchemaField("polo", "STRING"),
+        bigquery.SchemaField("tipo_negocio", "STRING"),
+        bigquery.SchemaField("curso", "STRING"),
+        bigquery.SchemaField("modalidade", "STRING"),
+        bigquery.SchemaField("nome", "STRING"),
+        bigquery.SchemaField("cpf", "STRING"),
+        bigquery.SchemaField("celular", "STRING"),
+        bigquery.SchemaField("email", "STRING"),
+        bigquery.SchemaField("endereco", "STRING"),
+        bigquery.SchemaField("convenio", "STRING"),
+        bigquery.SchemaField("empresa_conveniada", "STRING"),
+        bigquery.SchemaField("voucher", "STRING"),
+        bigquery.SchemaField("campanha", "STRING"),
+        bigquery.SchemaField("consultor", "STRING"),
+        bigquery.SchemaField("status", "STRING"),
+        bigquery.SchemaField("obs", "STRING"),
+        bigquery.SchemaField("peca_disparo", "STRING"),
+        bigquery.SchemaField("texto_disparo", "STRING"),
+        bigquery.SchemaField("consultor_disparo", "STRING"),
+        bigquery.SchemaField("tipo_disparo", "STRING"),
+        bigquery.SchemaField("matriculado", "BOOL"),
+        bigquery.SchemaField("inscrito", "BOOL"),
+        bigquery.SchemaField("data_envio_dt", "DATETIME"),
+        bigquery.SchemaField("data_inscricao_dt", "DATETIME"),
+        bigquery.SchemaField("data_disparo_dt", "DATETIME"),
+        bigquery.SchemaField_toggle("""data_contato_dt""", "DATETIME") if False else bigquery.SchemaField("data_contato_dt", "DATETIME"),
+        bigquery.SchemaField("data_matricula_d", "DATE"),
+        bigquery.SchemaField("data_nascimento_d", "DATE"),
+        bigquery.SchemaField("origem_upload", "STRING"),
+        bigquery.SchemaField("data_ingestao", "TIMESTAMP"),
+    ]
+
+    job_config = bigquery.LoadJobConfig(
+        source_format=bigquery.SourceFormat.CSV,
+        skip_leading_rows=1,
+        write_disposition="WRITE_APPEND",
+        allow_quoted_newlines=True,
+        ignore_unknown_values=True,
+        schema=schema,
+        autodetect=False,
+    )
 
     client = _client()
 
-    load_job = client.load_table_from_dataframe(
-        df,
+    load_job = client.load_table_from_file(
+        io.BytesIO(csv_bytes),
         stg_table_id,
-        job_config=bigquery.LoadJobConfig(write_disposition="WRITE_APPEND", autodetect=True),
+        job_config=job_config,
     )
     load_job.result()
 
@@ -227,8 +340,9 @@ def ingest_upload_file(file_storage, source: str = "UPLOAD_PAINEL") -> Dict[str,
         "promote_job_id": promote_job.job_id,
     }
 
-
-# ===================== DEBUG (opcional, mas útil) =====================
+# ============================================================
+# DEBUG (opcional)
+# ============================================================
 def debug_count() -> int:
     sql = f"SELECT COUNT(1) AS c FROM {_table_ref()}"
     rows = _client().query(sql).result()
