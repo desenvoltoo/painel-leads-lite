@@ -187,34 +187,45 @@ def create_app() -> Flask:
     def api_upload():
         ok, missing = _required_envs_ok()
         if not ok:
+            # ✅ Aqui é erro (e não sucesso). E não pode referenciar result/f
             return jsonify({
-                "ok": True,
-                "message": "Upload concluído e promovido no modelo estrela.",
-                "rows_loaded": result.get("rows_loaded", 0),
-                "staging_table": result.get("staging_table"),
-                "load_job_id": result.get("load_job_id"),
-                "promote_proc": result.get("promote_proc"),
-                "promote_job_id": result.get("promote_job_id"),
-                "filename": f.filename,
-            })
+                "ok": False,
+                "error": f"ENV obrigatórias faltando: {missing}",
+                "source": _source_ref(),
+            }), 500
 
         try:
             if "file" not in request.files:
-                return jsonify({"ok": False, "error": "Nenhum arquivo enviado (campo file).", "source": _source_ref()}), 400
+                return jsonify({
+                    "ok": False,
+                    "error": "Nenhum arquivo enviado (campo 'file').",
+                    "source": _source_ref(),
+                }), 400
 
             f = request.files["file"]
             if not f.filename:
-                return jsonify({"ok": False, "error": "Nome de arquivo vazio.", "source": _source_ref()}), 400
+                return jsonify({
+                    "ok": False,
+                    "error": "Nome de arquivo vazio.",
+                    "source": _source_ref(),
+                }), 400
 
             source = (request.form.get("source") or "UPLOAD_PAINEL").strip()
+
+            # ✅ Faz ingestão (staging + procedure)
             result = ingest_upload_file(f, source=source)
 
-            # retorno já inclui tabela staging + job_id + promote job
-            return jsonify({"ok": True, **result, "source": _source_ref()})
+            return jsonify({
+                "ok": True,
+                **result,
+                "filename": f.filename,
+                "source": _source_ref(),
+            })
 
         except Exception as e:
             print("🚨 /api/upload ERROR:", repr(e))
             return jsonify(_error_payload(e, "Falha no upload/ingestão.")), 500
+
 
     # ============================================================
     # DEBUG (pra você nunca ficar no escuro)
