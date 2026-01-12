@@ -1,6 +1,5 @@
 # -*- coding: utf-8 -*-
 import os
-from datetime import datetime
 from typing import Any, Dict, List
 
 import pandas as pd
@@ -8,7 +7,7 @@ from google.cloud import bigquery
 
 
 # ============================================================
-# ENV / CLIENT (ATUALIZADO E À PROVA DE CLOUD RUN)
+# ENV / CLIENT (À PROVA DE CLOUD RUN)
 # ============================================================
 def _env(name: str, default: str = "") -> str:
     v = os.getenv(name)
@@ -26,15 +25,13 @@ def _require_env(names: List[str]) -> Dict[str, str]:
 
 
 def _client() -> bigquery.Client:
-    # ✅ default alinhado com seu projeto
     project = _env("GCP_PROJECT_ID", "painel-universidade")
     return bigquery.Client(project=project) if project else bigquery.Client()
 
 
 def _table_ref() -> str:
     """
-    ✅ Não quebra se BQ_DATASET/BQ_VIEW_LEADS não vierem no Cloud Run.
-    Usa defaults do seu ambiente.
+    View de leitura do painel.
     """
     project = _env("GCP_PROJECT_ID", "painel-universidade")
     dataset = _env("BQ_DATASET", "modelo_estrela")
@@ -47,11 +44,12 @@ def _table_ref() -> str:
 
 
 def _date_field() -> str:
-    # default conforme sua config
-    return _env("BQ_DATE_FIELD", "data_inscricao")
+    # se sua view tiver data_inscricao_dt, troque via env BQ_DATE_FIELD
+    return _env("BQ_DATE_FIELD", "data_inscricao_dt")
 
 
 def _date_expr() -> str:
+    # sempre converte pra DATE com segurança
     return f"DATE({_date_field()})"
 
 
@@ -86,19 +84,18 @@ def _to_bool(v):
 
 def _normalize_datetime_cols(df: pd.DataFrame) -> pd.DataFrame:
     """
-    - Mantém datetime como datetime64[ns] (naive)
-    - DATE vira datetime.date
+    - DATETIME -> pandas datetime64[ns] NAIVE (sem timezone)
+    - DATE -> python date
     """
     df = df.copy()
 
     dt_cols = ("data_envio_dt", "data_inscricao_dt", "data_disparo_dt", "data_contato_dt")
     for col in dt_cols:
         if col in df.columns:
-            parsed = pd.to_datetime(df[col], errors="coerce", utc=False)
-            # garante naive
-            if getattr(parsed.dt, "tz", None) is not None:
-                parsed = parsed.dt.tz_convert(None)
-            df[col] = parsed
+            # ✅ parse robusto: se vier com "Z" ou offset, converte pra UTC e remove tz
+            parsed = pd.to_datetime(df[col], errors="coerce", utc=True)
+            # parsed é tz-aware; converte para naive
+            df[col] = parsed.dt.tz_convert(None)
 
     d_cols = ("data_matricula_d", "data_nascimento_d")
     for col in d_cols:
@@ -126,11 +123,15 @@ def query_leads(filters: Dict[str, Any]) -> List[Dict[str, Any]]:
       AND (@curso  IS NULL OR UPPER(curso)  = UPPER(@curso))
       AND (@polo   IS NULL OR UPPER(polo)   = UPPER(@polo))
       AND (@origem IS NULL OR UPPER(origem) = UPPER(@origem))
-      AND (@data_ini IS NULL OR {dt} >= DATE(@data_ini))
-      AND (@data_fim IS NULL OR {dt} <= DATE(@data_fim))
+      AND (@data_ini IS NULL OR {dt} >= @data_ini)
+      AND (@data_fim IS NULL OR {dt} <= @data_fim)
     ORDER BY {dt} DESC
     LIMIT @limit
     """
+
+    # ✅ usa DATE de verdade (evita casts e bugs de string)
+    data_ini = filters.get("data_ini") or None
+    data_fim = filters.get("data_fim") or None
 
     job_config = bigquery.QueryJobConfig(
         query_parameters=[
@@ -138,8 +139,8 @@ def query_leads(filters: Dict[str, Any]) -> List[Dict[str, Any]]:
             bigquery.ScalarQueryParameter("curso", "STRING", filters.get("curso") or None),
             bigquery.ScalarQueryParameter("polo", "STRING", filters.get("polo") or None),
             bigquery.ScalarQueryParameter("origem", "STRING", filters.get("origem") or None),
-            bigquery.ScalarQueryParameter("data_ini", "STRING", filters.get("data_ini") or None),
-            bigquery.ScalarQueryParameter("data_fim", "STRING", filters.get("data_fim") or None),
+            bigquery.ScalarQueryParameter("data_ini", "DATE", data_ini),
+            bigquery.ScalarQueryParameter("data_fim", "DATE", data_fim),
             bigquery.ScalarQueryParameter("limit", "INT64", int(filters.get("limit") or 500)),
         ]
     )
@@ -163,8 +164,8 @@ def query_kpis(filters: Dict[str, Any]) -> Dict[str, Any]:
         AND (@curso  IS NULL OR UPPER(curso)  = UPPER(@curso))
         AND (@polo   IS NULL OR UPPER(polo)   = UPPER(@polo))
         AND (@origem IS NULL OR UPPER(origem) = UPPER(@origem))
-        AND (@data_ini IS NULL OR {dt} >= DATE(@data_ini))
-        AND (@data_fim IS NULL OR {dt} <= DATE(@data_fim))
+        AND (@data_ini IS NULL OR {dt} >= @data_ini)
+        AND (@data_fim IS NULL OR {dt} <= @data_fim)
     ),
     agg AS (
       SELECT status, COUNT(*) cnt FROM base GROUP BY status
@@ -176,14 +177,17 @@ def query_kpis(filters: Dict[str, Any]) -> Dict[str, Any]:
       (SELECT ARRAY_AGG(STRUCT(status, cnt) ORDER BY cnt DESC) FROM agg) AS by_status
     """
 
+    data_ini = filters.get("data_ini") or None
+    data_fim = filters.get("data_fim") or None
+
     job_config = bigquery.QueryJobConfig(
         query_parameters=[
             bigquery.ScalarQueryParameter("status", "STRING", filters.get("status") or None),
             bigquery.ScalarQueryParameter("curso", "STRING", filters.get("curso") or None),
             bigquery.ScalarQueryParameter("polo", "STRING", filters.get("polo") or None),
             bigquery.ScalarQueryParameter("origem", "STRING", filters.get("origem") or None),
-            bigquery.ScalarQueryParameter("data_ini", "STRING", filters.get("data_ini") or None),
-            bigquery.ScalarQueryParameter("data_fim", "STRING", filters.get("data_fim") or None),
+            bigquery.ScalarQueryParameter("data_ini", "DATE", data_ini),
+            bigquery.ScalarQueryParameter("data_fim", "DATE", data_fim),
         ]
     )
 
@@ -229,15 +233,17 @@ def query_options() -> Dict[str, List[str]]:
 
 
 # ============================================================
-# UPLOAD + PIPELINE (CORRIGIDO)
+# UPLOAD + PIPELINE (BLINDADO)
 # ============================================================
 def ingest_upload_file(file_storage, source: str = "UPLOAD_PAINEL") -> Dict[str, Any]:
     """
     Carrega CSV/XLSX em stg_leads_upload e executa procedure do pipeline.
     """
-    # ✅ defaults alinhados ao seu ambiente (não quebra se Cloud Run falhar no set)
     project = _env("GCP_PROJECT_ID", "painel-universidade")
     dataset = _env("BQ_DATASET", "modelo_estrela")
+
+    # ⚠️ BigQuery location tem que bater com a sua dataset
+    # se sua dataset for US multi-region, troque via env para "US"
     location = _env("BQ_LOCATION", "us-central1")
 
     upload_table = _env("BQ_UPLOAD_TABLE", "stg_leads_upload")
@@ -315,22 +321,21 @@ def ingest_upload_file(file_storage, source: str = "UPLOAD_PAINEL") -> Dict[str,
             if col in df.columns:
                 df[col] = df[col].apply(_to_bool)
 
-        # datas (mantém dtype correto)
+        # datas
         df = _normalize_datetime_cols(df)
 
-        # origem/upload metadata
+        # metadata
         df["origem_upload"] = source
         df["data_ingestao"] = pd.Timestamp.utcnow()
 
-        # limpa strings sem mexer em datas/bools
+        # limpa strings
         for c in df.columns:
             if c in dt_cols or c in d_cols or c in bool_cols:
                 continue
             if df[c].dtype == "object":
                 df[c] = df[c].apply(_clean_str)
 
-        df = _ensure_schema_cols(df)
-        return df
+        return _ensure_schema_cols(df)
 
     def _load_df(df: pd.DataFrame, write_disposition: str) -> bigquery.LoadJob:
         job_config = bigquery.LoadJobConfig(
@@ -351,7 +356,9 @@ def ingest_upload_file(file_storage, source: str = "UPLOAD_PAINEL") -> Dict[str,
     rows_loaded_total = 0
     last_load_job_id = None
 
-    # CSV em chunks
+    # =====================
+    # CSV (chunks)
+    # =====================
     if filename_lower.endswith(".csv"):
         chunksize = int(_env("UPLOAD_CHUNKSIZE", "20000"))
 
@@ -367,6 +374,7 @@ def ingest_upload_file(file_storage, source: str = "UPLOAD_PAINEL") -> Dict[str,
             sep=None,
             engine="python",
             chunksize=chunksize,
+            keep_default_na=False,  # ✅ evita virar NaN e bagunçar _clean_str
         ):
             chunk = _apply_transformations(chunk)
             wd = bigquery.WriteDisposition.WRITE_TRUNCATE if first else bigquery.WriteDisposition.WRITE_APPEND
@@ -379,14 +387,16 @@ def ingest_upload_file(file_storage, source: str = "UPLOAD_PAINEL") -> Dict[str,
         if first:
             raise ValueError("CSV vazio ou sem linhas válidas para importar.")
 
+    # =====================
     # XLSX
+    # =====================
     elif filename_lower.endswith(".xlsx") or filename_lower.endswith(".xls"):
         try:
             file_storage.stream.seek(0)
         except Exception:
             pass
 
-        df = pd.read_excel(file_storage.stream, dtype=str)
+        df = pd.read_excel(file_storage.stream, dtype=str, keep_default_na=False)
         df = _apply_transformations(df)
 
         job = _load_df(df, bigquery.WriteDisposition.WRITE_TRUNCATE)
@@ -396,7 +406,9 @@ def ingest_upload_file(file_storage, source: str = "UPLOAD_PAINEL") -> Dict[str,
     else:
         raise ValueError("Formato inválido. Envie CSV ou XLSX.")
 
+    # =====================
     # chama pipeline
+    # =====================
     pipeline_sql = f"CALL `{proc_id}`(@fn);"
     pipeline_job = client.query(
         pipeline_sql,
