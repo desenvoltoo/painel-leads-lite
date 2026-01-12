@@ -1,6 +1,5 @@
 # -*- coding: utf-8 -*-
 import os
-import io
 from datetime import datetime
 from typing import Any, Dict, List
 
@@ -31,6 +30,8 @@ def _table_ref() -> str:
 
 
 def _date_field() -> str:
+    # ⚠️ GARANTA que exista na VIEW.
+    # No seu log: a view tem "data_inscricao" (não "data_inscricao_dt")
     return _env("BQ_DATE_FIELD", "data_inscricao")
 
 
@@ -68,17 +69,30 @@ def _to_bool(v):
 
 
 def _normalize_datetime_cols(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    ✅ DIFERENÇA PRINCIPAL:
+    - NÃO transforma datetime em string.
+    - Mantém dtype datetime64 (para DATETIME/TIMESTAMP) e date (para DATE).
+    Assim o load_table_from_dataframe não quebra no pyarrow.
+    """
+    df = df.copy()
+
+    # DATETIME no BigQuery -> datetime64[ns] (naive)
     dt_cols = ("data_envio_dt", "data_inscricao_dt", "data_disparo_dt", "data_contato_dt")
     for col in dt_cols:
         if col in df.columns:
-            parsed = pd.to_datetime(df[col], errors="coerce")
-            df[col] = parsed.dt.strftime("%Y-%m-%d %H:%M:%S").fillna("")
+            parsed = pd.to_datetime(df[col], errors="coerce", utc=False)
+            # garante "naive"
+            if getattr(parsed.dt, "tz", None) is not None:
+                parsed = parsed.dt.tz_convert(None)
+            df[col] = parsed
 
+    # DATE no BigQuery -> date (object com datetime.date) ou datetime64 normalizado
     d_cols = ("data_matricula_d", "data_nascimento_d")
     for col in d_cols:
         if col in df.columns:
             parsed = pd.to_datetime(df[col], errors="coerce")
-            df[col] = parsed.dt.strftime("%Y-%m-%d").fillna("")
+            df[col] = parsed.dt.date  # vira datetime.date; NaT vira NaT/NaN
 
     return df
 
@@ -108,12 +122,12 @@ def query_leads(filters: Dict[str, Any]) -> List[Dict[str, Any]]:
 
     job_config = bigquery.QueryJobConfig(
         query_parameters=[
-            bigquery.ScalarQueryParameter("status", "STRING", filters.get("status")),
-            bigquery.ScalarQueryParameter("curso", "STRING", filters.get("curso")),
-            bigquery.ScalarQueryParameter("polo", "STRING", filters.get("polo")),
-            bigquery.ScalarQueryParameter("origem", "STRING", filters.get("origem")),
-            bigquery.ScalarQueryParameter("data_ini", "STRING", filters.get("data_ini")),
-            bigquery.ScalarQueryParameter("data_fim", "STRING", filters.get("data_fim")),
+            bigquery.ScalarQueryParameter("status", "STRING", filters.get("status") or None),
+            bigquery.ScalarQueryParameter("curso", "STRING", filters.get("curso") or None),
+            bigquery.ScalarQueryParameter("polo", "STRING", filters.get("polo") or None),
+            bigquery.ScalarQueryParameter("origem", "STRING", filters.get("origem") or None),
+            bigquery.ScalarQueryParameter("data_ini", "STRING", filters.get("data_ini") or None),
+            bigquery.ScalarQueryParameter("data_fim", "STRING", filters.get("data_fim") or None),
             bigquery.ScalarQueryParameter("limit", "INT64", int(filters.get("limit") or 500)),
         ]
     )
@@ -152,12 +166,12 @@ def query_kpis(filters: Dict[str, Any]) -> Dict[str, Any]:
 
     job_config = bigquery.QueryJobConfig(
         query_parameters=[
-            bigquery.ScalarQueryParameter("status", "STRING", filters.get("status")),
-            bigquery.ScalarQueryParameter("curso", "STRING", filters.get("curso")),
-            bigquery.ScalarQueryParameter("polo", "STRING", filters.get("polo")),
-            bigquery.ScalarQueryParameter("origem", "STRING", filters.get("origem")),
-            bigquery.ScalarQueryParameter("data_ini", "STRING", filters.get("data_ini")),
-            bigquery.ScalarQueryParameter("data_fim", "STRING", filters.get("data_fim")),
+            bigquery.ScalarQueryParameter("status", "STRING", filters.get("status") or None),
+            bigquery.ScalarQueryParameter("curso", "STRING", filters.get("curso") or None),
+            bigquery.ScalarQueryParameter("polo", "STRING", filters.get("polo") or None),
+            bigquery.ScalarQueryParameter("origem", "STRING", filters.get("origem") or None),
+            bigquery.ScalarQueryParameter("data_ini", "STRING", filters.get("data_ini") or None),
+            bigquery.ScalarQueryParameter("data_fim", "STRING", filters.get("data_fim") or None),
         ]
     )
 
@@ -204,14 +218,9 @@ def query_options() -> Dict[str, List[str]]:
 
 
 # ============================================================
-# UPLOAD + PIPELINE (OPÇÃO B) - ARRUMADO (CHUNKS + BAIXA MEMÓRIA)
+# UPLOAD + PIPELINE (OPÇÃO B) - CORRIGIDO (SEM ArrowTypeError)
 # ============================================================
 def ingest_upload_file(file_storage, source: str = "UPLOAD_PAINEL") -> Dict[str, Any]:
-    """
-    Fix principal:
-    - CSV: processa em chunks e carrega em append -> evita estouro de RAM no Cloud Run
-    - XLSX: lê inteiro (limitação), mas com validações e limpeza
-    """
     project = _env("GCP_PROJECT_ID")
     dataset = _env("BQ_DATASET")
     location = _env("BQ_LOCATION", "us-central1")
@@ -230,7 +239,6 @@ def ingest_upload_file(file_storage, source: str = "UPLOAD_PAINEL") -> Dict[str,
 
     client = _client()
 
-    # Schema fixo do staging (garante compatibilidade)
     schema = [
         bigquery.SchemaField("origem", "STRING"),
         bigquery.SchemaField("polo", "STRING"),
@@ -265,37 +273,45 @@ def ingest_upload_file(file_storage, source: str = "UPLOAD_PAINEL") -> Dict[str,
         bigquery.SchemaField("data_ingestao", "TIMESTAMP"),
     ]
     schema_cols = [f.name for f in schema]
+    dt_cols = {"data_envio_dt", "data_inscricao_dt", "data_disparo_dt", "data_contato_dt"}
+    d_cols = {"data_matricula_d", "data_nascimento_d"}
+    bool_cols = {"matriculado", "inscrito"}
 
     def _ensure_schema_cols(df: pd.DataFrame) -> pd.DataFrame:
         df = df.copy()
         for col in schema_cols:
             if col not in df.columns:
-                df[col] = ""
-        # remove extras e mantém ordem
+                # default certo por tipo
+                if col in dt_cols:
+                    df[col] = pd.NaT
+                elif col in d_cols:
+                    df[col] = pd.NaT
+                elif col in bool_cols:
+                    df[col] = None
+                else:
+                    df[col] = ""
         df = df[schema_cols]
         return df
 
     def _apply_transformations(df: pd.DataFrame) -> pd.DataFrame:
         df = _normalize_cols(df)
 
-        # bools
         for col in ("matriculado", "inscrito"):
             if col in df.columns:
                 df[col] = df[col].apply(_to_bool)
 
-        # datas/datetimes
         df = _normalize_datetime_cols(df)
 
-        # auditoria
         df["origem_upload"] = source
-        df["data_ingestao"] = datetime.utcnow().isoformat()
+        df["data_ingestao"] = pd.Timestamp.utcnow()
 
-        # limpeza de strings
+        # limpa apenas colunas "texto" (não mexe em bool/datas)
         for c in df.columns:
+            if c in dt_cols or c in d_cols or c in bool_cols:
+                continue
             if df[c].dtype == "object":
                 df[c] = df[c].apply(_clean_str)
 
-        # garante schema final
         df = _ensure_schema_cols(df)
         return df
 
@@ -318,11 +334,10 @@ def ingest_upload_file(file_storage, source: str = "UPLOAD_PAINEL") -> Dict[str,
     rows_loaded_total = 0
     last_load_job_id = None
 
-    # CSV: chunks (principal correção)
+    # CSV em chunks (recomendado)
     if filename_lower.endswith(".csv"):
         chunksize = int(_env("UPLOAD_CHUNKSIZE", "20000"))
 
-        # volta ponteiro
         try:
             file_storage.stream.seek(0)
         except Exception:
@@ -348,21 +363,12 @@ def ingest_upload_file(file_storage, source: str = "UPLOAD_PAINEL") -> Dict[str,
         if first:
             raise ValueError("CSV vazio ou sem linhas válidas para importar.")
 
-    # XLSX: lê inteiro (limitação)
+    # XLSX (carrega inteiro)
     elif filename_lower.endswith(".xlsx") or filename_lower.endswith(".xls"):
-        max_mb = int(_env("UPLOAD_MAX_XLSX_MB", "30"))
-
         try:
-            file_storage.stream.seek(0, os.SEEK_END)
-            size_mb = file_storage.stream.tell() / (1024 * 1024)
             file_storage.stream.seek(0)
-            if size_mb > max_mb:
-                raise ValueError(f"Arquivo XLSX muito grande ({size_mb:.1f} MB). Converta para CSV para importar.")
         except Exception:
-            try:
-                file_storage.stream.seek(0)
-            except Exception:
-                pass
+            pass
 
         df = pd.read_excel(file_storage.stream, dtype=str)
         df = _apply_transformations(df)
@@ -374,7 +380,7 @@ def ingest_upload_file(file_storage, source: str = "UPLOAD_PAINEL") -> Dict[str,
     else:
         raise ValueError("Formato inválido. Envie CSV ou XLSX.")
 
-    # roda pipeline
+    # pipeline
     pipeline_job = client.query(
         f"CALL `{proc_id}`(@fn);",
         job_config=bigquery.QueryJobConfig(
