@@ -204,7 +204,7 @@ def query_options() -> Dict[str, List[str]]:
 
 
 # ============================================================
-# UPLOAD + PROMOTE (STAGING FIXA)
+# UPLOAD + PIPELINE (OPÇÃO B)
 # ============================================================
 def ingest_upload_file(file_storage, source: str = "UPLOAD_PAINEL") -> Dict[str, Any]:
     project = _env("GCP_PROJECT_ID")
@@ -212,16 +212,17 @@ def ingest_upload_file(file_storage, source: str = "UPLOAD_PAINEL") -> Dict[str,
     location = _env("BQ_LOCATION", "us-central1")
 
     upload_table = _env("BQ_UPLOAD_TABLE", "stg_leads_upload")
-    promote_proc = _env("BQ_PROMOTE_PROC", "sp_promote_stg_leads_upload")
+    pipeline_proc = _env("BQ_PIPELINE_PROC", "sp_v9_run_pipeline")
 
     stg_table_id = f"{project}.{dataset}.{upload_table}"
-    proc_id = f"{project}.{dataset}.{promote_proc}"
+    proc_id = f"{project}.{dataset}.{pipeline_proc}"
 
-    filename = (file_storage.filename or "").lower()
+    filename = (file_storage.filename or "").strip()
+    filename_lower = filename.lower()
 
-    if filename.endswith(".csv"):
+    if filename_lower.endswith(".csv"):
         df = pd.read_csv(file_storage, dtype=str, sep=None, engine="python")
-    elif filename.endswith(".xlsx") or filename.endswith(".xls"):
+    elif filename_lower.endswith(".xlsx") or filename_lower.endswith(".xls"):
         df = pd.read_excel(file_storage, dtype=str)
     else:
         raise ValueError("Formato inválido. Envie CSV ou XLSX.")
@@ -290,6 +291,7 @@ def ingest_upload_file(file_storage, source: str = "UPLOAD_PAINEL") -> Dict[str,
 
     client = _client()
 
+    # 1) carrega no staging fixo
     load_job = client.load_table_from_file(
         io.BytesIO(csv_bytes),
         stg_table_id,
@@ -298,18 +300,25 @@ def ingest_upload_file(file_storage, source: str = "UPLOAD_PAINEL") -> Dict[str,
     )
     load_job.result()
 
-    promote_job = client.query(
-        f"CALL `{proc_id}`();",
+    # 2) roda pipeline completa (upload -> base -> stg_import_star -> dims -> fato)
+    pipeline_job = client.query(
+        f"CALL `{proc_id}`(@fn);",
+        job_config=bigquery.QueryJobConfig(
+            query_parameters=[
+                bigquery.ScalarQueryParameter("fn", "STRING", filename)
+            ]
+        ),
         location=location,
     )
-    promote_job.result()
+    pipeline_job.result()
 
     return {
         "staging_table": stg_table_id,
         "rows_loaded": int(load_job.output_rows or 0),
         "load_job_id": load_job.job_id,
-        "promote_proc": proc_id,
-        "promote_job_id": promote_job.job_id,
+        "pipeline_proc": proc_id,
+        "pipeline_job_id": pipeline_job.job_id,
+        "filename": filename,
     }
 
 
