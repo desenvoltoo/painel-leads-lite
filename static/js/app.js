@@ -313,17 +313,22 @@ async function exportCsvFromFilters() {
 function bindExport() {
   // Botão do topo (já existe)
   const btnTop = $("#btnExport");
-  // Botão novo ao lado do Limpar (que você adicionou no HTML)
+
+  // Botão novo ao lado do Limpar
   const btnFilters = $("#btnExportFilters");
 
   const handler = async (e) => {
     e.preventDefault();
+    e.stopPropagation();
+
+    showToast("Exportando CSV...", "ok");
     await exportCsvFromFilters();
   };
 
   if (btnTop) btnTop.addEventListener("click", handler);
   if (btnFilters) btnFilters.addEventListener("click", handler);
 }
+
 
 /* ============================================================
    Bind filters (apply/clear + auto refresh on typing)
