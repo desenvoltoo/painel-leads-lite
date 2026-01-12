@@ -204,9 +204,14 @@ def query_options() -> Dict[str, List[str]]:
 
 
 # ============================================================
-# UPLOAD + PIPELINE (OPÇÃO B)
+# UPLOAD + PIPELINE (OPÇÃO B) - ARRUMADO (CHUNKS + BAIXA MEMÓRIA)
 # ============================================================
 def ingest_upload_file(file_storage, source: str = "UPLOAD_PAINEL") -> Dict[str, Any]:
+    """
+    Fix principal:
+    - CSV: processa em chunks e carrega em append -> evita estouro de RAM no Cloud Run
+    - XLSX: lê inteiro (limitação), mas com validações e limpeza
+    """
     project = _env("GCP_PROJECT_ID")
     dataset = _env("BQ_DATASET")
     location = _env("BQ_LOCATION", "us-central1")
@@ -214,36 +219,18 @@ def ingest_upload_file(file_storage, source: str = "UPLOAD_PAINEL") -> Dict[str,
     upload_table = _env("BQ_UPLOAD_TABLE", "stg_leads_upload")
     pipeline_proc = _env("BQ_PIPELINE_PROC", "sp_v9_run_pipeline")
 
+    if not project or not dataset:
+        raise RuntimeError("Faltam envs: GCP_PROJECT_ID, BQ_DATASET")
+
     stg_table_id = f"{project}.{dataset}.{upload_table}"
     proc_id = f"{project}.{dataset}.{pipeline_proc}"
 
     filename = (file_storage.filename or "").strip()
     filename_lower = filename.lower()
 
-    if filename_lower.endswith(".csv"):
-        df = pd.read_csv(file_storage, dtype=str, sep=None, engine="python")
-    elif filename_lower.endswith(".xlsx") or filename_lower.endswith(".xls"):
-        df = pd.read_excel(file_storage, dtype=str)
-    else:
-        raise ValueError("Formato inválido. Envie CSV ou XLSX.")
+    client = _client()
 
-    df = _normalize_cols(df)
-
-    for col in ("matriculado", "inscrito"):
-        if col in df.columns:
-            df[col] = df[col].apply(_to_bool)
-
-    df = _normalize_datetime_cols(df)
-
-    df["origem_upload"] = source
-    df["data_ingestao"] = datetime.utcnow().isoformat()
-
-    for c in df.columns:
-        if df[c].dtype == "object":
-            df[c] = df[c].apply(_clean_str)
-
-    csv_bytes = df.to_csv(index=False, encoding="utf-8").encode("utf-8")
-
+    # Schema fixo do staging (garante compatibilidade)
     schema = [
         bigquery.SchemaField("origem", "STRING"),
         bigquery.SchemaField("polo", "STRING"),
@@ -277,36 +264,121 @@ def ingest_upload_file(file_storage, source: str = "UPLOAD_PAINEL") -> Dict[str,
         bigquery.SchemaField("origem_upload", "STRING"),
         bigquery.SchemaField("data_ingestao", "TIMESTAMP"),
     ]
+    schema_cols = [f.name for f in schema]
 
-    job_config = bigquery.LoadJobConfig(
-        source_format=bigquery.SourceFormat.CSV,
-        skip_leading_rows=1,
-        write_disposition=bigquery.WriteDisposition.WRITE_TRUNCATE,
-        create_disposition=bigquery.CreateDisposition.CREATE_NEVER,
-        allow_quoted_newlines=True,
-        ignore_unknown_values=True,
-        schema=schema,
-        autodetect=False,
-    )
+    def _ensure_schema_cols(df: pd.DataFrame) -> pd.DataFrame:
+        df = df.copy()
+        for col in schema_cols:
+            if col not in df.columns:
+                df[col] = ""
+        # remove extras e mantém ordem
+        df = df[schema_cols]
+        return df
 
-    client = _client()
+    def _apply_transformations(df: pd.DataFrame) -> pd.DataFrame:
+        df = _normalize_cols(df)
 
-    # 1) carrega no staging fixo
-    load_job = client.load_table_from_file(
-        io.BytesIO(csv_bytes),
-        stg_table_id,
-        job_config=job_config,
-        location=location,
-    )
-    load_job.result()
+        # bools
+        for col in ("matriculado", "inscrito"):
+            if col in df.columns:
+                df[col] = df[col].apply(_to_bool)
 
-    # 2) roda pipeline completa (upload -> base -> stg_import_star -> dims -> fato)
+        # datas/datetimes
+        df = _normalize_datetime_cols(df)
+
+        # auditoria
+        df["origem_upload"] = source
+        df["data_ingestao"] = datetime.utcnow().isoformat()
+
+        # limpeza de strings
+        for c in df.columns:
+            if df[c].dtype == "object":
+                df[c] = df[c].apply(_clean_str)
+
+        # garante schema final
+        df = _ensure_schema_cols(df)
+        return df
+
+    def _load_df(df: pd.DataFrame, write_disposition: str) -> bigquery.LoadJob:
+        job_config = bigquery.LoadJobConfig(
+            write_disposition=write_disposition,
+            schema=schema,
+            autodetect=False,
+            ignore_unknown_values=True,
+        )
+        job = client.load_table_from_dataframe(
+            df,
+            stg_table_id,
+            job_config=job_config,
+            location=location,
+        )
+        job.result()
+        return job
+
+    rows_loaded_total = 0
+    last_load_job_id = None
+
+    # CSV: chunks (principal correção)
+    if filename_lower.endswith(".csv"):
+        chunksize = int(_env("UPLOAD_CHUNKSIZE", "20000"))
+
+        # volta ponteiro
+        try:
+            file_storage.stream.seek(0)
+        except Exception:
+            pass
+
+        first = True
+        for chunk in pd.read_csv(
+            file_storage.stream,
+            dtype=str,
+            sep=None,
+            engine="python",
+            chunksize=chunksize,
+        ):
+            chunk = _apply_transformations(chunk)
+
+            wd = bigquery.WriteDisposition.WRITE_TRUNCATE if first else bigquery.WriteDisposition.WRITE_APPEND
+            job = _load_df(chunk, wd)
+
+            rows_loaded_total += int(job.output_rows or 0)
+            last_load_job_id = job.job_id
+            first = False
+
+        if first:
+            raise ValueError("CSV vazio ou sem linhas válidas para importar.")
+
+    # XLSX: lê inteiro (limitação)
+    elif filename_lower.endswith(".xlsx") or filename_lower.endswith(".xls"):
+        max_mb = int(_env("UPLOAD_MAX_XLSX_MB", "30"))
+
+        try:
+            file_storage.stream.seek(0, os.SEEK_END)
+            size_mb = file_storage.stream.tell() / (1024 * 1024)
+            file_storage.stream.seek(0)
+            if size_mb > max_mb:
+                raise ValueError(f"Arquivo XLSX muito grande ({size_mb:.1f} MB). Converta para CSV para importar.")
+        except Exception:
+            try:
+                file_storage.stream.seek(0)
+            except Exception:
+                pass
+
+        df = pd.read_excel(file_storage.stream, dtype=str)
+        df = _apply_transformations(df)
+
+        job = _load_df(df, bigquery.WriteDisposition.WRITE_TRUNCATE)
+        rows_loaded_total = int(job.output_rows or 0)
+        last_load_job_id = job.job_id
+
+    else:
+        raise ValueError("Formato inválido. Envie CSV ou XLSX.")
+
+    # roda pipeline
     pipeline_job = client.query(
         f"CALL `{proc_id}`(@fn);",
         job_config=bigquery.QueryJobConfig(
-            query_parameters=[
-                bigquery.ScalarQueryParameter("fn", "STRING", filename)
-            ]
+            query_parameters=[bigquery.ScalarQueryParameter("fn", "STRING", filename)]
         ),
         location=location,
     )
@@ -314,8 +386,8 @@ def ingest_upload_file(file_storage, source: str = "UPLOAD_PAINEL") -> Dict[str,
 
     return {
         "staging_table": stg_table_id,
-        "rows_loaded": int(load_job.output_rows or 0),
-        "load_job_id": load_job.job_id,
+        "rows_loaded": int(rows_loaded_total),
+        "load_job_id": last_load_job_id,
         "pipeline_proc": proc_id,
         "pipeline_job_id": pipeline_job.job_id,
         "filename": filename,
