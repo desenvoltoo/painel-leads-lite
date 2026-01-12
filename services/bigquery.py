@@ -8,30 +8,46 @@ from google.cloud import bigquery
 
 
 # ============================================================
-# ENV / CLIENT
+# ENV / CLIENT (ATUALIZADO E À PROVA DE CLOUD RUN)
 # ============================================================
 def _env(name: str, default: str = "") -> str:
     v = os.getenv(name)
+    v = v.strip() if isinstance(v, str) else v
     return v if v else default
 
 
+def _require_env(names: List[str]) -> Dict[str, str]:
+    values = {n: _env(n, "") for n in names}
+    missing = [n for n, v in values.items() if not v]
+    if missing:
+        snapshot = {n: (values.get(n) or None) for n in names}
+        raise RuntimeError(f"ENV obrigatórias faltando: {missing} | snapshot={snapshot}")
+    return values
+
+
 def _client() -> bigquery.Client:
-    project = _env("GCP_PROJECT_ID")
+    # ✅ default alinhado com seu projeto
+    project = _env("GCP_PROJECT_ID", "painel-universidade")
     return bigquery.Client(project=project) if project else bigquery.Client()
 
 
 def _table_ref() -> str:
-    project = _env("GCP_PROJECT_ID")
-    dataset = _env("BQ_DATASET")
-    view = _env("BQ_VIEW_LEADS")
-    if not project or not dataset or not view:
-        raise RuntimeError("Faltam envs: GCP_PROJECT_ID, BQ_DATASET, BQ_VIEW_LEADS")
+    """
+    ✅ Não quebra se BQ_DATASET/BQ_VIEW_LEADS não vierem no Cloud Run.
+    Usa defaults do seu ambiente.
+    """
+    project = _env("GCP_PROJECT_ID", "painel-universidade")
+    dataset = _env("BQ_DATASET", "modelo_estrela")
+    view = _env("BQ_VIEW_LEADS", "vw_leads_painel_lite")
+
+    if not project:
+        _require_env(["GCP_PROJECT_ID"])
+
     return f"`{project}.{dataset}.{view}`"
 
 
 def _date_field() -> str:
-    # ⚠️ GARANTA que exista na VIEW.
-    # No seu log: a view tem "data_inscricao" (não "data_inscricao_dt")
+    # default conforme sua config
     return _env("BQ_DATE_FIELD", "data_inscricao")
 
 
@@ -44,7 +60,7 @@ def _date_expr() -> str:
 # ============================================================
 def _normalize_cols(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
-    df.columns = [c.strip().lower() for c in df.columns]
+    df.columns = [str(c).strip().lower() for c in df.columns]
     return df
 
 
@@ -70,29 +86,25 @@ def _to_bool(v):
 
 def _normalize_datetime_cols(df: pd.DataFrame) -> pd.DataFrame:
     """
-    ✅ DIFERENÇA PRINCIPAL:
-    - NÃO transforma datetime em string.
-    - Mantém dtype datetime64 (para DATETIME/TIMESTAMP) e date (para DATE).
-    Assim o load_table_from_dataframe não quebra no pyarrow.
+    - Mantém datetime como datetime64[ns] (naive)
+    - DATE vira datetime.date
     """
     df = df.copy()
 
-    # DATETIME no BigQuery -> datetime64[ns] (naive)
     dt_cols = ("data_envio_dt", "data_inscricao_dt", "data_disparo_dt", "data_contato_dt")
     for col in dt_cols:
         if col in df.columns:
             parsed = pd.to_datetime(df[col], errors="coerce", utc=False)
-            # garante "naive"
+            # garante naive
             if getattr(parsed.dt, "tz", None) is not None:
                 parsed = parsed.dt.tz_convert(None)
             df[col] = parsed
 
-    # DATE no BigQuery -> date (object com datetime.date) ou datetime64 normalizado
     d_cols = ("data_matricula_d", "data_nascimento_d")
     for col in d_cols:
         if col in df.columns:
             parsed = pd.to_datetime(df[col], errors="coerce")
-            df[col] = parsed.dt.date  # vira datetime.date; NaT vira NaT/NaN
+            df[col] = parsed.dt.date
 
     return df
 
@@ -203,7 +215,6 @@ def _distinct(column: str, limit: int = 250) -> List[str]:
     job_config = bigquery.QueryJobConfig(
         query_parameters=[bigquery.ScalarQueryParameter("limit", "INT64", limit)]
     )
-
     rows = _client().query(sql, job_config=job_config).result()
     return [str(r.get("v")) for r in rows if r.get("v")]
 
@@ -218,23 +229,27 @@ def query_options() -> Dict[str, List[str]]:
 
 
 # ============================================================
-# UPLOAD + PIPELINE (OPÇÃO B) - CORRIGIDO (SEM ArrowTypeError)
+# UPLOAD + PIPELINE (CORRIGIDO)
 # ============================================================
 def ingest_upload_file(file_storage, source: str = "UPLOAD_PAINEL") -> Dict[str, Any]:
-    project = _env("GCP_PROJECT_ID")
-    dataset = _env("BQ_DATASET")
+    """
+    Carrega CSV/XLSX em stg_leads_upload e executa procedure do pipeline.
+    """
+    # ✅ defaults alinhados ao seu ambiente (não quebra se Cloud Run falhar no set)
+    project = _env("GCP_PROJECT_ID", "painel-universidade")
+    dataset = _env("BQ_DATASET", "modelo_estrela")
     location = _env("BQ_LOCATION", "us-central1")
 
     upload_table = _env("BQ_UPLOAD_TABLE", "stg_leads_upload")
     pipeline_proc = _env("BQ_PIPELINE_PROC", "sp_v9_run_pipeline")
 
     if not project or not dataset:
-        raise RuntimeError("Faltam envs: GCP_PROJECT_ID, BQ_DATASET")
+        _require_env(["GCP_PROJECT_ID", "BQ_DATASET"])
 
     stg_table_id = f"{project}.{dataset}.{upload_table}"
     proc_id = f"{project}.{dataset}.{pipeline_proc}"
 
-    filename = (file_storage.filename or "").strip()
+    filename = (getattr(file_storage, "filename", "") or "").strip()
     filename_lower = filename.lower()
 
     client = _client()
@@ -272,6 +287,7 @@ def ingest_upload_file(file_storage, source: str = "UPLOAD_PAINEL") -> Dict[str,
         bigquery.SchemaField("origem_upload", "STRING"),
         bigquery.SchemaField("data_ingestao", "TIMESTAMP"),
     ]
+
     schema_cols = [f.name for f in schema]
     dt_cols = {"data_envio_dt", "data_inscricao_dt", "data_disparo_dt", "data_contato_dt"}
     d_cols = {"data_matricula_d", "data_nascimento_d"}
@@ -281,7 +297,6 @@ def ingest_upload_file(file_storage, source: str = "UPLOAD_PAINEL") -> Dict[str,
         df = df.copy()
         for col in schema_cols:
             if col not in df.columns:
-                # default certo por tipo
                 if col in dt_cols:
                     df[col] = pd.NaT
                 elif col in d_cols:
@@ -290,22 +305,24 @@ def ingest_upload_file(file_storage, source: str = "UPLOAD_PAINEL") -> Dict[str,
                     df[col] = None
                 else:
                     df[col] = ""
-        df = df[schema_cols]
-        return df
+        return df[schema_cols]
 
     def _apply_transformations(df: pd.DataFrame) -> pd.DataFrame:
         df = _normalize_cols(df)
 
+        # bool
         for col in ("matriculado", "inscrito"):
             if col in df.columns:
                 df[col] = df[col].apply(_to_bool)
 
+        # datas (mantém dtype correto)
         df = _normalize_datetime_cols(df)
 
+        # origem/upload metadata
         df["origem_upload"] = source
         df["data_ingestao"] = pd.Timestamp.utcnow()
 
-        # limpa apenas colunas "texto" (não mexe em bool/datas)
+        # limpa strings sem mexer em datas/bools
         for c in df.columns:
             if c in dt_cols or c in d_cols or c in bool_cols:
                 continue
@@ -334,7 +351,7 @@ def ingest_upload_file(file_storage, source: str = "UPLOAD_PAINEL") -> Dict[str,
     rows_loaded_total = 0
     last_load_job_id = None
 
-    # CSV em chunks (recomendado)
+    # CSV em chunks
     if filename_lower.endswith(".csv"):
         chunksize = int(_env("UPLOAD_CHUNKSIZE", "20000"))
 
@@ -352,7 +369,6 @@ def ingest_upload_file(file_storage, source: str = "UPLOAD_PAINEL") -> Dict[str,
             chunksize=chunksize,
         ):
             chunk = _apply_transformations(chunk)
-
             wd = bigquery.WriteDisposition.WRITE_TRUNCATE if first else bigquery.WriteDisposition.WRITE_APPEND
             job = _load_df(chunk, wd)
 
@@ -363,7 +379,7 @@ def ingest_upload_file(file_storage, source: str = "UPLOAD_PAINEL") -> Dict[str,
         if first:
             raise ValueError("CSV vazio ou sem linhas válidas para importar.")
 
-    # XLSX (carrega inteiro)
+    # XLSX
     elif filename_lower.endswith(".xlsx") or filename_lower.endswith(".xls"):
         try:
             file_storage.stream.seek(0)
@@ -380,9 +396,10 @@ def ingest_upload_file(file_storage, source: str = "UPLOAD_PAINEL") -> Dict[str,
     else:
         raise ValueError("Formato inválido. Envie CSV ou XLSX.")
 
-    # pipeline
+    # chama pipeline
+    pipeline_sql = f"CALL `{proc_id}`(@fn);"
     pipeline_job = client.query(
-        f"CALL `{proc_id}`(@fn);",
+        pipeline_sql,
         job_config=bigquery.QueryJobConfig(
             query_parameters=[bigquery.ScalarQueryParameter("fn", "STRING", filename)]
         ),
