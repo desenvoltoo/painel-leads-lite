@@ -24,6 +24,16 @@ def _require_env(names: List[str]) -> Dict[str, str]:
     return values
 
 
+def _bq_location() -> str:
+    """
+    IMPORTANTÍSSIMO:
+    - Se seu dataset for multi-região: use "US" (ou "EU")
+    - Se seu dataset for região: "us-central1"
+    Ajuste via env BQ_LOCATION.
+    """
+    return _env("BQ_LOCATION", "us-central1")
+
+
 def _client() -> bigquery.Client:
     project = _env("GCP_PROJECT_ID", "painel-universidade")
     return bigquery.Client(project=project) if project else bigquery.Client()
@@ -35,7 +45,7 @@ def _table_ref() -> str:
     """
     project = _env("GCP_PROJECT_ID", "painel-universidade")
     dataset = _env("BQ_DATASET", "modelo_estrela")
-    view = _env("BQ_VIEW_LEADS", "vw_leads_painel_lite")
+    view = _env("BQ_VIEW_LEADS", "vw_leads_painel_lite")  # ajuste se precisar
 
     if not project:
         _require_env(["GCP_PROJECT_ID"])
@@ -44,12 +54,20 @@ def _table_ref() -> str:
 
 
 def _date_field() -> str:
-    # se sua view tiver data_inscricao_dt, troque via env BQ_DATE_FIELD
-    return _env("BQ_DATE_FIELD", "data_inscricao_dt")
+    """
+    Sua view (pelo SQL que você mandou) expõe:
+      DATE(v.data_inscricao_dt) AS data_inscricao
+
+    Então o padrão certo aqui é "data_inscricao".
+    Se sua view tiver data_inscricao_dt, troque via env BQ_DATE_FIELD.
+    """
+    return _env("BQ_DATE_FIELD", "data_inscricao")
 
 
 def _date_expr() -> str:
-    # sempre converte pra DATE com segurança
+    """
+    Sempre converte pra DATE com segurança.
+    """
     return f"DATE({_date_field()})"
 
 
@@ -92,9 +110,7 @@ def _normalize_datetime_cols(df: pd.DataFrame) -> pd.DataFrame:
     dt_cols = ("data_envio_dt", "data_inscricao_dt", "data_disparo_dt", "data_contato_dt")
     for col in dt_cols:
         if col in df.columns:
-            # ✅ parse robusto: se vier com "Z" ou offset, converte pra UTC e remove tz
             parsed = pd.to_datetime(df[col], errors="coerce", utc=True)
-            # parsed é tz-aware; converte para naive
             df[col] = parsed.dt.tz_convert(None)
 
     d_cols = ("data_matricula_d", "data_nascimento_d")
@@ -129,7 +145,6 @@ def query_leads(filters: Dict[str, Any]) -> List[Dict[str, Any]]:
     LIMIT @limit
     """
 
-    # ✅ usa DATE de verdade (evita casts e bugs de string)
     data_ini = filters.get("data_ini") or None
     data_fim = filters.get("data_fim") or None
 
@@ -145,7 +160,7 @@ def query_leads(filters: Dict[str, Any]) -> List[Dict[str, Any]]:
         ]
     )
 
-    rows = _client().query(sql, job_config=job_config).result()
+    rows = _client().query(sql, job_config=job_config, location=_bq_location()).result()
     return [{k: r.get(k) for k in r.keys()} for r in rows]
 
 
@@ -191,7 +206,7 @@ def query_kpis(filters: Dict[str, Any]) -> Dict[str, Any]:
         ]
     )
 
-    row = next(iter(_client().query(sql, job_config=job_config).result()), None)
+    row = next(iter(_client().query(sql, job_config=job_config, location=_bq_location()).result()), None)
     if not row:
         return {"total": 0, "last_date": None, "top_status": None, "by_status": []}
 
@@ -219,7 +234,7 @@ def _distinct(column: str, limit: int = 250) -> List[str]:
     job_config = bigquery.QueryJobConfig(
         query_parameters=[bigquery.ScalarQueryParameter("limit", "INT64", limit)]
     )
-    rows = _client().query(sql, job_config=job_config).result()
+    rows = _client().query(sql, job_config=job_config, location=_bq_location()).result()
     return [str(r.get("v")) for r in rows if r.get("v")]
 
 
@@ -241,10 +256,7 @@ def ingest_upload_file(file_storage, source: str = "UPLOAD_PAINEL") -> Dict[str,
     """
     project = _env("GCP_PROJECT_ID", "painel-universidade")
     dataset = _env("BQ_DATASET", "modelo_estrela")
-
-    # ⚠️ BigQuery location tem que bater com a sua dataset
-    # se sua dataset for US multi-region, troque via env para "US"
-    location = _env("BQ_LOCATION", "us-central1")
+    location = _bq_location()
 
     upload_table = _env("BQ_UPLOAD_TABLE", "stg_leads_upload")
     pipeline_proc = _env("BQ_PIPELINE_PROC", "sp_v9_run_pipeline")
@@ -316,19 +328,15 @@ def ingest_upload_file(file_storage, source: str = "UPLOAD_PAINEL") -> Dict[str,
     def _apply_transformations(df: pd.DataFrame) -> pd.DataFrame:
         df = _normalize_cols(df)
 
-        # bool
         for col in ("matriculado", "inscrito"):
             if col in df.columns:
                 df[col] = df[col].apply(_to_bool)
 
-        # datas
         df = _normalize_datetime_cols(df)
 
-        # metadata
         df["origem_upload"] = source
         df["data_ingestao"] = pd.Timestamp.utcnow()
 
-        # limpa strings
         for c in df.columns:
             if c in dt_cols or c in d_cols or c in bool_cols:
                 continue
@@ -356,9 +364,6 @@ def ingest_upload_file(file_storage, source: str = "UPLOAD_PAINEL") -> Dict[str,
     rows_loaded_total = 0
     last_load_job_id = None
 
-    # =====================
-    # CSV (chunks)
-    # =====================
     if filename_lower.endswith(".csv"):
         chunksize = int(_env("UPLOAD_CHUNKSIZE", "20000"))
 
@@ -374,7 +379,7 @@ def ingest_upload_file(file_storage, source: str = "UPLOAD_PAINEL") -> Dict[str,
             sep=None,
             engine="python",
             chunksize=chunksize,
-            keep_default_na=False,  # ✅ evita virar NaN e bagunçar _clean_str
+            keep_default_na=False,
         ):
             chunk = _apply_transformations(chunk)
             wd = bigquery.WriteDisposition.WRITE_TRUNCATE if first else bigquery.WriteDisposition.WRITE_APPEND
@@ -387,9 +392,6 @@ def ingest_upload_file(file_storage, source: str = "UPLOAD_PAINEL") -> Dict[str,
         if first:
             raise ValueError("CSV vazio ou sem linhas válidas para importar.")
 
-    # =====================
-    # XLSX
-    # =====================
     elif filename_lower.endswith(".xlsx") or filename_lower.endswith(".xls"):
         try:
             file_storage.stream.seek(0)
@@ -406,9 +408,7 @@ def ingest_upload_file(file_storage, source: str = "UPLOAD_PAINEL") -> Dict[str,
     else:
         raise ValueError("Formato inválido. Envie CSV ou XLSX.")
 
-    # =====================
-    # chama pipeline
-    # =====================
+    # chama pipeline (com location!)
     pipeline_sql = f"CALL `{proc_id}`(@fn);"
     pipeline_job = client.query(
         pipeline_sql,
@@ -426,6 +426,7 @@ def ingest_upload_file(file_storage, source: str = "UPLOAD_PAINEL") -> Dict[str,
         "pipeline_proc": proc_id,
         "pipeline_job_id": pipeline_job.job_id,
         "filename": filename,
+        "location": location,
     }
 
 
@@ -434,7 +435,7 @@ def ingest_upload_file(file_storage, source: str = "UPLOAD_PAINEL") -> Dict[str,
 # ============================================================
 def debug_count() -> int:
     sql = f"SELECT COUNT(1) c FROM {_table_ref()}"
-    row = next(iter(_client().query(sql).result()), None)
+    row = next(iter(_client().query(sql, location=_bq_location()).result()), None)
     return int(row.get("c") or 0) if row else 0
 
 
@@ -443,5 +444,5 @@ def debug_sample(limit: int = 5):
     job_config = bigquery.QueryJobConfig(
         query_parameters=[bigquery.ScalarQueryParameter("limit", "INT64", limit)]
     )
-    rows = _client().query(sql, job_config=job_config).result()
+    rows = _client().query(sql, job_config=job_config, location=_bq_location()).result()
     return [{k: r.get(k) for k in r.keys()} for r in rows]
