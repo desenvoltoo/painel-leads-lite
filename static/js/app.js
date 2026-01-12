@@ -264,53 +264,65 @@ function bindReload() {
   });
 }
 
-function bindExport() {
-  const btn = $("#btnExport");
-  if (!btn) return;
+/* ============================================================
+   Export helper (reaproveitado pelos 2 botões)
+============================================================ */
+async function exportCsvFromFilters() {
+  try {
+    readFiltersFromUI();
+    const data = await apiGet("/api/leads", state.filters);
+    const rows = data?.rows || [];
 
-  btn.addEventListener("click", async (e) => {
-    e.preventDefault();
-    try {
-      readFiltersFromUI();
-      const data = await apiGet("/api/leads", state.filters);
-      const rows = data?.rows || [];
-
-      if (!rows.length) {
-        showToast("Nada para exportar com esses filtros.", "warn");
-        return;
-      }
-
-      const headers = [
-        "data_inscricao","nome","cpf","celular","email",
-        "origem","polo","curso","status","consultor"
-      ];
-
-      const csv = [
-        headers.join(","),
-        ...rows.map(r => headers.map(h => {
-          const v = r[h] ?? "";
-          const s = String(v).replaceAll('"', '""');
-          return `"${s}"`;
-        }).join(","))
-      ].join("\n");
-
-      const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
-      const url = URL.createObjectURL(blob);
-
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = `leads_export_${new Date().toISOString().slice(0,10)}.csv`;
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      URL.revokeObjectURL(url);
-
-      showToast("CSV exportado.", "ok");
-    } catch (err) {
-      console.error(err);
-      showToast("Falha ao exportar CSV.", "err");
+    if (!rows.length) {
+      showToast("Nada para exportar com esses filtros.", "warn");
+      return;
     }
-  });
+
+    const headers = [
+      "data_inscricao","nome","cpf","celular","email",
+      "origem","polo","curso","status","consultor"
+    ];
+
+    const csv = [
+      headers.join(","),
+      ...rows.map(r => headers.map(h => {
+        const v = r[h] ?? "";
+        const s = String(v).replaceAll('"', '""');
+        return `"${s}"`;
+      }).join(","))
+    ].join("\n");
+
+    const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `leads_export_${new Date().toISOString().slice(0,10)}.csv`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+
+    showToast("CSV exportado.", "ok");
+  } catch (err) {
+    console.error(err);
+    showToast("Falha ao exportar CSV.", "err");
+  }
+}
+
+function bindExport() {
+  // Botão do topo (já existe)
+  const btnTop = $("#btnExport");
+  // Botão novo ao lado do Limpar (que você adicionou no HTML)
+  const btnFilters = $("#btnExportFilters");
+
+  const handler = async (e) => {
+    e.preventDefault();
+    await exportCsvFromFilters();
+  };
+
+  if (btnTop) btnTop.addEventListener("click", handler);
+  if (btnFilters) btnFilters.addEventListener("click", handler);
 }
 
 /* ============================================================
