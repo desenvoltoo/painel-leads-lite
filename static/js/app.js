@@ -1,5 +1,6 @@
 /* ============================================================
-   Painel Leads Lite — app.js (chips + dropdown custom scroll + export server)
+   Painel Leads Lite — app.js
+   Chips + Dropdown custom (overlay) + infinite scroll + export server
 ============================================================ */
 
 const $ = (sel) => document.querySelector(sel);
@@ -57,6 +58,12 @@ const state = {
     limit: 500,
     curso_list: [],
     polo_list: [],
+  },
+
+  // dropdown runtime
+  dd: {
+    curso: { q: "", idx: 0, filtered: [], open: false },
+    polo: { q: "", idx: 0, filtered: [], open: false },
   },
 };
 
@@ -189,13 +196,17 @@ function renderChips(kind) {
     chip.addEventListener("click", () => {
       _removeValue(list, v);
       renderChips(kind);
+      ddRebuild(kind); // atualiza tags "Selecionado"
     });
     box.appendChild(chip);
   });
 }
 
 /* ============================================================
-   Dropdown custom (scroll + filtro)
+   Dropdown custom — overlay + busca + infinite scroll
+   Requisitos no HTML:
+   - input #fCurso e dropdown div #ddCursos
+   - input #fPolo e dropdown div #ddPolos
 ============================================================ */
 function ddGet(kind) {
   return kind === "curso" ? $("#ddCursos") : $("#ddPolos");
@@ -203,75 +214,186 @@ function ddGet(kind) {
 function ddInput(kind) {
   return kind === "curso" ? $("#fCurso") : $("#fPolo");
 }
-function ddOptions(kind) {
+function ddAll(kind) {
   return kind === "curso" ? (state.options.curso || []) : (state.options.polo || []);
 }
 function ddSelected(kind) {
   return kind === "curso" ? state.filters.curso_list : state.filters.polo_list;
+}
+function ddState(kind) {
+  return kind === "curso" ? state.dd.curso : state.dd.polo;
 }
 
 function ddOpen(kind) {
   const dd = ddGet(kind);
   if (!dd) return;
   dd.hidden = false;
+  ddState(kind).open = true;
 }
 function ddClose(kind) {
   const dd = ddGet(kind);
   if (!dd) return;
   dd.hidden = true;
+  ddState(kind).open = false;
 }
 
-function ddRender(kind) {
+function ddMakeRow(kind, v) {
+  const selected = ddSelected(kind);
+  const isOn = selected.some((x) => String(x).trim().toUpperCase() === String(v).trim().toUpperCase());
+
+  const row = document.createElement("div");
+  row.className = "dd-item" + (isOn ? " dd-on" : "");
+  row.innerHTML = `
+    <div class="dd-text">${escapeHtml(v)}</div>
+    <div class="dd-tag">${isOn ? "Selecionado" : "Adicionar"}</div>
+  `;
+
+  row.addEventListener("mousedown", (e) => {
+    e.preventDefault(); // evita blur antes do click
+    if (isOn) _removeValue(selected, v);
+    else _uniqPush(selected, v);
+
+    renderChips(kind);
+    ddRebuild(kind);       // reflete "Selecionado"
+    loadLeadsAndKpisDebounced();
+  });
+
+  return row;
+}
+
+function ddFilterList(kind, qUpper) {
+  const all = ddAll(kind);
+  if (!qUpper) return all.slice(); // copia
+
+  // filtra sem travar: percorre tudo, mas só monta array simples
+  const out = [];
+  for (let i = 0; i < all.length; i++) {
+    const v = String(all[i] || "");
+    if (!v) continue;
+    if (v.toUpperCase().includes(qUpper)) out.push(v);
+  }
+  return out;
+}
+
+// carrega por lote (infinite scroll)
+const DD_BATCH = 350;
+
+function ddRenderNext(kind) {
+  const dd = ddGet(kind);
+  const st = ddState(kind);
+  if (!dd) return;
+
+  // se vazio, mostra empty
+  if (!st.filtered || st.filtered.length === 0) {
+    dd.innerHTML = `<div class="dd-empty muted">Nada encontrado.</div>`;
+    st.idx = 0;
+    return;
+  }
+
+  // primeira renderização limpa e cria “top spacer” opcional (não precisa)
+  if (st.idx === 0) dd.innerHTML = "";
+
+  const end = Math.min(st.idx + DD_BATCH, st.filtered.length);
+
+  // fragmento pra performance
+  const frag = document.createDocumentFragment();
+  for (let i = st.idx; i < end; i++) {
+    frag.appendChild(ddMakeRow(kind, st.filtered[i]));
+  }
+  dd.appendChild(frag);
+
+  st.idx = end;
+
+  // “rodapé” indicando carregamento/total
+  const footerId = `ddFooter_${kind}`;
+  let footer = dd.querySelector(`#${footerId}`);
+  if (!footer) {
+    footer = document.createElement("div");
+    footer.id = footerId;
+    footer.className = "dd-footer muted";
+    dd.appendChild(footer);
+  }
+
+  if (st.idx >= st.filtered.length) {
+    footer.textContent = `Fim — ${st.filtered.length} itens`;
+  } else {
+    footer.textContent = `Mostrando ${st.idx} de ${st.filtered.length} — role para carregar mais`;
+  }
+}
+
+function ddRebuild(kind) {
   const dd = ddGet(kind);
   const input = ddInput(kind);
   if (!dd || !input) return;
 
-  const all = ddOptions(kind);
-  const selected = ddSelected(kind);
-
+  const st = ddState(kind);
   const q = (input.value || "").trim().toUpperCase();
+  st.q = q;
+  st.filtered = ddFilterList(kind, q);
+  st.idx = 0;
 
-  // filtro com includes e um limite alto de render (performance)
-  const MAX_RENDER = 2000;
-  const filtered = [];
-  for (let i = 0; i < all.length; i++) {
-    const v = String(all[i] || "");
-    if (!v) continue;
-    if (!q || v.toUpperCase().includes(q)) filtered.push(v);
-    if (filtered.length >= MAX_RENDER) break;
-  }
+  ddRenderNext(kind);
+}
 
-  dd.innerHTML = "";
+function ddAttachScroll(kind) {
+  const dd = ddGet(kind);
+  if (!dd) return;
 
-  if (!filtered.length) {
-    dd.innerHTML = `<div class="dd-empty muted">Nada encontrado.</div>`;
-    return;
-  }
+  dd.addEventListener("scroll", () => {
+    const st = ddState(kind);
+    if (!st.open) return;
 
-  filtered.forEach((v) => {
-    const isOn = selected.some((x) => String(x).trim().toUpperCase() === v.trim().toUpperCase());
-
-    const row = document.createElement("div");
-    row.className = "dd-item" + (isOn ? " dd-on" : "");
-    row.innerHTML = `
-      <div class="dd-text">${escapeHtml(v)}</div>
-      <div class="dd-tag">${isOn ? "Selecionado" : "Adicionar"}</div>
-    `;
-
-    row.addEventListener("mousedown", (e) => {
-      // mousedown evita perder foco antes do click
-      e.preventDefault();
-      if (isOn) {
-        _removeValue(selected, v);
-      } else {
-        _uniqPush(selected, v);
-      }
-      renderChips(kind);
-      ddRender(kind);
-    });
-
-    dd.appendChild(row);
+    // quando estiver perto do fim, renderiza próximo batch
+    const nearBottom = dd.scrollTop + dd.clientHeight >= dd.scrollHeight - 60;
+    if (nearBottom && st.idx < st.filtered.length) {
+      ddRenderNext(kind);
+    }
   });
+}
+
+function bindDropdown(kind) {
+  const input = ddInput(kind);
+  const dd = ddGet(kind);
+  if (!input || !dd) return;
+
+  // posicionamento: garante que o dropdown aparece “grudado” no input (overlay)
+  // (CSS faz o resto)
+
+  input.addEventListener("focus", () => {
+    ddOpen(kind);
+    ddRebuild(kind); // abre e renderiza batch inicial
+  });
+
+  input.addEventListener("input", debounce(() => {
+    ddOpen(kind);
+    ddRebuild(kind); // refaz filtro e reinicia batches
+  }, 120));
+
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      const v = (input.value || "").trim();
+      if (v) {
+        _uniqPush(ddSelected(kind), v);
+        input.value = "";
+        renderChips(kind);
+        ddRebuild(kind);
+        loadLeadsAndKpisDebounced();
+      }
+    }
+    if (e.key === "Escape") {
+      ddClose(kind);
+    }
+  });
+
+  // fecha clicando fora
+  document.addEventListener("mousedown", (e) => {
+    if (e.target === input) return;
+    if (dd.contains(e.target)) return;
+    ddClose(kind);
+  });
+
+  ddAttachScroll(kind);
 }
 
 /* ============================================================
@@ -299,11 +421,16 @@ async function loadOptions() {
     origem: data.origem || [],
   };
 
+  // esses ainda usam datalist normal
   fillDatalist("dlStatus", state.options.status);
   fillDatalist("dlOrigem", state.options.origem);
 
   renderChips("curso");
   renderChips("polo");
+
+  // se dropdown estiver aberto, refaz
+  if (ddState("curso").open) ddRebuild("curso");
+  if (ddState("polo").open) ddRebuild("polo");
 }
 
 async function loadLeadsAndKpis() {
@@ -447,7 +574,6 @@ function bindFilters() {
     el.addEventListener("keyup", loadLeadsAndKpisDebounced);
   });
 
-  // apply/clear
   $("#btnApply")?.addEventListener("click", (e) => {
     e.preventDefault();
     loadLeadsAndKpis();
@@ -474,55 +600,13 @@ function bindFilters() {
 
     renderChips("curso");
     renderChips("polo");
+
     ddClose("curso");
     ddClose("polo");
 
     setUploadStatus("");
     showToast("Filtros limpos.", "ok");
     loadLeadsAndKpis();
-  });
-}
-
-/* ============================================================
-   Bind dropdowns (sem botão)
-============================================================ */
-function bindDropdown(kind) {
-  const input = ddInput(kind);
-  const dd = ddGet(kind);
-  if (!input || !dd) return;
-
-  input.addEventListener("focus", () => {
-    ddOpen(kind);
-    ddRender(kind); // abre mostrando TUDO
-  });
-
-  input.addEventListener("input", debounce(() => {
-    ddOpen(kind);
-    ddRender(kind);
-  }, 120));
-
-  input.addEventListener("keydown", (e) => {
-    if (e.key === "Enter") {
-      e.preventDefault();
-      const v = (input.value || "").trim();
-      if (v) {
-        _uniqPush(ddSelected(kind), v);
-        input.value = "";
-        renderChips(kind);
-        ddRender(kind);
-        loadLeadsAndKpisDebounced();
-      }
-    }
-    if (e.key === "Escape") {
-      ddClose(kind);
-    }
-  });
-
-  // fecha clicando fora
-  document.addEventListener("click", (e) => {
-    if (e.target === input) return;
-    if (dd.contains(e.target)) return;
-    ddClose(kind);
   });
 }
 
