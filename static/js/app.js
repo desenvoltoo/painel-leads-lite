@@ -9,7 +9,7 @@ function showToast(msg, type = "ok") {
   const statusLine = $("#statusLine");
   if (statusLine) {
     statusLine.textContent = msg;
-    statusLine.dataset.type = type; // ✅ não quebra className do elemento
+    statusLine.dataset.type = type === "err" ? "err" : "ok";
   } else {
     alert(msg);
   }
@@ -19,7 +19,7 @@ function setUploadStatus(msg, type = "muted") {
   const el = $("#uploadStatus");
   if (!el) return;
   el.textContent = msg || "";
-  el.dataset.type = type;
+  el.dataset.type = type; // "ok" | "warn" | "error" | "muted"
 }
 
 function escapeHtml(str) {
