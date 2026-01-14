@@ -5,9 +5,11 @@ Painel Leads Lite (Flask + BigQuery)
 Rotas:
 - /                     -> tela
 - /health               -> status do app + envs
-- /api/leads            -> lista leads (BigQuery)
-- /api/kpis             -> KPIs (BigQuery)
-- /api/options          -> distincts para datalist
+- /api/leads            -> lista leads (BigQuery) + suporta multi-filtros (arrays)
+- /api/kpis             -> KPIs (BigQuery) + suporta multi-filtros (arrays)
+- /api/options          -> distincts para datalist / selects
+- /api/export           -> export CSV (UTF-8-SIG) com filtros aplicados
+- /download/modelo      -> baixa modelo de importação (csv/xlsx)
 - /api/upload           -> upload CSV/XLSX -> staging -> CALL procedure
 - /api/debug/source     -> mostra de onde está lendo (dataset/view)
 - /api/debug/sample     -> retorna 5 linhas da view (pra validar colunas)
@@ -22,11 +24,21 @@ ENV opcionais:
 - BQ_UPLOAD_TABLE (default: stg_leads_upload)
 - BQ_PROMOTE_PROC (default: sp_promote_stg_leads_upload)
 - PORT (default: 8080)
+
+Modelo (opcional):
+- MODEL_TEMPLATE_PATH (default: static/modelos/modelo_importacao.xlsx)
 """
 
 import os
+import csv
+import io
 import traceback
-from flask import Flask, render_template, request, jsonify
+from datetime import datetime
+
+from flask import (
+    Flask, render_template, request, jsonify,
+    Response, send_file, send_from_directory
+)
 
 from services.bigquery import (
     query_leads,
@@ -54,23 +66,6 @@ def _required_envs_ok():
     return (len(missing) == 0, missing)
 
 
-def _get_filters_from_request():
-    # UI manda strings vazias -> normaliza para None
-    def n(v):
-        v = (v or "").strip()
-        return v if v else None
-
-    return {
-        "status": n(request.args.get("status")),
-        "curso": n(request.args.get("curso")),
-        "polo": n(request.args.get("polo")),
-        "origem": n(request.args.get("origem")),
-        "data_ini": n(request.args.get("data_ini")),  # YYYY-MM-DD
-        "data_fim": n(request.args.get("data_fim")),  # YYYY-MM-DD
-        "limit": int(request.args.get("limit") or 500),
-    }
-
-
 def _source_ref():
     return {
         "project": _env("GCP_PROJECT_ID"),
@@ -82,7 +77,6 @@ def _source_ref():
 
 
 def _error_payload(e: Exception, public_msg: str):
-    # útil demais no seu cenário (Cloud Run / logs)
     return {
         "ok": False,
         "error": public_msg,
@@ -90,6 +84,95 @@ def _error_payload(e: Exception, public_msg: str):
         "trace": traceback.format_exc(limit=6),
         "source": _source_ref(),
     }
+
+
+def _norm_str(v):
+    v = (v or "").strip()
+    return v if v else None
+
+
+def _parse_multi_param(name: str):
+    """
+    Aceita:
+    - ?polo=A&polo=B (getlist)
+    - ?polo=A,B,C (csv)
+    - ?polo=   (vazio)
+    Retorna: list[str] ou []
+    """
+    vals = request.args.getlist(name)  # pega repetidos
+    vals = [x for x in vals if _norm_str(x)]
+
+    if len(vals) == 1 and vals[0] and "," in vals[0]:
+        # caso venha "A,B,C" num único parâmetro
+        parts = [p.strip() for p in vals[0].split(",")]
+        vals = [p for p in parts if p]
+
+    # remove duplicados mantendo ordem
+    seen = set()
+    out = []
+    for x in vals:
+        if x not in seen:
+            seen.add(x)
+            out.append(x)
+    return out
+
+
+def _get_filters_from_request():
+    """
+    Mantém compatibilidade com o modelo antigo (string única),
+    mas adiciona *_list para multi seleção.
+    """
+    status_list = _parse_multi_param("status")
+    curso_list = _parse_multi_param("curso")
+    polo_list = _parse_multi_param("polo")
+    origem_list = _parse_multi_param("origem")
+
+    data_ini = _norm_str(request.args.get("data_ini"))  # YYYY-MM-DD
+    data_fim = _norm_str(request.args.get("data_fim"))  # YYYY-MM-DD
+
+    limit_raw = request.args.get("limit")
+    try:
+        limit = int(limit_raw) if limit_raw else 500
+    except:
+        limit = 500
+
+    # compat: se tiver lista, expõe também singular (primeiro item)
+    return {
+        "status": status_list[0] if status_list else _norm_str(request.args.get("status")),
+        "curso": curso_list[0] if curso_list else _norm_str(request.args.get("curso")),
+        "polo": polo_list[0] if polo_list else _norm_str(request.args.get("polo")),
+        "origem": origem_list[0] if origem_list else _norm_str(request.args.get("origem")),
+        "status_list": status_list,
+        "curso_list": curso_list,
+        "polo_list": polo_list,
+        "origem_list": origem_list,
+        "data_ini": data_ini,
+        "data_fim": data_fim,
+        "limit": limit,
+    }
+
+
+def _rows_to_csv_bytes(rows: list[dict], delimiter=";") -> bytes:
+    """
+    Exporta com UTF-8-SIG (BOM) para o Excel abrir acentos corretamente.
+    """
+    if not rows:
+        # cabeçalho mínimo vazio
+        content = ""
+        return content.encode("utf-8-sig")
+
+    # garante ordem de colunas estável: usa as chaves do primeiro row
+    fieldnames = list(rows[0].keys())
+
+    buf = io.StringIO(newline="")
+    writer = csv.DictWriter(buf, fieldnames=fieldnames, delimiter=delimiter)
+    writer.writeheader()
+    for r in rows:
+        # garante que toda linha tem todas colunas
+        row = {k: r.get(k, "") for k in fieldnames}
+        writer.writerow(row)
+
+    return buf.getvalue().encode("utf-8-sig")
 
 
 # ============================================================
@@ -104,7 +187,6 @@ def create_app() -> Flask:
     def index():
         ok, missing = _required_envs_ok()
         if not ok:
-            # renderiza mesmo assim, mas vai falhar nas APIs
             print("⚠️ ENV faltando:", missing)
         return render_template("index.html")
 
@@ -132,7 +214,7 @@ def create_app() -> Flask:
         filters = _get_filters_from_request()
         try:
             rows = query_leads(filters)
-            return jsonify({"count": len(rows), "rows": rows, "source": _source_ref()})
+            return jsonify({"count": len(rows), "rows": rows, "source": _source_ref(), "filters": filters})
         except Exception as e:
             print("🚨 /api/leads ERROR:", repr(e))
             return jsonify(_error_payload(e, "Falha ao consultar o BigQuery (leads).")), 500
@@ -155,6 +237,7 @@ def create_app() -> Flask:
         try:
             data = query_kpis(filters)
             data["source"] = _source_ref()
+            data["filters"] = filters
             return jsonify(data)
         except Exception as e:
             print("🚨 /api/kpis ERROR:", repr(e))
@@ -182,12 +265,93 @@ def create_app() -> Flask:
             print("🚨 /api/options ERROR:", repr(e))
             return jsonify(_error_payload(e, "Falha ao consultar o BigQuery (options).")), 500
 
+    # ------------------- api: export -------------------
+    @app.get("/api/export")
+    def api_export():
+        ok, missing = _required_envs_ok()
+        if not ok:
+            return jsonify({
+                "ok": False,
+                "error": f"ENV obrigatórias faltando: {missing}",
+                "source": _source_ref(),
+            }), 500
+
+        filters = _get_filters_from_request()
+
+        # para exportar, normalmente queremos mais linhas do que o limite de tela
+        export_limit_raw = request.args.get("export_limit")
+        try:
+            export_limit = int(export_limit_raw) if export_limit_raw else 200000
+        except:
+            export_limit = 200000
+
+        filters_export = dict(filters)
+        filters_export["limit"] = export_limit
+
+        try:
+            rows = query_leads(filters_export)
+            csv_bytes = _rows_to_csv_bytes(rows, delimiter=";")
+
+            stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename = f"leads_export_{stamp}.csv"
+
+            return Response(
+                csv_bytes,
+                mimetype="text/csv; charset=utf-8",
+                headers={
+                    "Content-Disposition": f'attachment; filename="{filename}"',
+                    "Cache-Control": "no-store",
+                },
+            )
+        except Exception as e:
+            print("🚨 /api/export ERROR:", repr(e))
+            return jsonify(_error_payload(e, "Falha ao exportar CSV.")), 500
+
+    # ------------------- download: modelo importação -------------------
+    @app.get("/download/modelo")
+    def download_modelo():
+        """
+        Prioridade:
+        1) Se existir arquivo em MODEL_TEMPLATE_PATH, serve ele.
+        2) Caso não exista, gera um CSV simples com cabeçalhos (fallback).
+        """
+        try:
+            model_path = _env("MODEL_TEMPLATE_PATH", "static/modelos/modelo_importacao.xlsx")
+            # se for relativo, resolve pelo cwd
+            abs_path = model_path if os.path.isabs(model_path) else os.path.join(os.getcwd(), model_path)
+
+            if os.path.exists(abs_path) and os.path.isfile(abs_path):
+                # decide download_name conforme extensão
+                base = os.path.basename(abs_path)
+                return send_file(abs_path, as_attachment=True, download_name=base)
+
+            # fallback CSV (ajuste as colunas depois que formos para services.bigquery)
+            headers = [
+                "origem", "polo", "curso", "nome", "cpf", "celular", "email",
+                "data_inscricao", "modalidade", "campanha", "consultor", "status", "obs"
+            ]
+            buf = io.StringIO(newline="")
+            w = csv.writer(buf, delimiter=";")
+            w.writerow(headers)
+            # linha exemplo vazia
+            w.writerow([""] * len(headers))
+            payload = buf.getvalue().encode("utf-8-sig")
+
+            return Response(
+                payload,
+                mimetype="text/csv; charset=utf-8",
+                headers={"Content-Disposition": 'attachment; filename="modelo_importacao.csv"'},
+            )
+
+        except Exception as e:
+            print("🚨 /download/modelo ERROR:", repr(e))
+            return jsonify(_error_payload(e, "Falha ao baixar modelo.")), 500
+
     # ------------------- api: upload -------------------
     @app.post("/api/upload")
     def api_upload():
         ok, missing = _required_envs_ok()
         if not ok:
-            # ✅ Aqui é erro (e não sucesso). E não pode referenciar result/f
             return jsonify({
                 "ok": False,
                 "error": f"ENV obrigatórias faltando: {missing}",
@@ -212,7 +376,6 @@ def create_app() -> Flask:
 
             source = (request.form.get("source") or "UPLOAD_PAINEL").strip()
 
-            # ✅ Faz ingestão (staging + procedure)
             result = ingest_upload_file(f, source=source)
 
             return jsonify({
@@ -226,9 +389,8 @@ def create_app() -> Flask:
             print("🚨 /api/upload ERROR:", repr(e))
             return jsonify(_error_payload(e, "Falha no upload/ingestão.")), 500
 
-
     # ============================================================
-    # DEBUG (pra você nunca ficar no escuro)
+    # DEBUG
     # ============================================================
     @app.get("/api/debug/source")
     def api_debug_source():
