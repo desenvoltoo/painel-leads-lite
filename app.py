@@ -15,17 +15,11 @@ Rotas:
 - /api/debug/sample      -> retorna 5 linhas da view
 - /api/debug/count       -> count(*) na view
 
-ENV obrigatórias:
-- GCP_PROJECT_ID
-- BQ_DATASET
-- BQ_VIEW_LEADS
-
-ENV opcionais:
-- BQ_UPLOAD_TABLE (default: stg_leads_upload)
-- BQ_PIPELINE_PROC (default: sp_v9_run_pipeline)
-- BQ_LOCATION (default: us-central1 ou US)
-- BQ_OPTIONS_LIMIT (default: 50000)
-- PORT (default: 8080)
+ENV (opcionais, pois temos defaults seguros):
+- GCP_PROJECT_ID (default: painel-universidade)
+- BQ_DATASET     (default: modelo_estrela)
+- BQ_VIEW_LEADS  (default: vw_leads_painel_lite)
+- BQ_LOCATION    (default: US)  # se seu dataset for regional, use us-central1
 """
 
 import os
@@ -46,6 +40,14 @@ from services.bigquery import (
     debug_sample,
 )
 
+# ============================================================
+# DEFAULTS SEGUROS (IGUAL AO services/bigquery.py)
+# ============================================================
+DEFAULT_PROJECT = "painel-universidade"
+DEFAULT_DATASET = "modelo_estrela"
+DEFAULT_VIEW_LEADS = "vw_leads_painel_lite"
+DEFAULT_BQ_LOCATION = "us-central1"
+
 
 # ============================================================
 # HELPERS
@@ -56,14 +58,6 @@ def _env(name: str, default: str = "") -> str:
     return v if v else default
 
 
-def _required_envs_ok():
-    missing = []
-    for k in ("GCP_PROJECT_ID", "BQ_DATASET", "BQ_VIEW_LEADS"):
-        if not _env(k):
-            missing.append(k)
-    return (len(missing) == 0, missing)
-
-
 def _source_ref():
     # não explode se options_limit vier zoado
     try:
@@ -71,15 +65,34 @@ def _source_ref():
     except Exception:
         opt_lim = 50000
 
+    # defaults seguros aqui também
+    project = _env("GCP_PROJECT_ID", DEFAULT_PROJECT)
+    dataset = _env("BQ_DATASET", DEFAULT_DATASET)
+    view = _env("BQ_VIEW_LEADS", DEFAULT_VIEW_LEADS)
+    location = _env("BQ_LOCATION", DEFAULT_BQ_LOCATION)
+
     return {
-        "project": _env("GCP_PROJECT_ID"),
-        "dataset": _env("BQ_DATASET"),
-        "view": _env("BQ_VIEW_LEADS"),
-        "location": _env("BQ_LOCATION", "us-central1"),
+        "project": project,
+        "dataset": dataset,
+        "view": view,
+        "location": location,
         "upload_table": _env("BQ_UPLOAD_TABLE", "stg_leads_upload"),
         "pipeline_proc": _env("BQ_PIPELINE_PROC", "sp_v9_run_pipeline"),
         "options_limit": opt_lim,
     }
+
+
+def _required_envs_ok():
+    """
+    Agora: SEM BLOQUEIO.
+    Retorna ok sempre, mas informa quais envs estão faltando (apenas informativo).
+    Isso evita o painel ficar "sem nada" por falta de ENV no Cloud Run.
+    """
+    missing = []
+    for k in ("GCP_PROJECT_ID", "BQ_DATASET", "BQ_VIEW_LEADS", "BQ_LOCATION"):
+        if not _env(k):
+            missing.append(k)
+    return (True, missing)
 
 
 def _error_payload(e: Exception, public_msg: str):
@@ -147,12 +160,9 @@ def _get_filters_from_request(for_export: bool = False) -> Dict[str, Any]:
     return {
         "status": _n(request.args.get("status")),
         "origem": _n(request.args.get("origem")),
-        # ✅ agora vira DATE de verdade
         "data_ini": _to_date(request.args.get("data_ini")),
         "data_fim": _to_date(request.args.get("data_fim")),
         "limit": lim,
-
-        # MULTI (o services/bigquery.py espera curso_list / polo_list)
         "curso_list": _get_list("curso"),
         "polo_list": _get_list("polo"),
     }
@@ -169,35 +179,26 @@ def create_app() -> Flask:
     @app.get("/")
     def index():
         ok, missing = _required_envs_ok()
-        if not ok:
-            print("⚠️ ENV faltando:", missing)
+        if missing:
+            print("⚠️ ENV ausentes (usando defaults):", missing, "| source:", _source_ref())
         return render_template("index.html")
 
     @app.get("/health")
     def health():
-        ok, missing = _required_envs_ok()
+        _, missing = _required_envs_ok()
         return jsonify({
-            "status": "ok" if ok else "missing_env",
-            "missing_env": missing,
+            "status": "ok",
+            "missing_env": missing,  # informativo
             "source": _source_ref(),
         })
 
     # ------------------- api: leads -------------------
     @app.get("/api/leads")
     def api_leads():
-        ok, missing = _required_envs_ok()
-        if not ok:
-            return jsonify({
-                "count": 0,
-                "rows": [],
-                "error": f"ENV obrigatórias faltando: {missing}",
-                "source": _source_ref(),
-            }), 500
-
         filters = _get_filters_from_request(for_export=False)
         try:
             rows = query_leads(filters)
-            return jsonify({"count": len(rows), "rows": rows})
+            return jsonify({"count": len(rows), "rows": rows, "source": _source_ref()})
         except Exception as e:
             print("🚨 /api/leads ERROR:", repr(e))
             return jsonify(_error_payload(e, "Falha ao consultar o BigQuery (leads).")), 500
@@ -205,22 +206,10 @@ def create_app() -> Flask:
     # ------------------- api: kpis -------------------
     @app.get("/api/kpis")
     def api_kpis():
-        ok, missing = _required_envs_ok()
-        if not ok:
-            return jsonify({
-                "total": 0,
-                "top_status": None,
-                "last_date": None,
-                "by_status": [],
-                "error": f"ENV obrigatórias faltando: {missing}",
-                "source": _source_ref(),
-            }), 500
-
         filters = _get_filters_from_request(for_export=False)
         try:
             data = query_kpis(filters)
-            # deixa no formato que seu app.js espera
-            return jsonify(data)
+            return jsonify({**data, "source": _source_ref()})
         except Exception as e:
             print("🚨 /api/kpis ERROR:", repr(e))
             return jsonify(_error_payload(e, "Falha ao consultar o BigQuery (KPIs).")), 500
@@ -228,20 +217,9 @@ def create_app() -> Flask:
     # ------------------- api: options -------------------
     @app.get("/api/options")
     def api_options():
-        ok, missing = _required_envs_ok()
-        if not ok:
-            return jsonify({
-                "status": [],
-                "curso": [],
-                "polo": [],
-                "origem": [],
-                "error": f"ENV obrigatórias faltando: {missing}",
-                "source": _source_ref(),
-            }), 500
-
         try:
             data = query_options()
-            return jsonify(data)
+            return jsonify({**data, "source": _source_ref()})
         except Exception as e:
             print("🚨 /api/options ERROR:", repr(e))
             return jsonify(_error_payload(e, "Falha ao consultar o BigQuery (options).")), 500
@@ -249,10 +227,6 @@ def create_app() -> Flask:
     # ------------------- api: upload -------------------
     @app.post("/api/upload")
     def api_upload():
-        ok, missing = _required_envs_ok()
-        if not ok:
-            return jsonify({"ok": False, "error": f"ENV obrigatórias faltando: {missing}", "source": _source_ref()}), 500
-
         try:
             if "file" not in request.files:
                 return jsonify({"ok": False, "error": "Nenhum arquivo enviado (campo 'file')."}), 400
@@ -268,6 +242,7 @@ def create_app() -> Flask:
                 "ok": True,
                 **result,
                 "filename": f.filename,
+                "source": _source_ref(),
             })
 
         except Exception as e:
@@ -277,10 +252,6 @@ def create_app() -> Flask:
     # ------------------- api: export (CSV BOM + ;) -------------------
     @app.get("/api/export")
     def api_export():
-        ok, missing = _required_envs_ok()
-        if not ok:
-            return jsonify({"ok": False, "error": f"ENV obrigatórias faltando: {missing}", "source": _source_ref()}), 500
-
         try:
             filters = _get_filters_from_request(for_export=True)
             rows = query_leads(filters)
@@ -288,7 +259,7 @@ def create_app() -> Flask:
 
             out = io.StringIO()
             df.to_csv(out, index=False, sep=";")
-            raw = out.getvalue().encode("utf-8-sig")  # ✅ BOM pro Excel
+            raw = out.getvalue().encode("utf-8-sig")  # BOM pro Excel
 
             filename = f"leads_export_{pd.Timestamp.now().strftime('%Y-%m-%d')}.csv"
             return send_file(
@@ -341,9 +312,6 @@ def create_app() -> Flask:
 
     @app.get("/api/debug/count")
     def api_debug_count():
-        ok, missing = _required_envs_ok()
-        if not ok:
-            return jsonify({"ok": False, "error": f"ENV faltando: {missing}", "source": _source_ref()}), 500
         try:
             c = debug_count()
             return jsonify({"ok": True, "count": c, "source": _source_ref()})
@@ -352,9 +320,6 @@ def create_app() -> Flask:
 
     @app.get("/api/debug/sample")
     def api_debug_sample():
-        ok, missing = _required_envs_ok()
-        if not ok:
-            return jsonify({"ok": False, "error": f"ENV faltando: {missing}", "source": _source_ref()}), 500
         try:
             rows = debug_sample(limit=5)
             return jsonify({"ok": True, "rows": rows, "source": _source_ref()})
@@ -364,10 +329,8 @@ def create_app() -> Flask:
     return app
 
 
-# ✅ MUITO IMPORTANTE pro Cloud Run/Gunicorn:
-# deixa um "app" global importável (gunicorn app:app)
+# Muito importante pro Cloud Run/Gunicorn:
 app = create_app()
-
 
 if __name__ == "__main__":
     port = int(_env("PORT", "8080"))
