@@ -18,8 +18,7 @@
     </div>
 
     <div class="actions">
-      <button id="btnReload" class="btn btn-ghost" type="button">Recarregar</button>
-      <button id="btnExportFilters" class="btn btn-ghost" type="button">Exportar CSV</button>
+      <!-- (opcional) se quiser botões no topo depois -->
     </div>
   </header>
 
@@ -47,7 +46,7 @@
     <section class="card">
       <div class="card-header">
         <h2>Importar planilha</h2>
-        <p>Envie CSV ou XLSX. O arquivo será carregado no BigQuery (staging) e executará a procedure do pipeline.</p>
+        <p>Envie CSV ou XLSX. O arquivo será carregado no BigQuery (staging).</p>
       </div>
 
       <div class="filters" style="grid-template-columns: repeat(6, minmax(0,1fr));">
@@ -77,7 +76,7 @@
     <section class="card">
       <div class="card-header">
         <h2>Filtros</h2>
-        <p>Refine os dados direto na view do BigQuery. Curso e Polo aceitam múltiplos (chips).</p>
+        <p>Refine os dados diretamente no BigQuery.</p>
       </div>
 
       <div class="filters">
@@ -104,6 +103,7 @@
           </div>
 
           <div id="ddCursos" class="dd" hidden></div>
+
           <input type="hidden" id="fCursoMulti" value="" />
         </div>
 
@@ -123,12 +123,13 @@
           </div>
 
           <div id="ddPolos" class="dd" hidden></div>
+
           <input type="hidden" id="fPoloMulti" value="" />
         </div>
 
         <div class="field">
           <label>Origem</label>
-          <input id="fOrigem" list="dlOrigem" placeholder="Ex: Meta Ads" autocomplete="off" />
+          <input id="fOrigem" list="dlOrigem" placeholder="Ex: CAPTAR EXPRESS" autocomplete="off" />
           <datalist id="dlOrigem"></datalist>
         </div>
 
@@ -143,7 +144,8 @@
         </div>
 
         <div class="field field-wide">
-          <label>Limite (consulta)</label>
+          <label>Limite (busca no BigQuery)</label>
+          <!-- sugestão: 5000 pra paginar no front -->
           <input id="fLimit" type="number" min="50" step="50" value="5000" />
         </div>
 
@@ -151,6 +153,9 @@
         <div class="field field-actions">
           <button id="btnApply" class="btn btn-primary" type="button">Aplicar filtros</button>
           <button id="btnClear" class="btn btn-ghost" type="button">Limpar</button>
+
+          <button id="btnReload" class="btn btn-ghost" type="button">Recarregar</button>
+          <button id="btnExportFilters" class="btn btn-ghost" type="button">Exportar CSV</button>
         </div>
       </div>
     </section>
@@ -159,24 +164,28 @@
     <section class="card">
       <div class="card-header">
         <h2>Resultados</h2>
-        <p id="statusLine">—</p>
+
+        <!-- ✅ o JS escreve mensagens aqui -->
+        <p id="statusLine" class="muted">—</p>
       </div>
 
-      <!-- PAGINAÇÃO (FRONT) -->
+      <!-- ✅ Barra de paginação (necessária pro seu JS) -->
       <div class="table-toolbar">
-        <div class="toolbar-left">
+        <div class="pager-left">
           <label class="muted" for="pageSize">Linhas por página</label>
           <select id="pageSize" class="select">
-            <option value="50" selected>50</option>
+            <option value="50">50</option>
             <option value="100">100</option>
-            <option value="200">200</option>
+            <option value="200" selected>200</option>
             <option value="500">500</option>
           </select>
+        </div>
 
+        <div class="pager-mid">
           <span id="pageInfo" class="muted">—</span>
         </div>
 
-        <div class="toolbar-right">
+        <div class="pager-right">
           <button id="btnPrev" class="btn btn-ghost" type="button">◀ Anterior</button>
           <button id="btnNext" class="btn btn-ghost" type="button">Próxima ▶</button>
         </div>
