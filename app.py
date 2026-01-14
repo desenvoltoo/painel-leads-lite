@@ -5,11 +5,11 @@ Painel Leads Lite (Flask + BigQuery)
 Rotas:
 - /                      -> tela
 - /health                -> status do app + envs
-- /api/leads             -> lista leads (BigQuery)
-- /api/kpis              -> KPIs (BigQuery)
+- /api/leads             -> lista leads (BigQuery) (multi curso/polo)
+- /api/kpis              -> KPIs (BigQuery) (multi curso/polo)
 - /api/options           -> distincts (curso/polo/status/origem)
 - /api/upload            -> upload CSV/XLSX -> staging -> CALL procedure
-- /api/export            -> export CSV (UTF-8 BOM) sem quebrar acentos
+- /api/export            -> export CSV (UTF-8 BOM + ;) sem quebrar acentos
 - /download/modelo       -> baixa modelo XLSX de importação
 - /api/debug/source      -> mostra de onde está lendo
 - /api/debug/sample      -> retorna 5 linhas da view
@@ -23,7 +23,7 @@ ENV obrigatórias:
 ENV opcionais:
 - BQ_UPLOAD_TABLE (default: stg_leads_upload)
 - BQ_PIPELINE_PROC (default: sp_v9_run_pipeline)
-- BQ_LOCATION (default: us-central1)
+- BQ_LOCATION (default: us-central1 ou US)
 - BQ_OPTIONS_LIMIT (default: 50000)
 - PORT (default: 8080)
 """
@@ -32,7 +32,6 @@ import os
 import io
 import traceback
 import pandas as pd
-
 from flask import Flask, render_template, request, jsonify, send_file
 
 from services.bigquery import (
@@ -66,9 +65,9 @@ def _source_ref():
         "project": _env("GCP_PROJECT_ID"),
         "dataset": _env("BQ_DATASET"),
         "view": _env("BQ_VIEW_LEADS"),
-        "upload_table": _env("BQ_UPLOAD_TABLE", "stg_leads_upload"),
-        "pipeline_proc": _env("BQ_PIPELINE_PROC", _env("BQ_PIPELINE_PROC", "sp_v9_run_pipeline")),
         "location": _env("BQ_LOCATION", "us-central1"),
+        "upload_table": _env("BQ_UPLOAD_TABLE", "stg_leads_upload"),
+        "pipeline_proc": _env("BQ_PIPELINE_PROC", "sp_v9_run_pipeline"),
         "options_limit": int(_env("BQ_OPTIONS_LIMIT", "50000")),
     }
 
@@ -91,15 +90,13 @@ def _n(v):
 def _get_list(name: str):
     """
     Aceita:
-    - ?curso=ABC&curso=DEF (getlist nativo)
-    - ou hidden "||" (caso você mande assim do front): ?curso_multi=ABC||DEF
+    - ?curso=ABC&curso=DEF (getlist)
+    - ou hidden no formato "A||B||C": ?curso_multi=A||B||C
     """
     items = [x.strip() for x in request.args.getlist(name) if (x or "").strip()]
 
-    # fallback: curso_multi/polo_multi no formato "A||B||C"
-    multi_key = f"{name}_multi"
     if not items:
-        raw = (request.args.get(multi_key) or "").strip()
+        raw = (request.args.get(f"{name}_multi") or "").strip()
         if raw:
             items = [x.strip() for x in raw.split("||") if x.strip()]
 
@@ -114,13 +111,21 @@ def _get_list(name: str):
     return out
 
 
-def _get_filters_from_request():
+def _get_filters_from_request(for_export: bool = False):
+    # limites: UI e export têm limites diferentes
+    if for_export:
+        lim = int(request.args.get("export_limit") or 200000)
+        lim = max(1000, min(lim, 500000))
+    else:
+        lim = int(request.args.get("limit") or 500)
+        lim = max(50, min(lim, 5000))
+
     return {
         "status": _n(request.args.get("status")),
         "origem": _n(request.args.get("origem")),
         "data_ini": _n(request.args.get("data_ini")),  # YYYY-MM-DD
         "data_fim": _n(request.args.get("data_fim")),  # YYYY-MM-DD
-        "limit": int(request.args.get("limit") or 500),
+        "limit": lim,
 
         # MULTI
         "curso_list": _get_list("curso"),
@@ -164,7 +169,7 @@ def create_app() -> Flask:
                 "source": _source_ref(),
             }), 500
 
-        filters = _get_filters_from_request()
+        filters = _get_filters_from_request(for_export=False)
         try:
             rows = query_leads(filters)
             return jsonify({"count": len(rows), "rows": rows, "source": _source_ref()})
@@ -186,7 +191,7 @@ def create_app() -> Flask:
                 "source": _source_ref(),
             }), 500
 
-        filters = _get_filters_from_request()
+        filters = _get_filters_from_request(for_export=False)
         try:
             data = query_kpis(filters)
             data["source"] = _source_ref()
@@ -208,6 +213,7 @@ def create_app() -> Flask:
                 "error": f"ENV obrigatórias faltando: {missing}",
                 "source": _source_ref(),
             }), 500
+
         try:
             data = query_options()
             data["source"] = _source_ref()
@@ -245,7 +251,7 @@ def create_app() -> Flask:
             print("🚨 /api/upload ERROR:", repr(e))
             return jsonify(_error_payload(e, "Falha no upload/ingestão.")), 500
 
-    # ------------------- api: export csv (safe) -------------------
+    # ------------------- api: export (CSV BOM + ;) -------------------
     @app.get("/api/export")
     def api_export():
         ok, missing = _required_envs_ok()
@@ -253,20 +259,10 @@ def create_app() -> Flask:
             return jsonify({"ok": False, "error": f"ENV obrigatórias faltando: {missing}", "source": _source_ref()}), 500
 
         try:
-            filters = _get_filters_from_request()
-
-            # limite específico p/ export (não mistura com limite da tela)
-            export_limit = int(request.args.get("export_limit") or 200000)
-            export_limit = max(1000, min(export_limit, 500000))  # trava de segurança
-            filters["limit"] = export_limit
-
+            filters = _get_filters_from_request(for_export=True)
             rows = query_leads(filters)
-
             df = pd.DataFrame(rows)
 
-            # CSV amigável pro Excel BR:
-            # - sep=';' (não conflita com vírgula decimal)
-            # - encoding utf-8-sig (BOM -> não quebra acentos)
             out = io.StringIO()
             df.to_csv(out, index=False, sep=";", encoding="utf-8-sig")
             raw = out.getvalue().encode("utf-8-sig")
@@ -283,12 +279,9 @@ def create_app() -> Flask:
             print("🚨 /api/export ERROR:", repr(e))
             return jsonify(_error_payload(e, "Falha ao exportar CSV.")), 500
 
-    # ------------------- download modelo -------------------
+    # ------------------- download modelo (XLSX) -------------------
     @app.get("/download/modelo")
     def download_modelo():
-        """
-        Modelo XLSX com as colunas esperadas no upload.
-        """
         try:
             cols = [
                 "origem","polo","tipo_negocio","curso","modalidade","nome","cpf","celular","email",
