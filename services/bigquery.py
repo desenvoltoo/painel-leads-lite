@@ -51,9 +51,9 @@ def _date_field() -> str:
 
 
 def _date_expr() -> str:
-    # robusto: se um dia virar STRING/TIMESTAMP, ainda tenta converter
-    # se já for DATE, SAFE_CAST mantém.
-    return f"SAFE_CAST({_date_field()} AS DATE)"
+    # deixa robusto pra DATE / DATETIME / TIMESTAMP / STRING
+    f = _date_field()
+    return f"SAFE_CAST({f} AS DATE)"
 
 
 def _norm_list_upper(values: List[str]) -> List[str]:
