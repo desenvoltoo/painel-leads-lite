@@ -6,6 +6,9 @@
 
 const $ = (sel) => document.querySelector(sel);
 
+/* ============================================================
+   Toast / Status
+============================================================ */
 function showToast(msg, type = "ok") {
   const statusLine = $("#statusLine");
   if (statusLine) {
@@ -23,6 +26,9 @@ function setUploadStatus(msg, type = "muted") {
   el.dataset.type = type; // "ok" | "warn" | "error" | "muted"
 }
 
+/* ============================================================
+   Utils
+============================================================ */
 function escapeHtml(str) {
   if (str === null || str === undefined) return "";
   return String(str)
@@ -37,9 +43,11 @@ function escapeHtml(str) {
 function fmtDate(d) {
   if (!d) return "";
   const s = String(d);
-  // já no formato ISO
+
+  // ISO direto
   if (/^\d{4}-\d{2}-\d{2}/.test(s)) return s.slice(0, 10);
-  // tenta parsear string RFC
+
+  // tenta parsear RFC/Date string
   const ts = Date.parse(s);
   if (!Number.isNaN(ts)) {
     const dd = new Date(ts);
@@ -48,6 +56,7 @@ function fmtDate(d) {
     const day = String(dd.getUTCDate()).padStart(2, "0");
     return `${yyyy}-${mm}-${day}`;
   }
+
   return s.slice(0, 10);
 }
 
@@ -69,7 +78,7 @@ const state = {
     origem: "",
     data_ini: "",
     data_fim: "",
-    limit: 500,
+    limit: 5000, // sugestão default pra ter várias páginas
     curso_list: [],
     polo_list: [],
   },
@@ -81,17 +90,15 @@ const state = {
 
   // ✅ paginação
   table: {
-    // dados brutos que vieram do /api/leads
     allRows: [],
-    // se quiser implementar busca local, use filteredRows
     filteredRows: [],
     page: 1,
-    pageSize: 200,
+    pageSize: 50, // default (bate com index que deixei 50 selected)
   },
 };
 
 /* ============================================================
-   API helpers (✅ mostra erro real do backend)
+   API helpers (mostra erro real do backend)
 ============================================================ */
 async function apiGet(path, params = {}) {
   const url = new URL(path, window.location.origin);
@@ -112,7 +119,6 @@ async function apiGet(path, params = {}) {
   });
 
   const res = await fetch(url.toString(), { cache: "no-store" });
-
   const data = await res.json().catch(() => null);
 
   if (!res.ok) {
@@ -152,8 +158,66 @@ function explainErr(prefix, err) {
 }
 
 /* ============================================================
-   UI: table + KPIs
+   UI: KPIs
 ============================================================ */
+function renderKpis(k) {
+  const total = $("#kpiCount");
+  const top = $("#kpiTopStatus");
+  const last = $("#kpiLastDate");
+
+  if (total) total.textContent = (k?.total ?? 0).toString();
+
+  if (top) {
+    const s = k?.top_status?.status ?? "-";
+    const c = k?.top_status?.cnt ?? 0;
+    top.textContent = s === "-" ? "-" : `${s} (${c})`;
+  }
+
+  if (last) last.textContent = k?.last_date ? fmtDate(k.last_date) : "-";
+}
+
+function fillDatalist(id, values) {
+  const dl = document.getElementById(id);
+  if (!dl) return;
+  dl.innerHTML = "";
+  (values || []).forEach((v) => {
+    const opt = document.createElement("option");
+    opt.value = v;
+    dl.appendChild(opt);
+  });
+}
+
+/* ============================================================
+   Paginação + Tabela
+============================================================ */
+function setPageInfo() {
+  const info = $("#pageInfo");
+  const btnPrev = $("#btnPrev");
+  const btnNext = $("#btnNext");
+
+  const rows = state.table.filteredRows || [];
+  const total = rows.length;
+  const pageSize = state.table.pageSize;
+  const totalPages = Math.max(1, Math.ceil(total / pageSize));
+
+  // clamp
+  state.table.page = Math.min(Math.max(1, state.table.page), totalPages);
+
+  const page = state.table.page;
+
+  const start = total ? (page - 1) * pageSize + 1 : 0;
+  const end = total ? Math.min(page * pageSize, total) : 0;
+
+  if (info) {
+    info.textContent = total
+      ? `Mostrando ${start}-${end} de ${total} • Página ${page}/${totalPages}`
+      : `—`;
+  }
+
+  if (btnPrev) btnPrev.disabled = page <= 1 || total === 0;
+  if (btnNext) btnNext.disabled = page >= totalPages || total === 0;
+}
+
 function renderTablePage() {
   const tbody = $("#tbl tbody");
   if (!tbody) return;
@@ -200,71 +264,18 @@ function renderTablePage() {
   setPageInfo();
 }
 
-function renderKpis(k) {
-  const total = $("#kpiCount");
-  const top = $("#kpiTopStatus");
-  const last = $("#kpiLastDate");
-
-  if (total) total.textContent = (k?.total ?? 0).toString();
-
-  if (top) {
-    const s = k?.top_status?.status ?? "-";
-    const c = k?.top_status?.cnt ?? 0;
-    top.textContent = s === "-" ? "-" : `${s} (${c})`;
-  }
-
-  if (last) last.textContent = k?.last_date ? fmtDate(k.last_date) : "-";
-}
-
-function fillDatalist(id, values) {
-  const dl = document.getElementById(id);
-  if (!dl) return;
-  dl.innerHTML = "";
-  (values || []).forEach((v) => {
-    const opt = document.createElement("option");
-    opt.value = v;
-    dl.appendChild(opt);
-  });
-}
-
-/* ============================================================
-   Paginação UI
-============================================================ */
-function setPageInfo() {
-  const info = $("#pageInfo");
-  const btnPrev = $("#btnPrev");
-  const btnNext = $("#btnNext");
-
-  const rows = state.table.filteredRows || [];
-  const total = rows.length;
-  const pageSize = state.table.pageSize;
-  const totalPages = Math.max(1, Math.ceil(total / pageSize));
-  const page = Math.min(Math.max(1, state.table.page), totalPages);
-
-  state.table.page = page;
-
-  const start = total ? (page - 1) * pageSize + 1 : 0;
-  const end = total ? Math.min(page * pageSize, total) : 0;
-
-  if (info) info.textContent = total ? `Mostrando ${start}-${end} de ${total} • Página ${page}/${totalPages}` : `—`;
-
-  if (btnPrev) btnPrev.disabled = page <= 1 || total === 0;
-  if (btnNext) btnNext.disabled = page >= totalPages || total === 0;
-}
-
 function bindPagination() {
   const sel = $("#pageSize");
   const btnPrev = $("#btnPrev");
   const btnNext = $("#btnNext");
 
   if (sel) {
-    // define default
-    const v = parseInt(sel.value || "200", 10);
-    state.table.pageSize = Number.isFinite(v) ? v : 200;
+    const v = parseInt(sel.value || "50", 10);
+    state.table.pageSize = Number.isFinite(v) ? v : 50;
 
     sel.addEventListener("change", () => {
-      const n = parseInt(sel.value || "200", 10);
-      state.table.pageSize = Number.isFinite(n) ? n : 200;
+      const n = parseInt(sel.value || "50", 10);
+      state.table.pageSize = Number.isFinite(n) ? n : 50;
       state.table.page = 1;
       renderTablePage();
     });
@@ -288,7 +299,7 @@ function bindPagination() {
 }
 
 /* ============================================================
-   Chips
+   Chips (multi seleção)
 ============================================================ */
 function _uniqPush(arr, value) {
   const v = String(value || "").trim();
@@ -329,14 +340,14 @@ function renderChips(kind) {
       _removeValue(list, v);
       renderChips(kind);
       ddRebuild(kind);
-      loadLeadsAndKpisDebounced(true); // ✅ true = reseta página
+      loadLeadsAndKpisDebounced(true);
     });
     box.appendChild(chip);
   });
 }
 
 /* ============================================================
-   Dropdown overlay + busca + infinite scroll
+   Dropdown overlay (Curso/Polo) + Infinite scroll
 ============================================================ */
 function ddGet(kind) {
   return kind === "curso" ? $("#ddCursos") : $("#ddPolos");
@@ -381,8 +392,10 @@ function ddMakeRow(kind, v) {
     <div class="dd-tag">${isOn ? "Selecionado" : "Adicionar"}</div>
   `;
 
+  // mousedown pra não perder o foco antes do click (importante)
   row.addEventListener("mousedown", (e) => {
     e.preventDefault();
+
     if (isOn) _removeValue(selected, v);
     else _uniqPush(selected, v);
 
@@ -423,11 +436,13 @@ function ddRenderNext(kind) {
   if (st.idx === 0) dd.innerHTML = "";
 
   const end = Math.min(st.idx + DD_BATCH, st.filtered.length);
-
   const frag = document.createDocumentFragment();
-  for (let i = st.idx; i < end; i++) frag.appendChild(ddMakeRow(kind, st.filtered[i]));
-  dd.appendChild(frag);
 
+  for (let i = st.idx; i < end; i++) {
+    frag.appendChild(ddMakeRow(kind, st.filtered[i]));
+  }
+
+  dd.appendChild(frag);
   st.idx = end;
 
   const footerId = `ddFooter_${kind}`;
@@ -506,6 +521,7 @@ function bindDropdown(kind) {
     if (e.key === "Escape") ddClose(kind);
   });
 
+  // fecha clicando fora
   document.addEventListener("mousedown", (e) => {
     if (e.target === input) return;
     if (dd.contains(e.target)) return;
@@ -516,7 +532,7 @@ function bindDropdown(kind) {
 }
 
 /* ============================================================
-   Filters
+   Filters (read UI)
 ============================================================ */
 function readFiltersFromUI() {
   state.filters.status = ($("#fStatus")?.value || "").trim();
@@ -524,10 +540,8 @@ function readFiltersFromUI() {
   state.filters.data_ini = ($("#fIni")?.value || "").trim();
   state.filters.data_fim = ($("#fFim")?.value || "").trim();
 
-  // ✅ aqui a gente usa o pageSize como "limit" de busca (mas com cache!)
-  // você pode manter 5000, por exemplo, pra ter várias páginas sem pesar demais
-  const lim = parseInt($("#fLimit")?.value || "500", 10);
-  state.filters.limit = Number.isFinite(lim) ? lim : 500;
+  const lim = parseInt($("#fLimit")?.value || "5000", 10);
+  state.filters.limit = Number.isFinite(lim) ? lim : 5000;
 }
 
 /* ============================================================
@@ -565,6 +579,8 @@ async function loadLeadsAndKpis(resetPage = false) {
     data_ini: state.filters.data_ini,
     data_fim: state.filters.data_fim,
     limit: state.filters.limit,
+
+    // multi (backend aceita curso & polo repetidos)
     curso: state.filters.curso_list,
     polo: state.filters.polo_list,
   };
@@ -577,9 +593,9 @@ async function loadLeadsAndKpis(resetPage = false) {
 
     const rows = leads?.rows || [];
 
-    // ✅ cache para paginação
+    // cache para paginação
     state.table.allRows = rows;
-    state.table.filteredRows = rows; // (se fizer busca local, altera aqui)
+    state.table.filteredRows = rows;
 
     if (resetPage) state.table.page = 1;
 
@@ -590,11 +606,14 @@ async function loadLeadsAndKpis(resetPage = false) {
     if (statusLine) statusLine.textContent = `${count} registros carregados.`;
   } catch (err) {
     const msg = explainErr("loadLeadsAndKpis", err);
+
     state.table.allRows = [];
     state.table.filteredRows = [];
     state.table.page = 1;
+
     renderTablePage();
     renderKpis({ total: 0, top_status: null, last_date: null });
+
     showToast(`Erro: ${msg}`, "err");
   }
 }
@@ -637,6 +656,7 @@ function bindUpload() {
 
       await loadOptions();
       await loadLeadsAndKpis(true);
+
       showToast("Painel atualizado com os novos dados.", "ok");
     } catch (err) {
       const msg = explainErr("upload", err);
@@ -655,6 +675,7 @@ function bindUpload() {
 function bindReload() {
   const btn = $("#btnReload");
   if (!btn) return;
+
   btn.addEventListener("click", async (e) => {
     e.preventDefault();
     await loadOptions();
@@ -682,6 +703,7 @@ function exportCsvServer() {
 function bindExport() {
   const btn = $("#btnExportFilters");
   if (!btn) return;
+
   btn.addEventListener("click", (e) => {
     e.preventDefault();
     showToast("Exportando CSV...", "ok");
@@ -716,7 +738,7 @@ function bindFilters() {
     });
 
     const lim = $("#fLimit");
-    if (lim) lim.value = "5000"; // ✅ sugiro 5000 para ter várias páginas
+    if (lim) lim.value = "5000";
 
     state.filters.curso_list = [];
     state.filters.polo_list = [];
