@@ -31,6 +31,9 @@ ENV opcionais:
 import os
 import io
 import traceback
+import datetime as dt
+from typing import Optional, Dict, Any, List
+
 import pandas as pd
 from flask import Flask, render_template, request, jsonify, send_file
 
@@ -49,6 +52,7 @@ from services.bigquery import (
 # ============================================================
 def _env(name: str, default: str = "") -> str:
     v = os.getenv(name)
+    v = v.strip() if isinstance(v, str) else v
     return v if v else default
 
 
@@ -61,6 +65,12 @@ def _required_envs_ok():
 
 
 def _source_ref():
+    # não explode se options_limit vier zoado
+    try:
+        opt_lim = int(_env("BQ_OPTIONS_LIMIT", "50000"))
+    except Exception:
+        opt_lim = 50000
+
     return {
         "project": _env("GCP_PROJECT_ID"),
         "dataset": _env("BQ_DATASET"),
@@ -68,7 +78,7 @@ def _source_ref():
         "location": _env("BQ_LOCATION", "us-central1"),
         "upload_table": _env("BQ_UPLOAD_TABLE", "stg_leads_upload"),
         "pipeline_proc": _env("BQ_PIPELINE_PROC", "sp_v9_run_pipeline"),
-        "options_limit": int(_env("BQ_OPTIONS_LIMIT", "50000")),
+        "options_limit": opt_lim,
     }
 
 
@@ -77,7 +87,7 @@ def _error_payload(e: Exception, public_msg: str):
         "ok": False,
         "error": public_msg,
         "details": str(e),
-        "trace": traceback.format_exc(limit=6),
+        "trace": traceback.format_exc(limit=8),
         "source": _source_ref(),
     }
 
@@ -87,7 +97,21 @@ def _n(v):
     return v if v else None
 
 
-def _get_list(name: str):
+def _to_date(v: Optional[str]) -> Optional[dt.date]:
+    """
+    Converte YYYY-MM-DD -> datetime.date
+    (BigQuery DATE param precisa ser date, não string)
+    """
+    s = (v or "").strip()
+    if not s:
+        return None
+    try:
+        return dt.date.fromisoformat(s[:10])
+    except Exception:
+        return None
+
+
+def _get_list(name: str) -> List[str]:
     """
     Aceita:
     - ?curso=ABC&curso=DEF (getlist)
@@ -111,7 +135,7 @@ def _get_list(name: str):
     return out
 
 
-def _get_filters_from_request(for_export: bool = False):
+def _get_filters_from_request(for_export: bool = False) -> Dict[str, Any]:
     # limites: UI e export têm limites diferentes
     if for_export:
         lim = int(request.args.get("export_limit") or 200000)
@@ -123,18 +147,19 @@ def _get_filters_from_request(for_export: bool = False):
     return {
         "status": _n(request.args.get("status")),
         "origem": _n(request.args.get("origem")),
-        "data_ini": _n(request.args.get("data_ini")),  # YYYY-MM-DD
-        "data_fim": _n(request.args.get("data_fim")),  # YYYY-MM-DD
+        # ✅ agora vira DATE de verdade
+        "data_ini": _to_date(request.args.get("data_ini")),
+        "data_fim": _to_date(request.args.get("data_fim")),
         "limit": lim,
 
-        # MULTI
+        # MULTI (o services/bigquery.py espera curso_list / polo_list)
         "curso_list": _get_list("curso"),
         "polo_list": _get_list("polo"),
     }
 
 
 # ============================================================
-# APP
+# APP FACTORY
 # ============================================================
 def create_app() -> Flask:
     app = Flask(__name__)
@@ -172,7 +197,7 @@ def create_app() -> Flask:
         filters = _get_filters_from_request(for_export=False)
         try:
             rows = query_leads(filters)
-            return jsonify({"count": len(rows), "rows": rows, "source": _source_ref()})
+            return jsonify({"count": len(rows), "rows": rows})
         except Exception as e:
             print("🚨 /api/leads ERROR:", repr(e))
             return jsonify(_error_payload(e, "Falha ao consultar o BigQuery (leads).")), 500
@@ -194,7 +219,7 @@ def create_app() -> Flask:
         filters = _get_filters_from_request(for_export=False)
         try:
             data = query_kpis(filters)
-            data["source"] = _source_ref()
+            # deixa no formato que seu app.js espera
             return jsonify(data)
         except Exception as e:
             print("🚨 /api/kpis ERROR:", repr(e))
@@ -216,7 +241,6 @@ def create_app() -> Flask:
 
         try:
             data = query_options()
-            data["source"] = _source_ref()
             return jsonify(data)
         except Exception as e:
             print("🚨 /api/options ERROR:", repr(e))
@@ -231,20 +255,19 @@ def create_app() -> Flask:
 
         try:
             if "file" not in request.files:
-                return jsonify({"ok": False, "error": "Nenhum arquivo enviado (campo 'file').", "source": _source_ref()}), 400
+                return jsonify({"ok": False, "error": "Nenhum arquivo enviado (campo 'file')."}), 400
 
             f = request.files["file"]
-            if not f.filename:
-                return jsonify({"ok": False, "error": "Nome de arquivo vazio.", "source": _source_ref()}), 400
+            if not f or not f.filename:
+                return jsonify({"ok": False, "error": "Nome de arquivo vazio."}), 400
 
-            source = (request.form.get("source") or "UPLOAD_PAINEL").strip()
+            source = (request.form.get("source") or "UPLOAD_PAINEL").strip() or "UPLOAD_PAINEL"
             result = ingest_upload_file(f, source=source)
 
             return jsonify({
                 "ok": True,
                 **result,
                 "filename": f.filename,
-                "source": _source_ref(),
             })
 
         except Exception as e:
@@ -264,8 +287,8 @@ def create_app() -> Flask:
             df = pd.DataFrame(rows)
 
             out = io.StringIO()
-            df.to_csv(out, index=False, sep=";", encoding="utf-8-sig")
-            raw = out.getvalue().encode("utf-8-sig")
+            df.to_csv(out, index=False, sep=";")
+            raw = out.getvalue().encode("utf-8-sig")  # ✅ BOM pro Excel
 
             filename = f"leads_export_{pd.Timestamp.now().strftime('%Y-%m-%d')}.csv"
             return send_file(
@@ -341,7 +364,11 @@ def create_app() -> Flask:
     return app
 
 
+# ✅ MUITO IMPORTANTE pro Cloud Run/Gunicorn:
+# deixa um "app" global importável (gunicorn app:app)
+app = create_app()
+
+
 if __name__ == "__main__":
     port = int(_env("PORT", "8080"))
-    app = create_app()
     app.run(host="0.0.0.0", port=port, debug=True)
