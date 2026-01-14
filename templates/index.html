@@ -58,7 +58,7 @@
         </div>
 
         <div class="field field-actions" style="grid-column: span 6;">
-          <button id="btnUpload" class="btn btn-primary">Importar</button>
+          <button id="btnUpload" class="btn btn-primary" type="button">Importar</button>
 
           <a class="btn btn-ghost" id="btnDownloadModel" href="/download/modelo" target="_blank" rel="noopener">
             Baixar modelo
@@ -77,36 +77,48 @@
       </div>
 
       <div class="filters">
+
         <div class="field">
           <label>Status</label>
-          <input id="fStatus" list="dlStatus" placeholder="Ex: NOVO" />
+          <input id="fStatus" list="dlStatus" placeholder="Ex: NOVO" autocomplete="off" />
           <datalist id="dlStatus"></datalist>
         </div>
 
-        <!-- ✅ CURSO MULTI (SEM datalist / SEM modal / dropdown custom com scroll) -->
-        <div class="field field-dd">
+        <!-- ✅ CURSO MULTI — dropdown flutuante -->
+        <div class="field field-dd" style="isolation:isolate;">
           <label>Curso (multi)</label>
 
           <div class="chipbox" id="cursoChipBox" aria-label="Cursos selecionados"></div>
 
+          <!-- anchor do dropdown -->
           <div class="chiprow">
-            <input id="fCurso" placeholder="Clique para ver todos • digite para filtrar • Enter adiciona" autocomplete="off" />
+            <input
+              id="fCurso"
+              placeholder="Clique para ver todos • digite para filtrar • Enter adiciona"
+              autocomplete="off"
+              spellcheck="false"
+            />
           </div>
 
-          <!-- dropdown custom -->
+          <!-- dropdown (overlay) -->
           <div id="ddCursos" class="dd" hidden></div>
 
           <input type="hidden" id="fCursoMulti" value="" />
         </div>
 
-        <!-- ✅ POLO MULTI (SEM datalist / SEM modal / dropdown custom com scroll) -->
-        <div class="field field-dd">
+        <!-- ✅ POLO MULTI — dropdown flutuante -->
+        <div class="field field-dd" style="isolation:isolate;">
           <label>Polo (multi)</label>
 
           <div class="chipbox" id="poloChipBox" aria-label="Polos selecionados"></div>
 
           <div class="chiprow">
-            <input id="fPolo" placeholder="Clique para ver todos • digite para filtrar • Enter adiciona" autocomplete="off" />
+            <input
+              id="fPolo"
+              placeholder="Clique para ver todos • digite para filtrar • Enter adiciona"
+              autocomplete="off"
+              spellcheck="false"
+            />
           </div>
 
           <div id="ddPolos" class="dd" hidden></div>
@@ -116,7 +128,7 @@
 
         <div class="field">
           <label>Origem</label>
-          <input id="fOrigem" list="dlOrigem" placeholder="Ex: Meta Ads" />
+          <input id="fOrigem" list="dlOrigem" placeholder="Ex: Meta Ads" autocomplete="off" />
           <datalist id="dlOrigem"></datalist>
         </div>
 
@@ -137,8 +149,8 @@
 
         <!-- AÇÕES -->
         <div class="field field-actions">
-          <button id="btnApply" class="btn btn-primary">Aplicar filtros</button>
-          <button id="btnClear" class="btn btn-ghost">Limpar</button>
+          <button id="btnApply" class="btn btn-primary" type="button">Aplicar filtros</button>
+          <button id="btnClear" class="btn btn-ghost" type="button">Limpar</button>
 
           <button id="btnReload" class="btn btn-ghost" type="button">Recarregar</button>
           <button id="btnExportFilters" class="btn btn-ghost" type="button">Exportar CSV</button>
