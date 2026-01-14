@@ -17,8 +17,10 @@
       </div>
     </div>
 
-    <!-- topo sem botões (os botões ficam no card de filtros) -->
-    <div class="actions"></div>
+    <div class="actions">
+      <button id="btnReload" class="btn btn-ghost" type="button">Recarregar</button>
+      <button id="btnExportFilters" class="btn btn-ghost" type="button">Exportar CSV</button>
+    </div>
   </header>
 
   <main class="container">
@@ -29,10 +31,12 @@
         <div class="kpi-label">Total de leads</div>
         <div class="kpi-value" id="kpiCount">—</div>
       </div>
+
       <div class="kpi">
         <div class="kpi-label">Status predominante</div>
         <div class="kpi-value" id="kpiTopStatus">—</div>
       </div>
+
       <div class="kpi">
         <div class="kpi-label">Última inscrição</div>
         <div class="kpi-value" id="kpiLastDate">—</div>
@@ -43,7 +47,7 @@
     <section class="card">
       <div class="card-header">
         <h2>Importar planilha</h2>
-        <p>Envie CSV ou XLSX. O arquivo será carregado no BigQuery (staging) e o pipeline será executado.</p>
+        <p>Envie CSV ou XLSX. O arquivo será carregado no BigQuery (staging) e executará a procedure do pipeline.</p>
       </div>
 
       <div class="filters" style="grid-template-columns: repeat(6, minmax(0,1fr));">
@@ -73,7 +77,7 @@
     <section class="card">
       <div class="card-header">
         <h2>Filtros</h2>
-        <p>Refine os dados diretamente no BigQuery.</p>
+        <p>Refine os dados direto na view do BigQuery. Curso e Polo aceitam múltiplos (chips).</p>
       </div>
 
       <div class="filters">
@@ -84,7 +88,7 @@
           <datalist id="dlStatus"></datalist>
         </div>
 
-        <!-- ✅ CURSO MULTI — dropdown flutuante -->
+        <!-- CURSO MULTI -->
         <div class="field field-dd" style="isolation:isolate;">
           <label>Curso (multi)</label>
 
@@ -100,12 +104,10 @@
           </div>
 
           <div id="ddCursos" class="dd" hidden></div>
-
-          <!-- hidden (se você quiser usar, seu JS preenche) -->
           <input type="hidden" id="fCursoMulti" value="" />
         </div>
 
-        <!-- ✅ POLO MULTI — dropdown flutuante -->
+        <!-- POLO MULTI -->
         <div class="field field-dd" style="isolation:isolate;">
           <label>Polo (multi)</label>
 
@@ -121,7 +123,6 @@
           </div>
 
           <div id="ddPolos" class="dd" hidden></div>
-
           <input type="hidden" id="fPoloMulti" value="" />
         </div>
 
@@ -142,17 +143,14 @@
         </div>
 
         <div class="field field-wide">
-          <label>Limite (BigQuery)</label>
-          <input id="fLimit" type="number" min="50" step="50" value="500" />
+          <label>Limite (consulta)</label>
+          <input id="fLimit" type="number" min="50" step="50" value="5000" />
         </div>
 
         <!-- AÇÕES -->
         <div class="field field-actions">
           <button id="btnApply" class="btn btn-primary" type="button">Aplicar filtros</button>
           <button id="btnClear" class="btn btn-ghost" type="button">Limpar</button>
-
-          <button id="btnReload" class="btn btn-ghost" type="button">Recarregar</button>
-          <button id="btnExportFilters" class="btn btn-ghost" type="button">Exportar CSV</button>
         </div>
       </div>
     </section>
@@ -164,22 +162,23 @@
         <p id="statusLine">—</p>
       </div>
 
-      <!-- ✅ PAGINAÇÃO (o JS paginado usa esses IDs) -->
-      <div class="table-toolbar" aria-label="Paginação">
-        <div class="table-left">
-          <span class="muted">Itens por página</span>
-          <select id="pageSize" aria-label="Itens por página">
-            <option value="25">25</option>
+      <!-- PAGINAÇÃO (FRONT) -->
+      <div class="table-toolbar">
+        <div class="toolbar-left">
+          <label class="muted" for="pageSize">Linhas por página</label>
+          <select id="pageSize" class="select">
             <option value="50" selected>50</option>
             <option value="100">100</option>
             <option value="200">200</option>
+            <option value="500">500</option>
           </select>
+
+          <span id="pageInfo" class="muted">—</span>
         </div>
 
-        <div class="table-right">
-          <span id="pageInfo" class="muted">—</span>
-          <button id="btnPrev" class="btn btn-ghost" type="button">Anterior</button>
-          <button id="btnNext" class="btn btn-ghost" type="button">Próxima</button>
+        <div class="toolbar-right">
+          <button id="btnPrev" class="btn btn-ghost" type="button">◀ Anterior</button>
+          <button id="btnNext" class="btn btn-ghost" type="button">Próxima ▶</button>
         </div>
       </div>
 
