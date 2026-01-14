@@ -12,7 +12,7 @@ from google.cloud import bigquery
 DEFAULT_PROJECT = "painel-universidade"
 DEFAULT_DATASET = "modelo_estrela"
 DEFAULT_VIEW_LEADS = "vw_leads_painel_lite"
-DEFAULT_BQ_LOCATION = "US"  # mais seguro p/ multi-região. Se seu dataset for regional, use "us-central1" via ENV.
+DEFAULT_BQ_LOCATION = "us-central1"  # mais seguro p/ multi-região. Se seu dataset for regional, use "us-central1" via ENV.
 
 
 def _env(name: str, default: str = "") -> str:
