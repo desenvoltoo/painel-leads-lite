@@ -7,8 +7,14 @@ from google.cloud import bigquery
 
 
 # ============================================================
-# ENV / CLIENT
+# ENV / CLIENT (DEFAULTS SEGUROS)
 # ============================================================
+DEFAULT_PROJECT = "painel-universidade"
+DEFAULT_DATASET = "modelo_estrela"
+DEFAULT_VIEW_LEADS = "vw_leads_painel_lite"
+DEFAULT_BQ_LOCATION = "US"  # mais seguro p/ multi-região. Se seu dataset for regional, use "us-central1" via ENV.
+
+
 def _env(name: str, default: str = "") -> str:
     v = os.getenv(name)
     v = v.strip() if isinstance(v, str) else v
@@ -25,33 +31,44 @@ def _require_env(names: List[str]) -> Dict[str, str]:
 
 
 def _bq_location() -> str:
-    # BigQuery normalmente é "US" ou "EU".
-    # Se você usar "us-central1" ainda costuma funcionar em muitos casos,
-    # mas o mais seguro é usar "US" (se seu dataset é US).
-    return _env("BQ_LOCATION", "us-central1")
+    """
+    IMPORTANTE:
+    - Dataset multi-região: use "US" (ou "EU")
+    - Dataset regional: "us-central1" (exemplo)
+    Ajuste via env BQ_LOCATION.
+    """
+    return _env("BQ_LOCATION", DEFAULT_BQ_LOCATION)
 
 
 def _client() -> bigquery.Client:
-    project = _env("GCP_PROJECT_ID", "")
+    # Default seguro evita cair em project errado quando ENV não está setada.
+    project = _env("GCP_PROJECT_ID", DEFAULT_PROJECT)
     return bigquery.Client(project=project) if project else bigquery.Client()
 
 
 def _table_ref() -> str:
-    project = _env("GCP_PROJECT_ID", "")
-    dataset = _env("BQ_DATASET", "")
-    view = _env("BQ_VIEW_LEADS", "")
+    """
+    View de leitura do painel.
+    Defaults seguros evitam "tela vazia" por falta de ENV no Cloud Run.
+    """
+    project = _env("GCP_PROJECT_ID", DEFAULT_PROJECT)
+    dataset = _env("BQ_DATASET", DEFAULT_DATASET)
+    view = _env("BQ_VIEW_LEADS", DEFAULT_VIEW_LEADS)
 
-    _require_env(["GCP_PROJECT_ID", "BQ_DATASET", "BQ_VIEW_LEADS"])
+    # se por algum motivo project vier vazio, força erro explícito
+    if not project:
+        _require_env(["GCP_PROJECT_ID"])
+
     return f"`{project}.{dataset}.{view}`"
 
 
 def _date_field() -> str:
-    # na sua view o campo é data_inscricao (DATE)
+    # Na view lite normalmente é data_inscricao (DATE)
     return _env("BQ_DATE_FIELD", "data_inscricao")
 
 
 def _date_expr() -> str:
-    # deixa robusto pra DATE / DATETIME / TIMESTAMP / STRING
+    # Robustez: aceita DATE/DATETIME/TIMESTAMP/STRING
     f = _date_field()
     return f"SAFE_CAST({f} AS DATE)"
 
@@ -119,7 +136,7 @@ def _normalize_datetime_cols(df: pd.DataFrame) -> pd.DataFrame:
 
 
 # ============================================================
-# LEADS (MULTI FILTER) — CORRIGIDO (TRIM + UPPER robusto)
+# LEADS (MULTI FILTER) — COM DEFAULTS SEGUROS
 # ============================================================
 def query_leads(filters: Dict[str, Any]) -> List[Dict[str, Any]]:
     dt = _date_expr()
@@ -127,8 +144,8 @@ def query_leads(filters: Dict[str, Any]) -> List[Dict[str, Any]]:
     curso_list = filters.get("curso_list") or []
     polo_list = filters.get("polo_list") or []
 
-    curso_list_up = [str(x).strip().upper() for x in curso_list if str(x).strip()]
-    polo_list_up = [str(x).strip().upper() for x in polo_list if str(x).strip()]
+    curso_list_up = _norm_list_upper(curso_list)
+    polo_list_up = _norm_list_upper(polo_list)
 
     sql = f"""
     SELECT
@@ -162,10 +179,8 @@ def query_leads(filters: Dict[str, Any]) -> List[Dict[str, Any]]:
         query_parameters=[
             bigquery.ScalarQueryParameter("status", "STRING", filters.get("status") or None),
             bigquery.ScalarQueryParameter("origem", "STRING", filters.get("origem") or None),
-
             bigquery.ArrayQueryParameter("curso_list", "STRING", curso_list_up),
             bigquery.ArrayQueryParameter("polo_list", "STRING", polo_list_up),
-
             bigquery.ScalarQueryParameter("data_ini", "DATE", data_ini),
             bigquery.ScalarQueryParameter("data_fim", "DATE", data_fim),
             bigquery.ScalarQueryParameter("limit", "INT64", int(filters.get("limit") or 500)),
@@ -182,8 +197,8 @@ def query_kpis(filters: Dict[str, Any]) -> Dict[str, Any]:
     curso_list = filters.get("curso_list") or []
     polo_list = filters.get("polo_list") or []
 
-    curso_list_up = [str(x).strip().upper() for x in curso_list if str(x).strip()]
-    polo_list_up = [str(x).strip().upper() for x in polo_list if str(x).strip()]
+    curso_list_up = _norm_list_upper(curso_list)
+    polo_list_up = _norm_list_upper(polo_list)
 
     sql = f"""
     WITH base AS (
@@ -239,7 +254,7 @@ def query_kpis(filters: Dict[str, Any]) -> Dict[str, Any]:
 
 
 # ============================================================
-# OPTIONS (mantido)
+# OPTIONS
 # ============================================================
 def _distinct(column: str, limit: int) -> List[str]:
     sql = f"""
@@ -268,17 +283,19 @@ def query_options() -> Dict[str, List[str]]:
 
 
 # ============================================================
-# UPLOAD + PIPELINE (igual ao seu, mantido)
+# UPLOAD + PIPELINE (mantido)
 # ============================================================
 def ingest_upload_file(file_storage, source: str = "UPLOAD_PAINEL") -> Dict[str, Any]:
-    project = _env("GCP_PROJECT_ID", "")
-    dataset = _env("BQ_DATASET", "")
+    project = _env("GCP_PROJECT_ID", DEFAULT_PROJECT)
+    dataset = _env("BQ_DATASET", DEFAULT_DATASET)
     location = _bq_location()
 
     upload_table = _env("BQ_UPLOAD_TABLE", "stg_leads_upload")
     pipeline_proc = _env("BQ_PIPELINE_PROC", "sp_v9_run_pipeline")
 
-    _require_env(["GCP_PROJECT_ID", "BQ_DATASET"])
+    # Aqui defaults já cobrem, mas se alguém zerar envs, explodimos com mensagem boa
+    if not project or not dataset:
+        _require_env(["GCP_PROJECT_ID", "BQ_DATASET"])
 
     stg_table_id = f"{project}.{dataset}.{upload_table}"
     proc_id = f"{project}.{dataset}.{pipeline_proc}"
