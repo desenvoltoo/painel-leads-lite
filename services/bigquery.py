@@ -124,10 +124,12 @@ def _normalize_datetime_cols(df: pd.DataFrame) -> pd.DataFrame:
 def query_leads(filters: Dict[str, Any]) -> List[Dict[str, Any]]:
     dt = _date_expr()
 
-    curso_list_up = _norm_list_upper(filters.get("curso_list") or [])
-    polo_list_up = _norm_list_upper(filters.get("polo_list") or [])
+    curso_list = filters.get("curso_list") or []
+    polo_list = filters.get("polo_list") or []
 
-    # TRIM(UPPER(col)) para casar com valores com espaços invisíveis
+    curso_list_up = [str(x).strip().upper() for x in curso_list if str(x).strip()]
+    polo_list_up = [str(x).strip().upper() for x in polo_list if str(x).strip()]
+
     sql = f"""
     SELECT
       {dt} AS data_inscricao,
@@ -135,11 +137,17 @@ def query_leads(filters: Dict[str, Any]) -> List[Dict[str, Any]]:
       origem, polo, curso, status, consultor
     FROM {_table_ref()}
     WHERE 1=1
-      AND (@status IS NULL OR TRIM(UPPER(status)) = TRIM(UPPER(@status)))
-      AND (@origem IS NULL OR TRIM(UPPER(origem)) = TRIM(UPPER(@origem)))
+      AND (@status IS NULL OR UPPER(TRIM(status)) = UPPER(TRIM(@status)))
+      AND (@origem IS NULL OR UPPER(TRIM(origem)) = UPPER(TRIM(@origem)))
 
-      AND (ARRAY_LENGTH(@curso_list) = 0 OR TRIM(UPPER(curso)) IN UNNEST(@curso_list))
-      AND (ARRAY_LENGTH(@polo_list)  = 0 OR TRIM(UPPER(polo))  IN UNNEST(@polo_list))
+      AND (
+        ARRAY_LENGTH(@curso_list) = 0
+        OR UPPER(TRIM(curso)) IN UNNEST(@curso_list)
+      )
+      AND (
+        ARRAY_LENGTH(@polo_list) = 0
+        OR UPPER(TRIM(polo)) IN UNNEST(@polo_list)
+      )
 
       AND (@data_ini IS NULL OR {dt} >= @data_ini)
       AND (@data_fim IS NULL OR {dt} <= @data_fim)
@@ -168,37 +176,33 @@ def query_leads(filters: Dict[str, Any]) -> List[Dict[str, Any]]:
     return [{k: r.get(k) for k in r.keys()} for r in rows]
 
 
-# ============================================================
-# KPIs (MULTI FILTER) — CORRIGIDO (TRIM + UPPER robusto)
-# ============================================================
 def query_kpis(filters: Dict[str, Any]) -> Dict[str, Any]:
     dt = _date_expr()
 
-    curso_list_up = _norm_list_upper(filters.get("curso_list") or [])
-    polo_list_up = _norm_list_upper(filters.get("polo_list") or [])
+    curso_list = filters.get("curso_list") or []
+    polo_list = filters.get("polo_list") or []
+
+    curso_list_up = [str(x).strip().upper() for x in curso_list if str(x).strip()]
+    polo_list_up = [str(x).strip().upper() for x in polo_list if str(x).strip()]
 
     sql = f"""
     WITH base AS (
       SELECT
         {dt} AS data_inscricao,
-        TRIM(UPPER(status)) AS status_u,
-        TRIM(UPPER(curso))  AS curso_u,
-        TRIM(UPPER(polo))   AS polo_u,
-        TRIM(UPPER(origem)) AS origem_u
+        status, curso, polo, origem
       FROM {_table_ref()}
       WHERE 1=1
-        AND (@status IS NULL OR TRIM(UPPER(status)) = TRIM(UPPER(@status)))
-        AND (@origem IS NULL OR TRIM(UPPER(origem)) = TRIM(UPPER(@origem)))
-        AND (ARRAY_LENGTH(@curso_list) = 0 OR TRIM(UPPER(curso)) IN UNNEST(@curso_list))
-        AND (ARRAY_LENGTH(@polo_list)  = 0 OR TRIM(UPPER(polo))  IN UNNEST(@polo_list))
+        AND (@status IS NULL OR UPPER(TRIM(status)) = UPPER(TRIM(@status)))
+        AND (@origem IS NULL OR UPPER(TRIM(origem)) = UPPER(TRIM(@origem)))
+        AND (ARRAY_LENGTH(@curso_list) = 0 OR UPPER(TRIM(curso)) IN UNNEST(@curso_list))
+        AND (ARRAY_LENGTH(@polo_list)  = 0 OR UPPER(TRIM(polo))  IN UNNEST(@polo_list))
         AND (@data_ini IS NULL OR {dt} >= @data_ini)
         AND (@data_fim IS NULL OR {dt} <= @data_fim)
     ),
     agg AS (
-      SELECT status_u AS status, COUNT(*) cnt
+      SELECT status, COUNT(*) cnt
       FROM base
-      WHERE status_u IS NOT NULL AND status_u != ""
-      GROUP BY status_u
+      GROUP BY status
     )
     SELECT
       (SELECT COUNT(*) FROM base) AS total,
