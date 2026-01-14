@@ -28,7 +28,7 @@ def _bq_location() -> str:
     # BigQuery normalmente é "US" ou "EU".
     # Se você usar "us-central1" ainda costuma funcionar em muitos casos,
     # mas o mais seguro é usar "US" (se seu dataset é US).
-    return _env("BQ_LOCATION", "US")
+    return _env("BQ_LOCATION", "us-central1")
 
 
 def _client() -> bigquery.Client:
