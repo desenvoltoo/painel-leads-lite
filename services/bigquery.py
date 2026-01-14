@@ -1,14 +1,14 @@
 # -*- coding: utf-8 -*-
 import os
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 import pandas as pd
 from google.cloud import bigquery
 
-
 # ============================================================
 # ENV / CLIENT
 # ============================================================
+
 def _env(name: str, default: str = "") -> str:
     v = os.getenv(name)
     v = v.strip() if isinstance(v, str) else v
@@ -25,7 +25,9 @@ def _require_env(names: List[str]) -> Dict[str, str]:
 
 
 def _bq_location() -> str:
-    return _env("BQ_LOCATION", "us-central1")
+    # ✅ BigQuery normalmente é multi-region: US ou EU
+    # Se teu dataset for us-central1, coloca ENV BQ_LOCATION=us-central1
+    return _env("BQ_LOCATION", "US")
 
 
 def _client() -> bigquery.Client:
@@ -43,16 +45,32 @@ def _table_ref() -> str:
 
 
 def _date_field() -> str:
+    # ✅ na sua view é DATE e se chama data_inscricao
     return _env("BQ_DATE_FIELD", "data_inscricao")
 
 
 def _date_expr() -> str:
-    return f"DATE({_date_field()})"
+    # ✅ funciona se já for DATE, ou se for DATETIME/TIMESTAMP/string
+    return f"SAFE_CAST({_date_field()} AS DATE)"
+
+
+def _parse_date(s: Optional[str]) -> Optional[str]:
+    """
+    Recebe YYYY-MM-DD, devolve string (BigQuery DATE param) ou None.
+    """
+    if not s:
+        return None
+    s = str(s).strip()
+    if not s:
+        return None
+    # deixa o BigQuery validar; aqui só garante formato básico
+    return s
 
 
 # ============================================================
 # NORMALIZAÇÃO UPLOAD
 # ============================================================
+
 def _normalize_cols(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     df.columns = [str(c).strip().lower() for c in df.columns]
@@ -100,15 +118,16 @@ def _normalize_datetime_cols(df: pd.DataFrame) -> pd.DataFrame:
 # ============================================================
 # LEADS (MULTI FILTER)
 # ============================================================
+
 def query_leads(filters: Dict[str, Any]) -> List[Dict[str, Any]]:
     dt = _date_expr()
 
     curso_list = filters.get("curso_list") or []
     polo_list = filters.get("polo_list") or []
 
-    # manda arrays em UPPER para bater com UPPER(curso/polo)
+    # ✅ manda arrays em UPPER para bater com UPPER(curso/polo)
     curso_list_up = [str(x).strip().upper() for x in curso_list if str(x).strip()]
-    polo_list_up = [str(x).strip().upper() for x in polo_list if str(x).strip()]
+    polo_list_up  = [str(x).strip().upper() for x in polo_list  if str(x).strip()]
 
     sql = f"""
     SELECT
@@ -129,8 +148,8 @@ def query_leads(filters: Dict[str, Any]) -> List[Dict[str, Any]]:
     LIMIT @limit
     """
 
-    data_ini = filters.get("data_ini") or None
-    data_fim = filters.get("data_fim") or None
+    data_ini = _parse_date(filters.get("data_ini"))
+    data_fim = _parse_date(filters.get("data_fim"))
 
     job_config = bigquery.QueryJobConfig(
         query_parameters=[
@@ -142,19 +161,19 @@ def query_leads(filters: Dict[str, Any]) -> List[Dict[str, Any]]:
 
             bigquery.ScalarQueryParameter("data_ini", "DATE", data_ini),
             bigquery.ScalarQueryParameter("data_fim", "DATE", data_fim),
+
             bigquery.ScalarQueryParameter("limit", "INT64", int(filters.get("limit") or 500)),
         ]
     )
 
     rows = _client().query(sql, job_config=job_config, location=_bq_location()).result()
-
-    # ✅ ERRO QUE TE QUEBROU ESTAVA AQUI — agora está correto:
     return [{k: r.get(k) for k in r.keys()} for r in rows]
 
 
 # ============================================================
 # KPIs (MULTI FILTER)
 # ============================================================
+
 def query_kpis(filters: Dict[str, Any]) -> Dict[str, Any]:
     dt = _date_expr()
 
@@ -162,7 +181,7 @@ def query_kpis(filters: Dict[str, Any]) -> Dict[str, Any]:
     polo_list = filters.get("polo_list") or []
 
     curso_list_up = [str(x).strip().upper() for x in curso_list if str(x).strip()]
-    polo_list_up = [str(x).strip().upper() for x in polo_list if str(x).strip()]
+    polo_list_up  = [str(x).strip().upper() for x in polo_list  if str(x).strip()]
 
     sql = f"""
     WITH base AS (
@@ -177,7 +196,9 @@ def query_kpis(filters: Dict[str, Any]) -> Dict[str, Any]:
         AND (@data_fim IS NULL OR {dt} <= @data_fim)
     ),
     agg AS (
-      SELECT status, COUNT(*) cnt FROM base GROUP BY status
+      SELECT status, COUNT(*) cnt
+      FROM base
+      GROUP BY status
     )
     SELECT
       (SELECT COUNT(*) FROM base) AS total,
@@ -186,15 +207,17 @@ def query_kpis(filters: Dict[str, Any]) -> Dict[str, Any]:
       (SELECT ARRAY_AGG(STRUCT(status, cnt) ORDER BY cnt DESC) FROM agg) AS by_status
     """
 
-    data_ini = filters.get("data_ini") or None
-    data_fim = filters.get("data_fim") or None
+    data_ini = _parse_date(filters.get("data_ini"))
+    data_fim = _parse_date(filters.get("data_fim"))
 
     job_config = bigquery.QueryJobConfig(
         query_parameters=[
             bigquery.ScalarQueryParameter("status", "STRING", filters.get("status") or None),
             bigquery.ScalarQueryParameter("origem", "STRING", filters.get("origem") or None),
+
             bigquery.ArrayQueryParameter("curso_list", "STRING", curso_list_up),
             bigquery.ArrayQueryParameter("polo_list", "STRING", polo_list_up),
+
             bigquery.ScalarQueryParameter("data_ini", "DATE", data_ini),
             bigquery.ScalarQueryParameter("data_fim", "DATE", data_fim),
         ]
@@ -216,6 +239,7 @@ def query_kpis(filters: Dict[str, Any]) -> Dict[str, Any]:
 # ============================================================
 # OPTIONS (COMPLETO)
 # ============================================================
+
 def _distinct(column: str, limit: int) -> List[str]:
     sql = f"""
     SELECT DISTINCT CAST({column} AS STRING) v
@@ -224,7 +248,6 @@ def _distinct(column: str, limit: int) -> List[str]:
     ORDER BY v
     LIMIT @limit
     """
-
     job_config = bigquery.QueryJobConfig(
         query_parameters=[bigquery.ScalarQueryParameter("limit", "INT64", int(limit))]
     )
@@ -234,7 +257,7 @@ def _distinct(column: str, limit: int) -> List[str]:
 
 def query_options() -> Dict[str, List[str]]:
     limit = int(_env("BQ_OPTIONS_LIMIT", "50000"))
-    limit = max(1000, min(limit, 200000))  # trava segurança
+    limit = max(1000, min(limit, 200000))  # trava de segurança
 
     return {
         "status": _distinct("status", limit),
@@ -247,6 +270,7 @@ def query_options() -> Dict[str, List[str]]:
 # ============================================================
 # UPLOAD + PIPELINE
 # ============================================================
+
 def ingest_upload_file(file_storage, source: str = "UPLOAD_PAINEL") -> Dict[str, Any]:
     project = _env("GCP_PROJECT_ID", "")
     dataset = _env("BQ_DATASET", "")
@@ -401,6 +425,7 @@ def ingest_upload_file(file_storage, source: str = "UPLOAD_PAINEL") -> Dict[str,
     else:
         raise ValueError("Formato inválido. Envie CSV ou XLSX.")
 
+    # chama pipeline
     pipeline_sql = f"CALL `{proc_id}`(@fn);"
     pipeline_job = client.query(
         pipeline_sql,
@@ -425,6 +450,7 @@ def ingest_upload_file(file_storage, source: str = "UPLOAD_PAINEL") -> Dict[str,
 # ============================================================
 # DEBUG
 # ============================================================
+
 def debug_count() -> int:
     sql = f"SELECT COUNT(1) c FROM {_table_ref()}"
     row = next(iter(_client().query(sql, location=_bq_location()).result()), None)
