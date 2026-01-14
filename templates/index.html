@@ -17,7 +17,7 @@
       </div>
     </div>
 
-    <!-- ✅ REMOVIDO: botão recarregar do topo -->
+    <!-- topo sem botões -->
     <div class="actions"></div>
   </header>
 
@@ -59,9 +59,11 @@
 
         <div class="field field-actions" style="grid-column: span 6;">
           <button id="btnUpload" class="btn btn-primary">Importar</button>
+
           <a class="btn btn-ghost" id="btnDownloadModel" href="/download/modelo" target="_blank" rel="noopener">
             Baixar modelo
           </a>
+
           <span id="uploadStatus" class="muted"></span>
         </div>
       </div>
@@ -81,37 +83,33 @@
           <datalist id="dlStatus"></datalist>
         </div>
 
-        <!-- ✅ CURSO MULTI -->
-        <div class="field">
+        <!-- ✅ CURSO MULTI (SEM datalist / SEM modal / dropdown custom com scroll) -->
+        <div class="field field-dd">
           <label>Curso (multi)</label>
 
-          <!-- chips -->
           <div class="chipbox" id="cursoChipBox" aria-label="Cursos selecionados"></div>
 
-          <!-- input para adicionar rápido -->
           <div class="chiprow">
-            <input id="fCurso" list="dlCurso" placeholder="Digite e pressione Enter para adicionar" />
-            <button id="btnPickCursos" class="btn btn-ghost btn-sm" type="button">Ver todos</button>
+            <input id="fCurso" placeholder="Clique para ver todos • digite para filtrar • Enter adiciona" autocomplete="off" />
           </div>
 
-          <datalist id="dlCurso"></datalist>
+          <!-- dropdown custom -->
+          <div id="ddCursos" class="dd" hidden></div>
 
-          <!-- hidden: JS mantém lista -->
           <input type="hidden" id="fCursoMulti" value="" />
         </div>
 
-        <!-- ✅ POLO MULTI -->
-        <div class="field">
+        <!-- ✅ POLO MULTI (SEM datalist / SEM modal / dropdown custom com scroll) -->
+        <div class="field field-dd">
           <label>Polo (multi)</label>
 
           <div class="chipbox" id="poloChipBox" aria-label="Polos selecionados"></div>
 
           <div class="chiprow">
-            <input id="fPolo" list="dlPolo" placeholder="Digite e pressione Enter para adicionar" />
-            <button id="btnPickPolos" class="btn btn-ghost btn-sm" type="button">Ver todos</button>
+            <input id="fPolo" placeholder="Clique para ver todos • digite para filtrar • Enter adiciona" autocomplete="off" />
           </div>
 
-          <datalist id="dlPolo"></datalist>
+          <div id="ddPolos" class="dd" hidden></div>
 
           <input type="hidden" id="fPoloMulti" value="" />
         </div>
@@ -137,7 +135,7 @@
           <input id="fLimit" type="number" min="50" step="50" value="500" />
         </div>
 
-        <!-- ✅ AÇÕES: recarregar junto do export -->
+        <!-- AÇÕES -->
         <div class="field field-actions">
           <button id="btnApply" class="btn btn-primary">Aplicar filtros</button>
           <button id="btnClear" class="btn btn-ghost">Limpar</button>
@@ -182,62 +180,6 @@
     </footer>
 
   </main>
-
-  <!-- =======================================================
-       MODAL: CURSOS
-  ======================================================== -->
-  <div id="modalCursos" class="modal" aria-hidden="true">
-    <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="modalCursosTitle">
-      <div class="modal-head">
-        <div>
-          <div class="modal-title" id="modalCursosTitle">Selecionar cursos</div>
-          <div class="muted">Marque vários e clique em “Aplicar”.</div>
-        </div>
-        <button class="btn btn-ghost btn-sm" id="btnCloseCursos" type="button">Fechar</button>
-      </div>
-
-      <div class="modal-body">
-        <div class="modal-tools">
-          <input id="modalCursosSearch" placeholder="Buscar curso..." />
-          <button id="btnCursosClear" class="btn btn-ghost btn-sm" type="button">Limpar seleção</button>
-        </div>
-
-        <div id="modalCursosList" class="modal-list"></div>
-      </div>
-
-      <div class="modal-foot">
-        <button id="btnCursosApply" class="btn btn-primary" type="button">Aplicar</button>
-      </div>
-    </div>
-  </div>
-
-  <!-- =======================================================
-       MODAL: POLOS
-  ======================================================== -->
-  <div id="modalPolos" class="modal" aria-hidden="true">
-    <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="modalPolosTitle">
-      <div class="modal-head">
-        <div>
-          <div class="modal-title" id="modalPolosTitle">Selecionar polos</div>
-          <div class="muted">Marque vários e clique em “Aplicar”.</div>
-        </div>
-        <button class="btn btn-ghost btn-sm" id="btnClosePolos" type="button">Fechar</button>
-      </div>
-
-      <div class="modal-body">
-        <div class="modal-tools">
-          <input id="modalPolosSearch" placeholder="Buscar polo..." />
-          <button id="btnPolosClear" class="btn btn-ghost btn-sm" type="button">Limpar seleção</button>
-        </div>
-
-        <div id="modalPolosList" class="modal-list"></div>
-      </div>
-
-      <div class="modal-foot">
-        <button id="btnPolosApply" class="btn btn-primary" type="button">Aplicar</button>
-      </div>
-    </div>
-  </div>
 
   <script src="{{ url_for('static', filename='js/app.js') }}"></script>
 </body>
