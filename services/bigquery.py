@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 import os
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 import pandas as pd
 from google.cloud import bigquery
@@ -45,7 +45,7 @@ def _table_ref() -> str:
     """
     project = _env("GCP_PROJECT_ID", "painel-universidade")
     dataset = _env("BQ_DATASET", "modelo_estrela")
-    view = _env("BQ_VIEW_LEADS", "vw_leads_painel_lite")  # ajuste se precisar
+    view = _env("BQ_VIEW_LEADS", "vw_leads_painel_lite")
 
     if not project:
         _require_env(["GCP_PROJECT_ID"])
@@ -55,11 +55,8 @@ def _table_ref() -> str:
 
 def _date_field() -> str:
     """
-    Sua view (pelo SQL que você mandou) expõe:
-      DATE(v.data_inscricao_dt) AS data_inscricao
-
-    Então o padrão certo aqui é "data_inscricao".
-    Se sua view tiver data_inscricao_dt, troque via env BQ_DATE_FIELD.
+    Por padrão sua view expõe 'data_inscricao' (DATE),
+    mas você pode trocar via env BQ_DATE_FIELD.
     """
     return _env("BQ_DATE_FIELD", "data_inscricao")
 
@@ -122,11 +119,73 @@ def _normalize_datetime_cols(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def _as_list(v) -> List[str]:
+    """
+    Normaliza valores para lista:
+    - None -> []
+    - "A" -> ["A"]
+    - ["A","B"] -> ["A","B"]
+    Remove vazios e trim.
+    """
+    if v is None:
+        return []
+    if isinstance(v, (list, tuple)):
+        out = []
+        for x in v:
+            s = (str(x).strip() if x is not None else "")
+            if s:
+                out.append(s)
+        return out
+    s = str(v).strip()
+    return [s] if s else []
+
+
+# ============================================================
+# SQL HELPERS (multi filtros)
+# ============================================================
+def _where_multi(column: str, param_single: str, param_list: str) -> str:
+    """
+    Regras:
+    - Se vier lista com tamanho > 0: filtra por IN UNNEST(@list)
+    - Se não vier lista: usa o single (compatibilidade antiga)
+    Tudo com UPPER/TRIM para padronização.
+    """
+    col_expr = f"UPPER(TRIM(CAST({column} AS STRING)))"
+    single_expr = f"UPPER(TRIM(@{param_single}))"
+    list_expr = f"(SELECT ARRAY_AGG(UPPER(TRIM(x))) FROM UNNEST(@{param_list}) x)"
+
+    return f"""
+      AND (
+        (ARRAY_LENGTH(@{param_list}) > 0 AND {col_expr} IN UNNEST({list_expr}))
+        OR
+        (ARRAY_LENGTH(@{param_list}) = 0 AND (@{param_single} IS NULL OR {col_expr} = {single_expr}))
+      )
+    """
+
+
+def _date_params(filters: Dict[str, Any]):
+    data_ini = filters.get("data_ini") or None
+    data_fim = filters.get("data_fim") or None
+    return data_ini, data_fim
+
+
 # ============================================================
 # LEADS
 # ============================================================
 def query_leads(filters: Dict[str, Any]) -> List[Dict[str, Any]]:
     dt = _date_expr()
+
+    # listas (novas)
+    status_list = _as_list(filters.get("status_list"))
+    curso_list = _as_list(filters.get("curso_list"))
+    polo_list = _as_list(filters.get("polo_list"))
+    origem_list = _as_list(filters.get("origem_list"))
+
+    # singles (compat)
+    status = filters.get("status") or None
+    curso = filters.get("curso") or None
+    polo = filters.get("polo") or None
+    origem = filters.get("origem") or None
 
     sql = f"""
     SELECT
@@ -135,25 +194,33 @@ def query_leads(filters: Dict[str, Any]) -> List[Dict[str, Any]]:
       origem, polo, curso, status, consultor
     FROM {_table_ref()}
     WHERE 1=1
-      AND (@status IS NULL OR UPPER(status) = UPPER(@status))
-      AND (@curso  IS NULL OR UPPER(curso)  = UPPER(@curso))
-      AND (@polo   IS NULL OR UPPER(polo)   = UPPER(@polo))
-      AND (@origem IS NULL OR UPPER(origem) = UPPER(@origem))
+      {_where_multi("status", "status", "status_list")}
+      {_where_multi("curso",  "curso",  "curso_list")}
+      {_where_multi("polo",   "polo",   "polo_list")}
+      {_where_multi("origem", "origem", "origem_list")}
       AND (@data_ini IS NULL OR {dt} >= @data_ini)
       AND (@data_fim IS NULL OR {dt} <= @data_fim)
     ORDER BY {dt} DESC
     LIMIT @limit
     """
 
-    data_ini = filters.get("data_ini") or None
-    data_fim = filters.get("data_fim") or None
+    data_ini, data_fim = _date_params(filters)
 
     job_config = bigquery.QueryJobConfig(
         query_parameters=[
-            bigquery.ScalarQueryParameter("status", "STRING", filters.get("status") or None),
-            bigquery.ScalarQueryParameter("curso", "STRING", filters.get("curso") or None),
-            bigquery.ScalarQueryParameter("polo", "STRING", filters.get("polo") or None),
-            bigquery.ScalarQueryParameter("origem", "STRING", filters.get("origem") or None),
+            # singles (compat)
+            bigquery.ScalarQueryParameter("status", "STRING", status),
+            bigquery.ScalarQueryParameter("curso", "STRING", curso),
+            bigquery.ScalarQueryParameter("polo", "STRING", polo),
+            bigquery.ScalarQueryParameter("origem", "STRING", origem),
+
+            # lists (novo)
+            bigquery.ArrayQueryParameter("status_list", "STRING", status_list),
+            bigquery.ArrayQueryParameter("curso_list", "STRING", curso_list),
+            bigquery.ArrayQueryParameter("polo_list", "STRING", polo_list),
+            bigquery.ArrayQueryParameter("origem_list", "STRING", origem_list),
+
+            # datas/limit
             bigquery.ScalarQueryParameter("data_ini", "DATE", data_ini),
             bigquery.ScalarQueryParameter("data_fim", "DATE", data_fim),
             bigquery.ScalarQueryParameter("limit", "INT64", int(filters.get("limit") or 500)),
@@ -170,15 +237,25 @@ def query_leads(filters: Dict[str, Any]) -> List[Dict[str, Any]]:
 def query_kpis(filters: Dict[str, Any]) -> Dict[str, Any]:
     dt = _date_expr()
 
+    status_list = _as_list(filters.get("status_list"))
+    curso_list = _as_list(filters.get("curso_list"))
+    polo_list = _as_list(filters.get("polo_list"))
+    origem_list = _as_list(filters.get("origem_list"))
+
+    status = filters.get("status") or None
+    curso = filters.get("curso") or None
+    polo = filters.get("polo") or None
+    origem = filters.get("origem") or None
+
     sql = f"""
     WITH base AS (
       SELECT {dt} AS data_inscricao, status, curso, polo, origem
       FROM {_table_ref()}
       WHERE 1=1
-        AND (@status IS NULL OR UPPER(status) = UPPER(@status))
-        AND (@curso  IS NULL OR UPPER(curso)  = UPPER(@curso))
-        AND (@polo   IS NULL OR UPPER(polo)   = UPPER(@polo))
-        AND (@origem IS NULL OR UPPER(origem) = UPPER(@origem))
+        {_where_multi("status", "status", "status_list")}
+        {_where_multi("curso",  "curso",  "curso_list")}
+        {_where_multi("polo",   "polo",   "polo_list")}
+        {_where_multi("origem", "origem", "origem_list")}
         AND (@data_ini IS NULL OR {dt} >= @data_ini)
         AND (@data_fim IS NULL OR {dt} <= @data_fim)
     ),
@@ -192,15 +269,20 @@ def query_kpis(filters: Dict[str, Any]) -> Dict[str, Any]:
       (SELECT ARRAY_AGG(STRUCT(status, cnt) ORDER BY cnt DESC) FROM agg) AS by_status
     """
 
-    data_ini = filters.get("data_ini") or None
-    data_fim = filters.get("data_fim") or None
+    data_ini, data_fim = _date_params(filters)
 
     job_config = bigquery.QueryJobConfig(
         query_parameters=[
-            bigquery.ScalarQueryParameter("status", "STRING", filters.get("status") or None),
-            bigquery.ScalarQueryParameter("curso", "STRING", filters.get("curso") or None),
-            bigquery.ScalarQueryParameter("polo", "STRING", filters.get("polo") or None),
-            bigquery.ScalarQueryParameter("origem", "STRING", filters.get("origem") or None),
+            bigquery.ScalarQueryParameter("status", "STRING", status),
+            bigquery.ScalarQueryParameter("curso", "STRING", curso),
+            bigquery.ScalarQueryParameter("polo", "STRING", polo),
+            bigquery.ScalarQueryParameter("origem", "STRING", origem),
+
+            bigquery.ArrayQueryParameter("status_list", "STRING", status_list),
+            bigquery.ArrayQueryParameter("curso_list", "STRING", curso_list),
+            bigquery.ArrayQueryParameter("polo_list", "STRING", polo_list),
+            bigquery.ArrayQueryParameter("origem_list", "STRING", origem_list),
+
             bigquery.ScalarQueryParameter("data_ini", "DATE", data_ini),
             bigquery.ScalarQueryParameter("data_fim", "DATE", data_fim),
         ]
@@ -220,25 +302,36 @@ def query_kpis(filters: Dict[str, Any]) -> Dict[str, Any]:
 
 
 # ============================================================
-# OPTIONS
+# OPTIONS (dropdowns completos)
 # ============================================================
-def _distinct(column: str, limit: int = 250) -> List[str]:
+def _distinct(column: str, limit: int = 50000) -> List[str]:
+    """
+    LIMIT alto por padrão pra não cortar a lista.
+    Você pode controlar via env BQ_OPTIONS_LIMIT (ex: 20000).
+    """
+    options_limit = int(_env("BQ_OPTIONS_LIMIT", str(limit)))
+
     sql = f"""
-    SELECT DISTINCT {column} v
+    SELECT DISTINCT TRIM(CAST({column} AS STRING)) v
     FROM {_table_ref()}
-    WHERE {column} IS NOT NULL AND TRIM(CAST({column} AS STRING)) != ""
+    WHERE {column} IS NOT NULL
+      AND TRIM(CAST({column} AS STRING)) != ""
     ORDER BY v
     LIMIT @limit
     """
 
     job_config = bigquery.QueryJobConfig(
-        query_parameters=[bigquery.ScalarQueryParameter("limit", "INT64", limit)]
+        query_parameters=[bigquery.ScalarQueryParameter("limit", "INT64", options_limit)]
     )
     rows = _client().query(sql, job_config=job_config, location=_bq_location()).result()
     return [str(r.get("v")) for r in rows if r.get("v")]
 
 
 def query_options() -> Dict[str, List[str]]:
+    """
+    Agora retorna o catálogo completo (até BQ_OPTIONS_LIMIT)
+    e para de depender do LIMIT 250.
+    """
     return {
         "status": _distinct("status"),
         "curso": _distinct("curso"),
@@ -248,7 +341,7 @@ def query_options() -> Dict[str, List[str]]:
 
 
 # ============================================================
-# UPLOAD + PIPELINE (BLINDADO)
+# UPLOAD + PIPELINE (BLINDADO)  [mantido]
 # ============================================================
 def ingest_upload_file(file_storage, source: str = "UPLOAD_PAINEL") -> Dict[str, Any]:
     """
