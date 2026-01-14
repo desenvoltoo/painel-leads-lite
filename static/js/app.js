@@ -1,11 +1,10 @@
 /* ============================================================
-   Painel Leads Lite — app.js (compatível com seu index.html)
+   Painel Leads Lite — app.js (multi-select + modais + export server)
 ============================================================ */
 
 const $ = (sel) => document.querySelector(sel);
 
 function showToast(msg, type = "ok") {
-  // Se não existir toast no HTML, usa statusLine/uploadStatus
   const statusLine = $("#statusLine");
   if (statusLine) {
     statusLine.textContent = msg;
@@ -49,14 +48,22 @@ function debounce(fn, delay = 300) {
    State
 ============================================================ */
 const state = {
+  options: {
+    status: [],
+    curso: [],
+    polo: [],
+    origem: [],
+  },
   filters: {
     status: "",
-    curso: "",
-    polo: "",
     origem: "",
     data_ini: "",
     data_fim: "",
     limit: 500,
+
+    // multi
+    curso_list: [],
+    polo_list: [],
   },
 };
 
@@ -65,8 +72,22 @@ const state = {
 ============================================================ */
 async function apiGet(path, params = {}) {
   const url = new URL(path, window.location.origin);
+
   Object.entries(params).forEach(([k, v]) => {
-    if (v !== null && v !== undefined) url.searchParams.set(k, v);
+    if (v === null || v === undefined) return;
+
+    // arrays -> repetição de query param: curso=A&curso=B
+    if (Array.isArray(v)) {
+      v.forEach((item) => {
+        if (item === null || item === undefined) return;
+        const s = String(item).trim();
+        if (s) url.searchParams.append(k, s);
+      });
+      return;
+    }
+
+    const s = String(v).trim();
+    if (s) url.searchParams.set(k, s);
   });
 
   const res = await fetch(url.toString(), { cache: "no-store" });
@@ -82,7 +103,7 @@ async function apiPostForm(path, formData) {
 }
 
 /* ============================================================
-   UI: render
+   UI: table + KPIs
 ============================================================ */
 function renderTable(rows) {
   const tbody = $("#tbl tbody");
@@ -114,10 +135,6 @@ function renderTable(rows) {
 }
 
 function renderKpis(k) {
-  // IDs do seu HTML:
-  // total: #kpiCount
-  // top status: #kpiTopStatus
-  // last: #kpiLastDate
   const total = $("#kpiCount");
   const top = $("#kpiTopStatus");
   const last = $("#kpiLastDate");
@@ -145,20 +162,162 @@ function fillDatalist(id, values) {
 }
 
 /* ============================================================
-   Filters
+   Multi-select chips
+============================================================ */
+function _uniqPush(arr, value) {
+  const v = String(value || "").trim();
+  if (!v) return;
+  if (!arr.some((x) => String(x).toUpperCase() === v.toUpperCase())) arr.push(v);
+}
+
+function _removeValue(arr, value) {
+  const v = String(value || "").trim().toUpperCase();
+  const idx = arr.findIndex((x) => String(x).trim().toUpperCase() === v);
+  if (idx >= 0) arr.splice(idx, 1);
+}
+
+function renderChips(kind) {
+  // kind: "curso" | "polo"
+  const box = kind === "curso" ? $("#cursoChipBox") : $("#poloChipBox");
+  const hidden = kind === "curso" ? $("#fCursoMulti") : $("#fPoloMulti");
+  const list = kind === "curso" ? state.filters.curso_list : state.filters.polo_list;
+
+  if (!box || !hidden) return;
+
+  hidden.value = list.join("||"); // só pra debug/inspeção
+  box.innerHTML = "";
+
+  if (!list.length) {
+    const empty = document.createElement("div");
+    empty.className = "muted";
+    empty.textContent = "Nenhum selecionado.";
+    box.appendChild(empty);
+    return;
+  }
+
+  list.forEach((v) => {
+    const chip = document.createElement("button");
+    chip.type = "button";
+    chip.className = "chip";
+    chip.innerHTML = `<span class="chip-text">${escapeHtml(v)}</span><span class="chip-x">×</span>`;
+    chip.addEventListener("click", () => {
+      _removeValue(list, v);
+      renderChips(kind);
+    });
+    box.appendChild(chip);
+  });
+}
+
+function addFromInput(kind) {
+  const input = kind === "curso" ? $("#fCurso") : $("#fPolo");
+  if (!input) return;
+
+  const raw = (input.value || "").trim();
+  if (!raw) return;
+
+  if (kind === "curso") _uniqPush(state.filters.curso_list, raw);
+  if (kind === "polo") _uniqPush(state.filters.polo_list, raw);
+
+  input.value = "";
+  renderChips(kind);
+}
+
+/* ============================================================
+   Modais (Cursos/Polos) com busca + scroll
+============================================================ */
+function openModal(modalEl) {
+  if (!modalEl) return;
+  modalEl.classList.add("open");
+  modalEl.setAttribute("aria-hidden", "false");
+}
+
+function closeModal(modalEl) {
+  if (!modalEl) return;
+  modalEl.classList.remove("open");
+  modalEl.setAttribute("aria-hidden", "true");
+}
+
+function buildModalList(kind) {
+  // kind: "curso" | "polo"
+  const listEl = kind === "curso" ? $("#modalCursosList") : $("#modalPolosList");
+  const searchEl = kind === "curso" ? $("#modalCursosSearch") : $("#modalPolosSearch");
+
+  const values = kind === "curso" ? (state.options.curso || []) : (state.options.polo || []);
+  const selected = kind === "curso" ? state.filters.curso_list : state.filters.polo_list;
+
+  if (!listEl) return;
+
+  const q = (searchEl?.value || "").trim().toUpperCase();
+
+  const filtered = values.filter((v) => {
+    const s = String(v || "");
+    if (!s) return false;
+    if (!q) return true;
+    return s.toUpperCase().includes(q);
+  });
+
+  listEl.innerHTML = "";
+
+  if (!filtered.length) {
+    listEl.innerHTML = `<div class="muted">Nada encontrado.</div>`;
+    return;
+  }
+
+  filtered.forEach((v) => {
+    const id = `${kind}_${btoa(unescape(encodeURIComponent(v))).slice(0, 24)}`;
+
+    const row = document.createElement("label");
+    row.className = "modal-item";
+
+    const chk = document.createElement("input");
+    chk.type = "checkbox";
+    chk.value = v;
+    chk.checked = selected.some((x) => String(x).trim().toUpperCase() === String(v).trim().toUpperCase());
+
+    const span = document.createElement("span");
+    span.className = "modal-item-text";
+    span.textContent = v;
+
+    row.appendChild(chk);
+    row.appendChild(span);
+    listEl.appendChild(row);
+  });
+}
+
+function applyModalSelection(kind) {
+  const listEl = kind === "curso" ? $("#modalCursosList") : $("#modalPolosList");
+  if (!listEl) return;
+
+  const checks = Array.from(listEl.querySelectorAll('input[type="checkbox"]'));
+  const chosen = checks.filter((c) => c.checked).map((c) => c.value);
+
+  if (kind === "curso") state.filters.curso_list = chosen;
+  if (kind === "polo") state.filters.polo_list = chosen;
+
+  renderChips(kind);
+}
+
+function clearModalSelection(kind) {
+  if (kind === "curso") state.filters.curso_list = [];
+  if (kind === "polo") state.filters.polo_list = [];
+  renderChips(kind);
+  buildModalList(kind);
+}
+
+/* ============================================================
+   Filters: read UI -> state
 ============================================================ */
 function readFiltersFromUI() {
   state.filters.status = ($("#fStatus")?.value || "").trim();
-  state.filters.curso = ($("#fCurso")?.value || "").trim();
-  state.filters.polo = ($("#fPolo")?.value || "").trim();
   state.filters.origem = ($("#fOrigem")?.value || "").trim();
-
-  // seu HTML usa fIni e fFim
   state.filters.data_ini = ($("#fIni")?.value || "").trim();
   state.filters.data_fim = ($("#fFim")?.value || "").trim();
 
   const lim = parseInt($("#fLimit")?.value || "500", 10);
   state.filters.limit = Number.isFinite(lim) ? lim : 500;
+
+  // curso/polo multi já ficam no state (chips + modal),
+  // mas se tiver algo digitado e o usuário não deu Enter, não adicionamos automaticamente.
 }
 
 /* ============================================================
@@ -166,10 +325,21 @@ function readFiltersFromUI() {
 ============================================================ */
 async function loadOptions() {
   const data = await apiGet("/api/options");
-  fillDatalist("dlStatus", data.status);
-  fillDatalist("dlCurso", data.curso);
-  fillDatalist("dlPolo", data.polo);
-  fillDatalist("dlOrigem", data.origem);
+  state.options = {
+    status: data.status || [],
+    curso: data.curso || [],
+    polo: data.polo || [],
+    origem: data.origem || [],
+  };
+
+  fillDatalist("dlStatus", state.options.status);
+  fillDatalist("dlCurso", state.options.curso);
+  fillDatalist("dlPolo", state.options.polo);
+  fillDatalist("dlOrigem", state.options.origem);
+
+  // re-render chips (caso existam)
+  renderChips("curso");
+  renderChips("polo");
 }
 
 async function loadLeadsAndKpis() {
@@ -178,10 +348,22 @@ async function loadLeadsAndKpis() {
   const statusLine = $("#statusLine");
   if (statusLine) statusLine.textContent = "Carregando...";
 
+  const params = {
+    status: state.filters.status,
+    origem: state.filters.origem,
+    data_ini: state.filters.data_ini,
+    data_fim: state.filters.data_fim,
+    limit: state.filters.limit,
+
+    // ✅ multi: vira curso=A&curso=B ...
+    curso: state.filters.curso_list,
+    polo: state.filters.polo_list,
+  };
+
   try {
     const [leads, kpis] = await Promise.all([
-      apiGet("/api/leads", state.filters),
-      apiGet("/api/kpis", state.filters),
+      apiGet("/api/leads", params),
+      apiGet("/api/kpis", params),
     ]);
 
     const rows = leads?.rows || [];
@@ -236,7 +418,7 @@ function bindUpload() {
       setUploadStatus(`${msg} (${rows} linhas) — ${fname}`, "ok");
       showToast("Upload finalizado. Atualizando dados...", "ok");
 
-      // Atualiza painel após promote
+      await loadOptions();
       await loadLeadsAndKpis();
       showToast("Painel atualizado com os novos dados.", "ok");
 
@@ -252,7 +434,7 @@ function bindUpload() {
 }
 
 /* ============================================================
-   Extras: Reload + Export
+   Reload + Export (server)
 ============================================================ */
 function bindReload() {
   const btn = $("#btnReload");
@@ -264,77 +446,45 @@ function bindReload() {
   });
 }
 
-/* ============================================================
-   Export helper (reaproveitado pelos 2 botões)
-============================================================ */
-async function exportCsvFromFilters() {
-  try {
-    readFiltersFromUI();
-    const data = await apiGet("/api/leads", state.filters);
-    const rows = data?.rows || [];
+function exportCsvServer() {
+  // usa /api/export (UTF-8-SIG) -> resolve caracteres especiais
+  readFiltersFromUI();
 
-    if (!rows.length) {
-      showToast("Nada para exportar com esses filtros.", "warn");
-      return;
-    }
+  const url = new URL("/api/export", window.location.origin);
 
-    const headers = [
-      "data_inscricao","nome","cpf","celular","email",
-      "origem","polo","curso","status","consultor"
-    ];
+  // scalar
+  if (state.filters.status) url.searchParams.set("status", state.filters.status);
+  if (state.filters.origem) url.searchParams.set("origem", state.filters.origem);
+  if (state.filters.data_ini) url.searchParams.set("data_ini", state.filters.data_ini);
+  if (state.filters.data_fim) url.searchParams.set("data_fim", state.filters.data_fim);
 
-    const csv = [
-      headers.join(","),
-      ...rows.map(r => headers.map(h => {
-        const v = r[h] ?? "";
-        const s = String(v).replaceAll('"', '""');
-        return `"${s}"`;
-      }).join(","))
-    ].join("\n");
+  // multi
+  (state.filters.curso_list || []).forEach((c) => url.searchParams.append("curso", c));
+  (state.filters.polo_list || []).forEach((p) => url.searchParams.append("polo", p));
 
-    const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
-    const url = URL.createObjectURL(blob);
+  // export_limit opcional (se quiser mais que o limite da tela)
+  url.searchParams.set("export_limit", "200000");
 
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `leads_export_${new Date().toISOString().slice(0,10)}.csv`;
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-    URL.revokeObjectURL(url);
-
-    showToast("CSV exportado.", "ok");
-  } catch (err) {
-    console.error(err);
-    showToast("Falha ao exportar CSV.", "err");
-  }
+  // abre download
+  window.open(url.toString(), "_blank", "noopener");
 }
 
 function bindExport() {
-  // Botão do topo (já existe)
-  const btnTop = $("#btnExport");
+  const btn = $("#btnExportFilters");
+  if (!btn) return;
 
-  // Botão novo ao lado do Limpar
-  const btnFilters = $("#btnExportFilters");
-
-  const handler = async (e) => {
+  btn.addEventListener("click", (e) => {
     e.preventDefault();
-    e.stopPropagation();
-
     showToast("Exportando CSV...", "ok");
-    await exportCsvFromFilters();
-  };
-
-  if (btnTop) btnTop.addEventListener("click", handler);
-  if (btnFilters) btnFilters.addEventListener("click", handler);
+    exportCsvServer();
+  });
 }
 
-
 /* ============================================================
-   Bind filters (apply/clear + auto refresh on typing)
+   Bind filtros (apply/clear + auto refresh)
 ============================================================ */
 function bindFilters() {
-  const ids = ["#fStatus", "#fCurso", "#fPolo", "#fOrigem", "#fIni", "#fFim", "#fLimit"];
+  const ids = ["#fStatus", "#fOrigem", "#fIni", "#fFim", "#fLimit"];
 
   ids.forEach((id) => {
     const el = $(id);
@@ -342,6 +492,29 @@ function bindFilters() {
     el.addEventListener("change", loadLeadsAndKpisDebounced);
     el.addEventListener("keyup", loadLeadsAndKpisDebounced);
   });
+
+  // inputs de multi: Enter adiciona chip
+  const fCurso = $("#fCurso");
+  if (fCurso) {
+    fCurso.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") {
+        e.preventDefault();
+        addFromInput("curso");
+        loadLeadsAndKpisDebounced();
+      }
+    });
+  }
+
+  const fPolo = $("#fPolo");
+  if (fPolo) {
+    fPolo.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") {
+        e.preventDefault();
+        addFromInput("polo");
+        loadLeadsAndKpisDebounced();
+      }
+    });
+  }
 
   const btnApply = $("#btnApply");
   if (btnApply) {
@@ -356,7 +529,7 @@ function bindFilters() {
     btnClear.addEventListener("click", (e) => {
       e.preventDefault();
 
-      ["#fStatus", "#fCurso", "#fPolo", "#fOrigem", "#fIni", "#fFim"].forEach((id) => {
+      ["#fStatus", "#fOrigem", "#fIni", "#fFim"].forEach((id) => {
         const el = $(id);
         if (el) el.value = "";
       });
@@ -364,11 +537,93 @@ function bindFilters() {
       const lim = $("#fLimit");
       if (lim) lim.value = "500";
 
+      // limpa multis
+      state.filters.curso_list = [];
+      state.filters.polo_list = [];
+      const inCurso = $("#fCurso");
+      const inPolo = $("#fPolo");
+      if (inCurso) inCurso.value = "";
+      if (inPolo) inPolo.value = "";
+
+      renderChips("curso");
+      renderChips("polo");
+
       setUploadStatus("");
       showToast("Filtros limpos.", "ok");
       loadLeadsAndKpis();
     });
   }
+}
+
+/* ============================================================
+   Bind modais (Cursos/Polos)
+============================================================ */
+function bindModals() {
+  // ---- Cursos
+  const modalCursos = $("#modalCursos");
+  const btnPickCursos = $("#btnPickCursos");
+  const btnCloseCursos = $("#btnCloseCursos");
+  const btnCursosApply = $("#btnCursosApply");
+  const btnCursosClear = $("#btnCursosClear");
+  const searchCursos = $("#modalCursosSearch");
+
+  if (btnPickCursos && modalCursos) {
+    btnPickCursos.addEventListener("click", () => {
+      buildModalList("curso");
+      openModal(modalCursos);
+      setTimeout(() => searchCursos?.focus(), 50);
+    });
+  }
+
+  btnCloseCursos?.addEventListener("click", () => closeModal(modalCursos));
+  btnCursosApply?.addEventListener("click", () => {
+    applyModalSelection("curso");
+    closeModal(modalCursos);
+    loadLeadsAndKpisDebounced();
+  });
+  btnCursosClear?.addEventListener("click", () => clearModalSelection("curso"));
+  searchCursos?.addEventListener("input", debounce(() => buildModalList("curso"), 150));
+
+  // fechar clicando fora
+  modalCursos?.addEventListener("click", (e) => {
+    if (e.target === modalCursos) closeModal(modalCursos);
+  });
+
+  // ---- Polos
+  const modalPolos = $("#modalPolos");
+  const btnPickPolos = $("#btnPickPolos");
+  const btnClosePolos = $("#btnClosePolos");
+  const btnPolosApply = $("#btnPolosApply");
+  const btnPolosClear = $("#btnPolosClear");
+  const searchPolos = $("#modalPolosSearch");
+
+  if (btnPickPolos && modalPolos) {
+    btnPickPolos.addEventListener("click", () => {
+      buildModalList("polo");
+      openModal(modalPolos);
+      setTimeout(() => searchPolos?.focus(), 50);
+    });
+  }
+
+  btnClosePolos?.addEventListener("click", () => closeModal(modalPolos));
+  btnPolosApply?.addEventListener("click", () => {
+    applyModalSelection("polo");
+    closeModal(modalPolos);
+    loadLeadsAndKpisDebounced();
+  });
+  btnPolosClear?.addEventListener("click", () => clearModalSelection("polo"));
+  searchPolos?.addEventListener("input", debounce(() => buildModalList("polo"), 150));
+
+  modalPolos?.addEventListener("click", (e) => {
+    if (e.target === modalPolos) closeModal(modalPolos);
+  });
+
+  // ESC fecha qualquer modal aberto
+  document.addEventListener("keydown", (e) => {
+    if (e.key !== "Escape") return;
+    if (modalCursos?.classList.contains("open")) closeModal(modalCursos);
+    if (modalPolos?.classList.contains("open")) closeModal(modalPolos);
+  });
 }
 
 /* ============================================================
@@ -380,6 +635,11 @@ document.addEventListener("DOMContentLoaded", async () => {
     bindFilters();
     bindReload();
     bindExport();
+    bindModals();
+
+    // primeira renderização de chips
+    renderChips("curso");
+    renderChips("polo");
 
     await loadOptions();
     await loadLeadsAndKpis();
