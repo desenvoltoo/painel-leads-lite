@@ -106,6 +106,10 @@ def query_leads(filters: Dict[str, Any]) -> List[Dict[str, Any]]:
     curso_list = filters.get("curso_list") or []
     polo_list = filters.get("polo_list") or []
 
+    # manda arrays em UPPER para bater com UPPER(curso/polo)
+    curso_list_up = [str(x).strip().upper() for x in curso_list if str(x).strip()]
+    polo_list_up = [str(x).strip().upper() for x in polo_list if str(x).strip()]
+
     sql = f"""
     SELECT
       {dt} AS data_inscricao,
@@ -116,7 +120,6 @@ def query_leads(filters: Dict[str, Any]) -> List[Dict[str, Any]]:
       AND (@status IS NULL OR UPPER(status) = UPPER(@status))
       AND (@origem IS NULL OR UPPER(origem) = UPPER(@origem))
 
-      -- ✅ MULTI: se vier vazio, não filtra; se vier valores, filtra por IN
       AND (ARRAY_LENGTH(@curso_list) = 0 OR UPPER(curso) IN UNNEST(@curso_list))
       AND (ARRAY_LENGTH(@polo_list)  = 0 OR UPPER(polo)  IN UNNEST(@polo_list))
 
@@ -128,10 +131,6 @@ def query_leads(filters: Dict[str, Any]) -> List[Dict[str, Any]]:
 
     data_ini = filters.get("data_ini") or None
     data_fim = filters.get("data_fim") or None
-
-    # manda arrays já em UPPER para bater com UPPER(curso/polo)
-    curso_list_up = [str(x).strip().upper() for x in curso_list if str(x).strip()]
-    polo_list_up = [str(x).strip().upper() for x in polo_list if str(x).strip()]
 
     job_config = bigquery.QueryJobConfig(
         query_parameters=[
@@ -148,6 +147,8 @@ def query_leads(filters: Dict[str, Any]) -> List[Dict[str, Any]]:
     )
 
     rows = _client().query(sql, job_config=job_config, location=_bq_location()).result()
+
+    # ✅ ERRO QUE TE QUEBROU ESTAVA AQUI — agora está correto:
     return [{k: r.get(k) for k in r.keys()} for r in rows]
 
 
@@ -216,9 +217,6 @@ def query_kpis(filters: Dict[str, Any]) -> Dict[str, Any]:
 # OPTIONS (COMPLETO)
 # ============================================================
 def _distinct(column: str, limit: int) -> List[str]:
-    """
-    Retorna DISTINCT ordenado. Limit controlável por env.
-    """
     sql = f"""
     SELECT DISTINCT CAST({column} AS STRING) v
     FROM {_table_ref()}
@@ -235,7 +233,7 @@ def _distinct(column: str, limit: int) -> List[str]:
 
 
 def query_options() -> Dict[str, List[str]]:
-    limit = int(_env("BQ_OPTIONS_LIMIT", "500000000"))
+    limit = int(_env("BQ_OPTIONS_LIMIT", "50000"))
     limit = max(1000, min(limit, 200000))  # trava segurança
 
     return {
@@ -403,7 +401,6 @@ def ingest_upload_file(file_storage, source: str = "UPLOAD_PAINEL") -> Dict[str,
     else:
         raise ValueError("Formato inválido. Envie CSV ou XLSX.")
 
-    # chama pipeline (com location!)
     pipeline_sql = f"CALL `{proc_id}`(@fn);"
     pipeline_job = client.query(
         pipeline_sql,
@@ -440,4 +437,4 @@ def debug_sample(limit: int = 5):
         query_parameters=[bigquery.ScalarQueryParameter("limit", "INT64", limit)]
     )
     rows = _client().query(sql, job_config=job_config, location=_bq_location()).result()
-    return [{k]()
+    return [{k: r.get(k) for k in r.keys()} for r in rows]
