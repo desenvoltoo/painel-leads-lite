@@ -1,5 +1,5 @@
 /* ============================================================
-   Painel Leads Lite — app.js (multi-select + modais + export server)
+   Painel Leads Lite — app.js (chips + dropdown custom scroll + export server)
 ============================================================ */
 
 const $ = (sel) => document.querySelector(sel);
@@ -48,20 +48,13 @@ function debounce(fn, delay = 300) {
    State
 ============================================================ */
 const state = {
-  options: {
-    status: [],
-    curso: [],
-    polo: [],
-    origem: [],
-  },
+  options: { status: [], curso: [], polo: [], origem: [] },
   filters: {
     status: "",
     origem: "",
     data_ini: "",
     data_fim: "",
     limit: 500,
-
-    // multi
     curso_list: [],
     polo_list: [],
   },
@@ -76,11 +69,9 @@ async function apiGet(path, params = {}) {
   Object.entries(params).forEach(([k, v]) => {
     if (v === null || v === undefined) return;
 
-    // arrays -> repetição de query param: curso=A&curso=B
     if (Array.isArray(v)) {
       v.forEach((item) => {
-        if (item === null || item === undefined) return;
-        const s = String(item).trim();
+        const s = String(item ?? "").trim();
         if (s) url.searchParams.append(k, s);
       });
       return;
@@ -114,24 +105,20 @@ function renderTable(rows) {
     return;
   }
 
-  tbody.innerHTML = rows
-    .map((r) => {
-      return `
-        <tr>
-          <td>${escapeHtml(fmtDate(r.data_inscricao))}</td>
-          <td>${escapeHtml(r.nome)}</td>
-          <td>${escapeHtml(r.cpf)}</td>
-          <td>${escapeHtml(r.celular)}</td>
-          <td>${escapeHtml(r.email)}</td>
-          <td>${escapeHtml(r.origem)}</td>
-          <td>${escapeHtml(r.polo)}</td>
-          <td>${escapeHtml(r.curso)}</td>
-          <td>${escapeHtml(r.status)}</td>
-          <td>${escapeHtml(r.consultor)}</td>
-        </tr>
-      `;
-    })
-    .join("");
+  tbody.innerHTML = rows.map((r) => `
+    <tr>
+      <td>${escapeHtml(fmtDate(r.data_inscricao))}</td>
+      <td>${escapeHtml(r.nome)}</td>
+      <td>${escapeHtml(r.cpf)}</td>
+      <td>${escapeHtml(r.celular)}</td>
+      <td>${escapeHtml(r.email)}</td>
+      <td>${escapeHtml(r.origem)}</td>
+      <td>${escapeHtml(r.polo)}</td>
+      <td>${escapeHtml(r.curso)}</td>
+      <td>${escapeHtml(r.status)}</td>
+      <td>${escapeHtml(r.consultor)}</td>
+    </tr>
+  `).join("");
 }
 
 function renderKpis(k) {
@@ -162,7 +149,7 @@ function fillDatalist(id, values) {
 }
 
 /* ============================================================
-   Multi-select chips
+   Chips
 ============================================================ */
 function _uniqPush(arr, value) {
   const v = String(value || "").trim();
@@ -177,14 +164,13 @@ function _removeValue(arr, value) {
 }
 
 function renderChips(kind) {
-  // kind: "curso" | "polo"
   const box = kind === "curso" ? $("#cursoChipBox") : $("#poloChipBox");
   const hidden = kind === "curso" ? $("#fCursoMulti") : $("#fPoloMulti");
   const list = kind === "curso" ? state.filters.curso_list : state.filters.polo_list;
 
   if (!box || !hidden) return;
 
-  hidden.value = list.join("||"); // só pra debug/inspeção
+  hidden.value = list.join("||");
   box.innerHTML = "";
 
   if (!list.length) {
@@ -208,104 +194,88 @@ function renderChips(kind) {
   });
 }
 
-function addFromInput(kind) {
-  const input = kind === "curso" ? $("#fCurso") : $("#fPolo");
-  if (!input) return;
-
-  const raw = (input.value || "").trim();
-  if (!raw) return;
-
-  if (kind === "curso") _uniqPush(state.filters.curso_list, raw);
-  if (kind === "polo") _uniqPush(state.filters.polo_list, raw);
-
-  input.value = "";
-  renderChips(kind);
-}
-
 /* ============================================================
-   Modais (Cursos/Polos) com busca + scroll
+   Dropdown custom (scroll + filtro)
 ============================================================ */
-function openModal(modalEl) {
-  if (!modalEl) return;
-  modalEl.classList.add("open");
-  modalEl.setAttribute("aria-hidden", "false");
+function ddGet(kind) {
+  return kind === "curso" ? $("#ddCursos") : $("#ddPolos");
+}
+function ddInput(kind) {
+  return kind === "curso" ? $("#fCurso") : $("#fPolo");
+}
+function ddOptions(kind) {
+  return kind === "curso" ? (state.options.curso || []) : (state.options.polo || []);
+}
+function ddSelected(kind) {
+  return kind === "curso" ? state.filters.curso_list : state.filters.polo_list;
 }
 
-function closeModal(modalEl) {
-  if (!modalEl) return;
-  modalEl.classList.remove("open");
-  modalEl.setAttribute("aria-hidden", "true");
+function ddOpen(kind) {
+  const dd = ddGet(kind);
+  if (!dd) return;
+  dd.hidden = false;
+}
+function ddClose(kind) {
+  const dd = ddGet(kind);
+  if (!dd) return;
+  dd.hidden = true;
 }
 
-function buildModalList(kind) {
-  // kind: "curso" | "polo"
-  const listEl = kind === "curso" ? $("#modalCursosList") : $("#modalPolosList");
-  const searchEl = kind === "curso" ? $("#modalCursosSearch") : $("#modalPolosSearch");
+function ddRender(kind) {
+  const dd = ddGet(kind);
+  const input = ddInput(kind);
+  if (!dd || !input) return;
 
-  const values = kind === "curso" ? (state.options.curso || []) : (state.options.polo || []);
-  const selected = kind === "curso" ? state.filters.curso_list : state.filters.polo_list;
+  const all = ddOptions(kind);
+  const selected = ddSelected(kind);
 
-  if (!listEl) return;
+  const q = (input.value || "").trim().toUpperCase();
 
-  const q = (searchEl?.value || "").trim().toUpperCase();
+  // filtro com includes e um limite alto de render (performance)
+  const MAX_RENDER = 2000;
+  const filtered = [];
+  for (let i = 0; i < all.length; i++) {
+    const v = String(all[i] || "");
+    if (!v) continue;
+    if (!q || v.toUpperCase().includes(q)) filtered.push(v);
+    if (filtered.length >= MAX_RENDER) break;
+  }
 
-  const filtered = values.filter((v) => {
-    const s = String(v || "");
-    if (!s) return false;
-    if (!q) return true;
-    return s.toUpperCase().includes(q);
-  });
-
-  listEl.innerHTML = "";
+  dd.innerHTML = "";
 
   if (!filtered.length) {
-    listEl.innerHTML = `<div class="muted">Nada encontrado.</div>`;
+    dd.innerHTML = `<div class="dd-empty muted">Nada encontrado.</div>`;
     return;
   }
 
   filtered.forEach((v) => {
-    const id = `${kind}_${btoa(unescape(encodeURIComponent(v))).slice(0, 24)}`;
+    const isOn = selected.some((x) => String(x).trim().toUpperCase() === v.trim().toUpperCase());
 
-    const row = document.createElement("label");
-    row.className = "modal-item";
+    const row = document.createElement("div");
+    row.className = "dd-item" + (isOn ? " dd-on" : "");
+    row.innerHTML = `
+      <div class="dd-text">${escapeHtml(v)}</div>
+      <div class="dd-tag">${isOn ? "Selecionado" : "Adicionar"}</div>
+    `;
 
-    const chk = document.createElement("input");
-    chk.type = "checkbox";
-    chk.value = v;
-    chk.checked = selected.some((x) => String(x).trim().toUpperCase() === String(v).trim().toUpperCase());
+    row.addEventListener("mousedown", (e) => {
+      // mousedown evita perder foco antes do click
+      e.preventDefault();
+      if (isOn) {
+        _removeValue(selected, v);
+      } else {
+        _uniqPush(selected, v);
+      }
+      renderChips(kind);
+      ddRender(kind);
+    });
 
-    const span = document.createElement("span");
-    span.className = "modal-item-text";
-    span.textContent = v;
-
-    row.appendChild(chk);
-    row.appendChild(span);
-    listEl.appendChild(row);
+    dd.appendChild(row);
   });
 }
 
-function applyModalSelection(kind) {
-  const listEl = kind === "curso" ? $("#modalCursosList") : $("#modalPolosList");
-  if (!listEl) return;
-
-  const checks = Array.from(listEl.querySelectorAll('input[type="checkbox"]'));
-  const chosen = checks.filter((c) => c.checked).map((c) => c.value);
-
-  if (kind === "curso") state.filters.curso_list = chosen;
-  if (kind === "polo") state.filters.polo_list = chosen;
-
-  renderChips(kind);
-}
-
-function clearModalSelection(kind) {
-  if (kind === "curso") state.filters.curso_list = [];
-  if (kind === "polo") state.filters.polo_list = [];
-  renderChips(kind);
-  buildModalList(kind);
-}
-
 /* ============================================================
-   Filters: read UI -> state
+   Filters
 ============================================================ */
 function readFiltersFromUI() {
   state.filters.status = ($("#fStatus")?.value || "").trim();
@@ -315,9 +285,6 @@ function readFiltersFromUI() {
 
   const lim = parseInt($("#fLimit")?.value || "500", 10);
   state.filters.limit = Number.isFinite(lim) ? lim : 500;
-
-  // curso/polo multi já ficam no state (chips + modal),
-  // mas se tiver algo digitado e o usuário não deu Enter, não adicionamos automaticamente.
 }
 
 /* ============================================================
@@ -333,11 +300,8 @@ async function loadOptions() {
   };
 
   fillDatalist("dlStatus", state.options.status);
-  fillDatalist("dlCurso", state.options.curso);
-  fillDatalist("dlPolo", state.options.polo);
   fillDatalist("dlOrigem", state.options.origem);
 
-  // re-render chips (caso existam)
   renderChips("curso");
   renderChips("polo");
 }
@@ -355,7 +319,7 @@ async function loadLeadsAndKpis() {
     data_fim: state.filters.data_fim,
     limit: state.filters.limit,
 
-    // ✅ multi: vira curso=A&curso=B ...
+    // multi
     curso: state.filters.curso_list,
     polo: state.filters.polo_list,
   };
@@ -372,7 +336,6 @@ async function loadLeadsAndKpis() {
 
     const count = leads?.count ?? rows.length ?? 0;
     if (statusLine) statusLine.textContent = `${count} registros carregados.`;
-
   } catch (e) {
     console.error(e);
     renderTable([]);
@@ -389,7 +352,6 @@ function bindUpload() {
   const file = $("#uploadFile");
   const source = $("#uploadSource");
   const btn = $("#btnUpload");
-
   if (!file || !btn) return;
 
   btn.addEventListener("click", async (e) => {
@@ -410,7 +372,6 @@ function bindUpload() {
 
     try {
       const data = await apiPostForm("/api/upload", fd);
-
       const rows = data.rows_loaded ?? 0;
       const fname = data.filename ?? f.name ?? "arquivo";
       const msg = data.message ?? "Upload concluído.";
@@ -421,7 +382,6 @@ function bindUpload() {
       await loadOptions();
       await loadLeadsAndKpis();
       showToast("Painel atualizado com os novos dados.", "ok");
-
     } catch (err) {
       console.error(err);
       setUploadStatus(`Falha: ${err.message}`, "error");
@@ -447,32 +407,26 @@ function bindReload() {
 }
 
 function exportCsvServer() {
-  // usa /api/export (UTF-8-SIG) -> resolve caracteres especiais
   readFiltersFromUI();
 
   const url = new URL("/api/export", window.location.origin);
 
-  // scalar
   if (state.filters.status) url.searchParams.set("status", state.filters.status);
   if (state.filters.origem) url.searchParams.set("origem", state.filters.origem);
   if (state.filters.data_ini) url.searchParams.set("data_ini", state.filters.data_ini);
   if (state.filters.data_fim) url.searchParams.set("data_fim", state.filters.data_fim);
 
-  // multi
   (state.filters.curso_list || []).forEach((c) => url.searchParams.append("curso", c));
   (state.filters.polo_list || []).forEach((p) => url.searchParams.append("polo", p));
 
-  // export_limit opcional (se quiser mais que o limite da tela)
   url.searchParams.set("export_limit", "200000");
 
-  // abre download
   window.open(url.toString(), "_blank", "noopener");
 }
 
 function bindExport() {
   const btn = $("#btnExportFilters");
   if (!btn) return;
-
   btn.addEventListener("click", (e) => {
     e.preventDefault();
     showToast("Exportando CSV...", "ok");
@@ -481,7 +435,7 @@ function bindExport() {
 }
 
 /* ============================================================
-   Bind filtros (apply/clear + auto refresh)
+   Bind filtros
 ============================================================ */
 function bindFilters() {
   const ids = ["#fStatus", "#fOrigem", "#fIni", "#fFim", "#fLimit"];
@@ -493,136 +447,82 @@ function bindFilters() {
     el.addEventListener("keyup", loadLeadsAndKpisDebounced);
   });
 
-  // inputs de multi: Enter adiciona chip
-  const fCurso = $("#fCurso");
-  if (fCurso) {
-    fCurso.addEventListener("keydown", (e) => {
-      if (e.key === "Enter") {
-        e.preventDefault();
-        addFromInput("curso");
-        loadLeadsAndKpisDebounced();
-      }
+  // apply/clear
+  $("#btnApply")?.addEventListener("click", (e) => {
+    e.preventDefault();
+    loadLeadsAndKpis();
+  });
+
+  $("#btnClear")?.addEventListener("click", (e) => {
+    e.preventDefault();
+
+    ["#fStatus", "#fOrigem", "#fIni", "#fFim"].forEach((id) => {
+      const el = $(id);
+      if (el) el.value = "";
     });
-  }
 
-  const fPolo = $("#fPolo");
-  if (fPolo) {
-    fPolo.addEventListener("keydown", (e) => {
-      if (e.key === "Enter") {
-        e.preventDefault();
-        addFromInput("polo");
-        loadLeadsAndKpisDebounced();
-      }
-    });
-  }
+    const lim = $("#fLimit");
+    if (lim) lim.value = "500";
 
-  const btnApply = $("#btnApply");
-  if (btnApply) {
-    btnApply.addEventListener("click", (e) => {
-      e.preventDefault();
-      loadLeadsAndKpis();
-    });
-  }
+    state.filters.curso_list = [];
+    state.filters.polo_list = [];
 
-  const btnClear = $("#btnClear");
-  if (btnClear) {
-    btnClear.addEventListener("click", (e) => {
-      e.preventDefault();
+    const inCurso = $("#fCurso");
+    const inPolo = $("#fPolo");
+    if (inCurso) inCurso.value = "";
+    if (inPolo) inPolo.value = "";
 
-      ["#fStatus", "#fOrigem", "#fIni", "#fFim"].forEach((id) => {
-        const el = $(id);
-        if (el) el.value = "";
-      });
+    renderChips("curso");
+    renderChips("polo");
+    ddClose("curso");
+    ddClose("polo");
 
-      const lim = $("#fLimit");
-      if (lim) lim.value = "500";
-
-      // limpa multis
-      state.filters.curso_list = [];
-      state.filters.polo_list = [];
-      const inCurso = $("#fCurso");
-      const inPolo = $("#fPolo");
-      if (inCurso) inCurso.value = "";
-      if (inPolo) inPolo.value = "";
-
-      renderChips("curso");
-      renderChips("polo");
-
-      setUploadStatus("");
-      showToast("Filtros limpos.", "ok");
-      loadLeadsAndKpis();
-    });
-  }
+    setUploadStatus("");
+    showToast("Filtros limpos.", "ok");
+    loadLeadsAndKpis();
+  });
 }
 
 /* ============================================================
-   Bind modais (Cursos/Polos)
+   Bind dropdowns (sem botão)
 ============================================================ */
-function bindModals() {
-  // ---- Cursos
-  const modalCursos = $("#modalCursos");
-  const btnPickCursos = $("#btnPickCursos");
-  const btnCloseCursos = $("#btnCloseCursos");
-  const btnCursosApply = $("#btnCursosApply");
-  const btnCursosClear = $("#btnCursosClear");
-  const searchCursos = $("#modalCursosSearch");
+function bindDropdown(kind) {
+  const input = ddInput(kind);
+  const dd = ddGet(kind);
+  if (!input || !dd) return;
 
-  if (btnPickCursos && modalCursos) {
-    btnPickCursos.addEventListener("click", () => {
-      buildModalList("curso");
-      openModal(modalCursos);
-      setTimeout(() => searchCursos?.focus(), 50);
-    });
-  }
-
-  btnCloseCursos?.addEventListener("click", () => closeModal(modalCursos));
-  btnCursosApply?.addEventListener("click", () => {
-    applyModalSelection("curso");
-    closeModal(modalCursos);
-    loadLeadsAndKpisDebounced();
-  });
-  btnCursosClear?.addEventListener("click", () => clearModalSelection("curso"));
-  searchCursos?.addEventListener("input", debounce(() => buildModalList("curso"), 150));
-
-  // fechar clicando fora
-  modalCursos?.addEventListener("click", (e) => {
-    if (e.target === modalCursos) closeModal(modalCursos);
+  input.addEventListener("focus", () => {
+    ddOpen(kind);
+    ddRender(kind); // abre mostrando TUDO
   });
 
-  // ---- Polos
-  const modalPolos = $("#modalPolos");
-  const btnPickPolos = $("#btnPickPolos");
-  const btnClosePolos = $("#btnClosePolos");
-  const btnPolosApply = $("#btnPolosApply");
-  const btnPolosClear = $("#btnPolosClear");
-  const searchPolos = $("#modalPolosSearch");
+  input.addEventListener("input", debounce(() => {
+    ddOpen(kind);
+    ddRender(kind);
+  }, 120));
 
-  if (btnPickPolos && modalPolos) {
-    btnPickPolos.addEventListener("click", () => {
-      buildModalList("polo");
-      openModal(modalPolos);
-      setTimeout(() => searchPolos?.focus(), 50);
-    });
-  }
-
-  btnClosePolos?.addEventListener("click", () => closeModal(modalPolos));
-  btnPolosApply?.addEventListener("click", () => {
-    applyModalSelection("polo");
-    closeModal(modalPolos);
-    loadLeadsAndKpisDebounced();
-  });
-  btnPolosClear?.addEventListener("click", () => clearModalSelection("polo"));
-  searchPolos?.addEventListener("input", debounce(() => buildModalList("polo"), 150));
-
-  modalPolos?.addEventListener("click", (e) => {
-    if (e.target === modalPolos) closeModal(modalPolos);
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      const v = (input.value || "").trim();
+      if (v) {
+        _uniqPush(ddSelected(kind), v);
+        input.value = "";
+        renderChips(kind);
+        ddRender(kind);
+        loadLeadsAndKpisDebounced();
+      }
+    }
+    if (e.key === "Escape") {
+      ddClose(kind);
+    }
   });
 
-  // ESC fecha qualquer modal aberto
-  document.addEventListener("keydown", (e) => {
-    if (e.key !== "Escape") return;
-    if (modalCursos?.classList.contains("open")) closeModal(modalCursos);
-    if (modalPolos?.classList.contains("open")) closeModal(modalPolos);
+  // fecha clicando fora
+  document.addEventListener("click", (e) => {
+    if (e.target === input) return;
+    if (dd.contains(e.target)) return;
+    ddClose(kind);
   });
 }
 
@@ -635,15 +535,15 @@ document.addEventListener("DOMContentLoaded", async () => {
     bindFilters();
     bindReload();
     bindExport();
-    bindModals();
 
-    // primeira renderização de chips
     renderChips("curso");
     renderChips("polo");
 
+    bindDropdown("curso");
+    bindDropdown("polo");
+
     await loadOptions();
     await loadLeadsAndKpis();
-
   } catch (e) {
     console.error(e);
     showToast("Erro ao iniciar o painel.", "err");
