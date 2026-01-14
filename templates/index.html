@@ -4,27 +4,32 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <title>Painel Leads Lite</title>
+
+  <!-- CSS -->
   <link rel="stylesheet" href="{{ url_for('static', filename='css/styles.css') }}">
+
+  <!-- (opcional) evita zoom estranho em inputs no iOS -->
+  <meta name="format-detection" content="telephone=no">
 </head>
 
 <body>
   <header class="topbar">
     <div class="brand">
-      <div class="logo">PL</div>
+      <div class="logo" aria-label="Painel Leads Lite">PL</div>
       <div>
         <div class="title">Painel Leads Lite</div>
         <div class="subtitle">Leve • Intuitivo • BigQuery First</div>
       </div>
     </div>
 
-    <!-- topo sem botões -->
+    <!-- topo sem botões (mantido) -->
     <div class="actions"></div>
   </header>
 
   <main class="container">
 
     <!-- KPIs -->
-    <section class="kpis">
+    <section class="kpis" aria-label="Indicadores">
       <div class="kpi">
         <div class="kpi-label">Total de leads</div>
         <div class="kpi-value" id="kpiCount">—</div>
@@ -40,37 +45,38 @@
     </section>
 
     <!-- Upload -->
-    <section class="card">
+    <section class="card" aria-label="Importar planilha">
       <div class="card-header">
         <h2>Importar planilha</h2>
-        <p>Envie CSV ou XLSX. O arquivo será carregado no BigQuery (staging).</p>
+        <p>Envie CSV ou XLSX. O arquivo será carregado no BigQuery (staging) e processado pela procedure.</p>
       </div>
 
       <div class="filters" style="grid-template-columns: repeat(6, minmax(0,1fr));">
         <div class="field" style="grid-column: span 4;">
-          <label>Arquivo (CSV/XLSX)</label>
+          <label for="uploadFile">Arquivo (CSV/XLSX)</label>
           <input id="uploadFile" type="file" accept=".csv,.xlsx,.xls" />
         </div>
 
         <div class="field" style="grid-column: span 2;">
-          <label>Origem do upload (opcional)</label>
+          <label for="uploadSource">Origem do upload (opcional)</label>
           <input id="uploadSource" placeholder="Ex: CAPTACAO_JANEIRO" />
         </div>
 
         <div class="field field-actions" style="grid-column: span 6;">
           <button id="btnUpload" class="btn btn-primary" type="button">Importar</button>
 
-          <a class="btn btn-ghost" id="btnDownloadModel" href="/download/modelo" target="_blank" rel="noopener">
+          <a class="btn btn-ghost" id="btnDownloadModel"
+             href="/download/modelo" target="_blank" rel="noopener">
             Baixar modelo
           </a>
 
-          <span id="uploadStatus" class="muted"></span>
+          <span id="uploadStatus" class="muted" aria-live="polite"></span>
         </div>
       </div>
     </section>
 
     <!-- Filtros -->
-    <section class="card">
+    <section class="card" aria-label="Filtros">
       <div class="card-header">
         <h2>Filtros</h2>
         <p>Refine os dados diretamente no BigQuery.</p>
@@ -79,18 +85,17 @@
       <div class="filters">
 
         <div class="field">
-          <label>Status</label>
+          <label for="fStatus">Status</label>
           <input id="fStatus" list="dlStatus" placeholder="Ex: NOVO" autocomplete="off" />
           <datalist id="dlStatus"></datalist>
         </div>
 
         <!-- ✅ CURSO MULTI — dropdown flutuante -->
         <div class="field field-dd" style="isolation:isolate;">
-          <label>Curso (multi)</label>
+          <label for="fCurso">Curso (multi)</label>
 
           <div class="chipbox" id="cursoChipBox" aria-label="Cursos selecionados"></div>
 
-          <!-- anchor do dropdown -->
           <div class="chiprow">
             <input
               id="fCurso"
@@ -100,15 +105,15 @@
             />
           </div>
 
-          <!-- dropdown (overlay) -->
           <div id="ddCursos" class="dd" hidden></div>
 
+          <!-- hidden compatível (não é usado pelo backend hoje, mas útil p/ debug) -->
           <input type="hidden" id="fCursoMulti" value="" />
         </div>
 
         <!-- ✅ POLO MULTI — dropdown flutuante -->
         <div class="field field-dd" style="isolation:isolate;">
-          <label>Polo (multi)</label>
+          <label for="fPolo">Polo (multi)</label>
 
           <div class="chipbox" id="poloChipBox" aria-label="Polos selecionados"></div>
 
@@ -127,23 +132,23 @@
         </div>
 
         <div class="field">
-          <label>Origem</label>
+          <label for="fOrigem">Origem</label>
           <input id="fOrigem" list="dlOrigem" placeholder="Ex: Meta Ads" autocomplete="off" />
           <datalist id="dlOrigem"></datalist>
         </div>
 
         <div class="field">
-          <label>Data inicial</label>
+          <label for="fIni">Data inicial</label>
           <input id="fIni" type="date" />
         </div>
 
         <div class="field">
-          <label>Data final</label>
+          <label for="fFim">Data final</label>
           <input id="fFim" type="date" />
         </div>
 
         <div class="field field-wide">
-          <label>Limite</label>
+          <label for="fLimit">Limite</label>
           <input id="fLimit" type="number" min="50" step="50" value="500" />
         </div>
 
@@ -159,14 +164,14 @@
     </section>
 
     <!-- Resultados -->
-    <section class="card">
+    <section class="card" aria-label="Resultados">
       <div class="card-header">
         <h2>Resultados</h2>
-        <p id="statusLine">—</p>
+        <p id="statusLine" aria-live="polite">—</p>
       </div>
 
       <div class="table-wrap">
-        <table id="tbl">
+        <table id="tbl" aria-label="Tabela de leads">
           <thead>
             <tr>
               <th>Data</th>
@@ -181,9 +186,19 @@
               <th>Consultor</th>
             </tr>
           </thead>
-          <tbody></tbody>
+          <tbody>
+            <tr>
+              <td colspan="10" class="muted">Carregando…</td>
+            </tr>
+          </tbody>
         </table>
       </div>
+
+      <noscript>
+        <div class="muted" style="padding:12px 0;">
+          Este painel precisa de JavaScript habilitado para carregar os dados.
+        </div>
+      </noscript>
     </section>
 
     <footer class="footer">
@@ -193,6 +208,7 @@
 
   </main>
 
-  <script src="{{ url_for('static', filename='js/app.js') }}"></script>
+  <!-- JS (defer evita qualquer problema de timing) -->
+  <script src="{{ url_for('static', filename='js/app.js') }}" defer></script>
 </body>
 </html>
