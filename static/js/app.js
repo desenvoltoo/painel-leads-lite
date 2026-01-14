@@ -9,7 +9,7 @@ function showToast(msg, type = "ok") {
   const statusLine = $("#statusLine");
   if (statusLine) {
     statusLine.textContent = msg;
-    statusLine.className = type === "err" ? "error" : "";
+    statusLine.dataset.type = type; // ✅ não quebra className do elemento
   } else {
     alert(msg);
   }
@@ -19,7 +19,7 @@ function setUploadStatus(msg, type = "muted") {
   const el = $("#uploadStatus");
   if (!el) return;
   el.textContent = msg || "";
-  el.className = type;
+  el.dataset.type = type;
 }
 
 function escapeHtml(str) {
@@ -60,7 +60,6 @@ const state = {
     polo_list: [],
   },
 
-  // dropdown runtime
   dd: {
     curso: { q: "", idx: 0, filtered: [], open: false },
     polo: { q: "", idx: 0, filtered: [], open: false },
@@ -68,7 +67,7 @@ const state = {
 };
 
 /* ============================================================
-   API
+   API helpers (✅ mostra erro real do backend)
 ============================================================ */
 async function apiGet(path, params = {}) {
   const url = new URL(path, window.location.origin);
@@ -89,15 +88,55 @@ async function apiGet(path, params = {}) {
   });
 
   const res = await fetch(url.toString(), { cache: "no-store" });
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  return res.json();
+
+  // ✅ tenta ler JSON mesmo quando é erro
+  const data = await res.json().catch(() => null);
+
+  if (!res.ok) {
+    const msg =
+      data?.error ||
+      data?.message ||
+      data?.details ||
+      `HTTP ${res.status}`;
+    const err = new Error(msg);
+    err.payload = data;
+    err.status = res.status;
+    throw err;
+  }
+
+  return data;
 }
 
 async function apiPostForm(path, formData) {
   const res = await fetch(path, { method: "POST", body: formData });
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data?.error || `HTTP ${res.status}`);
+  const data = await res.json().catch(() => null);
+
+  if (!res.ok) {
+    const msg =
+      data?.error ||
+      data?.message ||
+      data?.details ||
+      `HTTP ${res.status}`;
+    const err = new Error(msg);
+    err.payload = data;
+    err.status = res.status;
+    throw err;
+  }
+
   return data;
+}
+
+function explainErr(prefix, err) {
+  console.error(prefix, err);
+
+  // backend do Flask manda { error, details, trace }
+  const p = err?.payload;
+  if (p?.error || p?.details) {
+    const details = p?.details ? ` | ${p.details}` : "";
+    return `${p.error || err.message}${details}`;
+  }
+
+  return err?.message || String(err);
 }
 
 /* ============================================================
@@ -112,7 +151,9 @@ function renderTable(rows) {
     return;
   }
 
-  tbody.innerHTML = rows.map((r) => `
+  tbody.innerHTML = rows
+    .map(
+      (r) => `
     <tr>
       <td>${escapeHtml(fmtDate(r.data_inscricao))}</td>
       <td>${escapeHtml(r.nome)}</td>
@@ -125,7 +166,9 @@ function renderTable(rows) {
       <td>${escapeHtml(r.status)}</td>
       <td>${escapeHtml(r.consultor)}</td>
     </tr>
-  `).join("");
+  `
+    )
+    .join("");
 }
 
 function renderKpis(k) {
@@ -133,7 +176,7 @@ function renderKpis(k) {
   const top = $("#kpiTopStatus");
   const last = $("#kpiLastDate");
 
-  if (total) total.textContent = k?.total ?? 0;
+  if (total) total.textContent = (k?.total ?? 0).toString();
 
   if (top) {
     const s = k?.top_status?.status ?? "-";
@@ -196,17 +239,15 @@ function renderChips(kind) {
     chip.addEventListener("click", () => {
       _removeValue(list, v);
       renderChips(kind);
-      ddRebuild(kind); // atualiza tags "Selecionado"
+      ddRebuild(kind);
+      loadLeadsAndKpisDebounced();
     });
     box.appendChild(chip);
   });
 }
 
 /* ============================================================
-   Dropdown custom — overlay + busca + infinite scroll
-   Requisitos no HTML:
-   - input #fCurso e dropdown div #ddCursos
-   - input #fPolo e dropdown div #ddPolos
+   Dropdown overlay + busca + infinite scroll
 ============================================================ */
 function ddGet(kind) {
   return kind === "curso" ? $("#ddCursos") : $("#ddPolos");
@@ -230,6 +271,7 @@ function ddOpen(kind) {
   dd.hidden = false;
   ddState(kind).open = true;
 }
+
 function ddClose(kind) {
   const dd = ddGet(kind);
   if (!dd) return;
@@ -239,7 +281,9 @@ function ddClose(kind) {
 
 function ddMakeRow(kind, v) {
   const selected = ddSelected(kind);
-  const isOn = selected.some((x) => String(x).trim().toUpperCase() === String(v).trim().toUpperCase());
+  const isOn = selected.some(
+    (x) => String(x).trim().toUpperCase() === String(v).trim().toUpperCase()
+  );
 
   const row = document.createElement("div");
   row.className = "dd-item" + (isOn ? " dd-on" : "");
@@ -249,12 +293,12 @@ function ddMakeRow(kind, v) {
   `;
 
   row.addEventListener("mousedown", (e) => {
-    e.preventDefault(); // evita blur antes do click
+    e.preventDefault();
     if (isOn) _removeValue(selected, v);
     else _uniqPush(selected, v);
 
     renderChips(kind);
-    ddRebuild(kind);       // reflete "Selecionado"
+    ddRebuild(kind);
     loadLeadsAndKpisDebounced();
   });
 
@@ -263,9 +307,10 @@ function ddMakeRow(kind, v) {
 
 function ddFilterList(kind, qUpper) {
   const all = ddAll(kind);
-  if (!qUpper) return all.slice(); // copia
 
-  // filtra sem travar: percorre tudo, mas só monta array simples
+  // ✅ sem limite: filtra tudo (mas renderiza por batch)
+  if (!qUpper) return all.slice();
+
   const out = [];
   for (let i = 0; i < all.length; i++) {
     const v = String(all[i] || "");
@@ -275,7 +320,6 @@ function ddFilterList(kind, qUpper) {
   return out;
 }
 
-// carrega por lote (infinite scroll)
 const DD_BATCH = 350;
 
 function ddRenderNext(kind) {
@@ -283,19 +327,16 @@ function ddRenderNext(kind) {
   const st = ddState(kind);
   if (!dd) return;
 
-  // se vazio, mostra empty
   if (!st.filtered || st.filtered.length === 0) {
     dd.innerHTML = `<div class="dd-empty muted">Nada encontrado.</div>`;
     st.idx = 0;
     return;
   }
 
-  // primeira renderização limpa e cria “top spacer” opcional (não precisa)
   if (st.idx === 0) dd.innerHTML = "";
 
   const end = Math.min(st.idx + DD_BATCH, st.filtered.length);
 
-  // fragmento pra performance
   const frag = document.createDocumentFragment();
   for (let i = st.idx; i < end; i++) {
     frag.appendChild(ddMakeRow(kind, st.filtered[i]));
@@ -304,7 +345,7 @@ function ddRenderNext(kind) {
 
   st.idx = end;
 
-  // “rodapé” indicando carregamento/total
+  // footer
   const footerId = `ddFooter_${kind}`;
   let footer = dd.querySelector(`#${footerId}`);
   if (!footer) {
@@ -314,11 +355,10 @@ function ddRenderNext(kind) {
     dd.appendChild(footer);
   }
 
-  if (st.idx >= st.filtered.length) {
-    footer.textContent = `Fim — ${st.filtered.length} itens`;
-  } else {
-    footer.textContent = `Mostrando ${st.idx} de ${st.filtered.length} — role para carregar mais`;
-  }
+  footer.textContent =
+    st.idx >= st.filtered.length
+      ? `Fim — ${st.filtered.length} itens`
+      : `Mostrando ${st.idx} de ${st.filtered.length} — role para carregar mais`;
 }
 
 function ddRebuild(kind) {
@@ -328,6 +368,7 @@ function ddRebuild(kind) {
 
   const st = ddState(kind);
   const q = (input.value || "").trim().toUpperCase();
+
   st.q = q;
   st.filtered = ddFilterList(kind, q);
   st.idx = 0;
@@ -343,11 +384,8 @@ function ddAttachScroll(kind) {
     const st = ddState(kind);
     if (!st.open) return;
 
-    // quando estiver perto do fim, renderiza próximo batch
     const nearBottom = dd.scrollTop + dd.clientHeight >= dd.scrollHeight - 60;
-    if (nearBottom && st.idx < st.filtered.length) {
-      ddRenderNext(kind);
-    }
+    if (nearBottom && st.idx < st.filtered.length) ddRenderNext(kind);
   });
 }
 
@@ -356,18 +394,18 @@ function bindDropdown(kind) {
   const dd = ddGet(kind);
   if (!input || !dd) return;
 
-  // posicionamento: garante que o dropdown aparece “grudado” no input (overlay)
-  // (CSS faz o resto)
-
   input.addEventListener("focus", () => {
     ddOpen(kind);
-    ddRebuild(kind); // abre e renderiza batch inicial
+    ddRebuild(kind);
   });
 
-  input.addEventListener("input", debounce(() => {
-    ddOpen(kind);
-    ddRebuild(kind); // refaz filtro e reinicia batches
-  }, 120));
+  input.addEventListener(
+    "input",
+    debounce(() => {
+      ddOpen(kind);
+      ddRebuild(kind);
+    }, 120)
+  );
 
   input.addEventListener("keydown", (e) => {
     if (e.key === "Enter") {
@@ -381,9 +419,7 @@ function bindDropdown(kind) {
         loadLeadsAndKpisDebounced();
       }
     }
-    if (e.key === "Escape") {
-      ddClose(kind);
-    }
+    if (e.key === "Escape") ddClose(kind);
   });
 
   // fecha clicando fora
@@ -414,6 +450,7 @@ function readFiltersFromUI() {
 ============================================================ */
 async function loadOptions() {
   const data = await apiGet("/api/options");
+
   state.options = {
     status: data.status || [],
     curso: data.curso || [],
@@ -421,14 +458,12 @@ async function loadOptions() {
     origem: data.origem || [],
   };
 
-  // esses ainda usam datalist normal
   fillDatalist("dlStatus", state.options.status);
   fillDatalist("dlOrigem", state.options.origem);
 
   renderChips("curso");
   renderChips("polo");
 
-  // se dropdown estiver aberto, refaz
   if (ddState("curso").open) ddRebuild("curso");
   if (ddState("polo").open) ddRebuild("polo");
 }
@@ -463,10 +498,11 @@ async function loadLeadsAndKpis() {
 
     const count = leads?.count ?? rows.length ?? 0;
     if (statusLine) statusLine.textContent = `${count} registros carregados.`;
-  } catch (e) {
-    console.error(e);
+  } catch (err) {
+    const msg = explainErr("loadLeadsAndKpis", err);
     renderTable([]);
-    showToast("Falha ao carregar dados do BigQuery.", "err");
+    renderKpis({ total: 0, top_status: null, last_date: null });
+    showToast(`Erro: ${msg}`, "err");
   }
 }
 
@@ -510,9 +546,9 @@ function bindUpload() {
       await loadLeadsAndKpis();
       showToast("Painel atualizado com os novos dados.", "ok");
     } catch (err) {
-      console.error(err);
-      setUploadStatus(`Falha: ${err.message}`, "error");
-      showToast(`Falha no upload: ${err.message}`, "err");
+      const msg = explainErr("upload", err);
+      setUploadStatus(`Falha: ${msg}`, "error");
+      showToast(`Falha no upload: ${msg}`, "err");
     } finally {
       btn.disabled = false;
       file.value = "";
@@ -547,7 +583,6 @@ function exportCsvServer() {
   (state.filters.polo_list || []).forEach((p) => url.searchParams.append("polo", p));
 
   url.searchParams.set("export_limit", "200000");
-
   window.open(url.toString(), "_blank", "noopener");
 }
 
@@ -600,7 +635,6 @@ function bindFilters() {
 
     renderChips("curso");
     renderChips("polo");
-
     ddClose("curso");
     ddClose("polo");
 
@@ -628,8 +662,8 @@ document.addEventListener("DOMContentLoaded", async () => {
 
     await loadOptions();
     await loadLeadsAndKpis();
-  } catch (e) {
-    console.error(e);
-    showToast("Erro ao iniciar o painel.", "err");
+  } catch (err) {
+    const msg = explainErr("init", err);
+    showToast(`Erro ao iniciar: ${msg}`, "err");
   }
 });
