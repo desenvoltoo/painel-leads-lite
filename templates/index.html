@@ -4,32 +4,27 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <title>Painel Leads Lite</title>
-
-  <!-- CSS -->
   <link rel="stylesheet" href="{{ url_for('static', filename='css/styles.css') }}">
-
-  <!-- (opcional) evita zoom estranho em inputs no iOS -->
-  <meta name="format-detection" content="telephone=no">
 </head>
 
 <body>
   <header class="topbar">
     <div class="brand">
-      <div class="logo" aria-label="Painel Leads Lite">PL</div>
+      <div class="logo">PL</div>
       <div>
         <div class="title">Painel Leads Lite</div>
         <div class="subtitle">Leve • Intuitivo • BigQuery First</div>
       </div>
     </div>
 
-    <!-- topo sem botões (mantido) -->
+    <!-- topo sem botões (os botões ficam no card de filtros) -->
     <div class="actions"></div>
   </header>
 
   <main class="container">
 
     <!-- KPIs -->
-    <section class="kpis" aria-label="Indicadores">
+    <section class="kpis">
       <div class="kpi">
         <div class="kpi-label">Total de leads</div>
         <div class="kpi-value" id="kpiCount">—</div>
@@ -45,38 +40,37 @@
     </section>
 
     <!-- Upload -->
-    <section class="card" aria-label="Importar planilha">
+    <section class="card">
       <div class="card-header">
         <h2>Importar planilha</h2>
-        <p>Envie CSV ou XLSX. O arquivo será carregado no BigQuery (staging) e processado pela procedure.</p>
+        <p>Envie CSV ou XLSX. O arquivo será carregado no BigQuery (staging) e o pipeline será executado.</p>
       </div>
 
       <div class="filters" style="grid-template-columns: repeat(6, minmax(0,1fr));">
         <div class="field" style="grid-column: span 4;">
-          <label for="uploadFile">Arquivo (CSV/XLSX)</label>
+          <label>Arquivo (CSV/XLSX)</label>
           <input id="uploadFile" type="file" accept=".csv,.xlsx,.xls" />
         </div>
 
         <div class="field" style="grid-column: span 2;">
-          <label for="uploadSource">Origem do upload (opcional)</label>
-          <input id="uploadSource" placeholder="Ex: CAPTACAO_JANEIRO" />
+          <label>Origem do upload (opcional)</label>
+          <input id="uploadSource" placeholder="Ex: CAPTACAO_JANEIRO" autocomplete="off" />
         </div>
 
         <div class="field field-actions" style="grid-column: span 6;">
           <button id="btnUpload" class="btn btn-primary" type="button">Importar</button>
 
-          <a class="btn btn-ghost" id="btnDownloadModel"
-             href="/download/modelo" target="_blank" rel="noopener">
+          <a class="btn btn-ghost" id="btnDownloadModel" href="/download/modelo" target="_blank" rel="noopener">
             Baixar modelo
           </a>
 
-          <span id="uploadStatus" class="muted" aria-live="polite"></span>
+          <span id="uploadStatus" class="muted"></span>
         </div>
       </div>
     </section>
 
     <!-- Filtros -->
-    <section class="card" aria-label="Filtros">
+    <section class="card">
       <div class="card-header">
         <h2>Filtros</h2>
         <p>Refine os dados diretamente no BigQuery.</p>
@@ -85,14 +79,14 @@
       <div class="filters">
 
         <div class="field">
-          <label for="fStatus">Status</label>
+          <label>Status</label>
           <input id="fStatus" list="dlStatus" placeholder="Ex: NOVO" autocomplete="off" />
           <datalist id="dlStatus"></datalist>
         </div>
 
         <!-- ✅ CURSO MULTI — dropdown flutuante -->
         <div class="field field-dd" style="isolation:isolate;">
-          <label for="fCurso">Curso (multi)</label>
+          <label>Curso (multi)</label>
 
           <div class="chipbox" id="cursoChipBox" aria-label="Cursos selecionados"></div>
 
@@ -107,13 +101,13 @@
 
           <div id="ddCursos" class="dd" hidden></div>
 
-          <!-- hidden compatível (não é usado pelo backend hoje, mas útil p/ debug) -->
+          <!-- hidden (se você quiser usar, seu JS preenche) -->
           <input type="hidden" id="fCursoMulti" value="" />
         </div>
 
         <!-- ✅ POLO MULTI — dropdown flutuante -->
         <div class="field field-dd" style="isolation:isolate;">
-          <label for="fPolo">Polo (multi)</label>
+          <label>Polo (multi)</label>
 
           <div class="chipbox" id="poloChipBox" aria-label="Polos selecionados"></div>
 
@@ -132,23 +126,23 @@
         </div>
 
         <div class="field">
-          <label for="fOrigem">Origem</label>
+          <label>Origem</label>
           <input id="fOrigem" list="dlOrigem" placeholder="Ex: Meta Ads" autocomplete="off" />
           <datalist id="dlOrigem"></datalist>
         </div>
 
         <div class="field">
-          <label for="fIni">Data inicial</label>
+          <label>Data inicial</label>
           <input id="fIni" type="date" />
         </div>
 
         <div class="field">
-          <label for="fFim">Data final</label>
+          <label>Data final</label>
           <input id="fFim" type="date" />
         </div>
 
         <div class="field field-wide">
-          <label for="fLimit">Limite</label>
+          <label>Limite (BigQuery)</label>
           <input id="fLimit" type="number" min="50" step="50" value="500" />
         </div>
 
@@ -164,14 +158,33 @@
     </section>
 
     <!-- Resultados -->
-    <section class="card" aria-label="Resultados">
+    <section class="card">
       <div class="card-header">
         <h2>Resultados</h2>
-        <p id="statusLine" aria-live="polite">—</p>
+        <p id="statusLine">—</p>
+      </div>
+
+      <!-- ✅ PAGINAÇÃO (o JS paginado usa esses IDs) -->
+      <div class="table-toolbar" aria-label="Paginação">
+        <div class="table-left">
+          <span class="muted">Itens por página</span>
+          <select id="pageSize" aria-label="Itens por página">
+            <option value="25">25</option>
+            <option value="50" selected>50</option>
+            <option value="100">100</option>
+            <option value="200">200</option>
+          </select>
+        </div>
+
+        <div class="table-right">
+          <span id="pageInfo" class="muted">—</span>
+          <button id="btnPrev" class="btn btn-ghost" type="button">Anterior</button>
+          <button id="btnNext" class="btn btn-ghost" type="button">Próxima</button>
+        </div>
       </div>
 
       <div class="table-wrap">
-        <table id="tbl" aria-label="Tabela de leads">
+        <table id="tbl">
           <thead>
             <tr>
               <th>Data</th>
@@ -186,19 +199,9 @@
               <th>Consultor</th>
             </tr>
           </thead>
-          <tbody>
-            <tr>
-              <td colspan="10" class="muted">Carregando…</td>
-            </tr>
-          </tbody>
+          <tbody></tbody>
         </table>
       </div>
-
-      <noscript>
-        <div class="muted" style="padding:12px 0;">
-          Este painel precisa de JavaScript habilitado para carregar os dados.
-        </div>
-      </noscript>
     </section>
 
     <footer class="footer">
@@ -208,7 +211,6 @@
 
   </main>
 
-  <!-- JS (defer evita qualquer problema de timing) -->
-  <script src="{{ url_for('static', filename='js/app.js') }}" defer></script>
+  <script src="{{ url_for('static', filename='js/app.js') }}"></script>
 </body>
 </html>
