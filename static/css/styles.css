@@ -9,7 +9,9 @@
   --accent2:#86ffd6;
   --danger:#ff6e6e;
 }
+
 *{box-sizing:border-box}
+
 body{
   margin:0;
   font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial, "Helvetica Neue", Helvetica;
@@ -18,7 +20,9 @@ body{
               var(--bg);
   color:var(--text);
 }
+
 a{color:inherit}
+
 .topbar{
   position:sticky; top:0;
   display:flex; align-items:center; justify-content:space-between;
@@ -27,7 +31,9 @@ a{color:inherit}
   background:rgba(11,16,32,.75);
   backdrop-filter: blur(10px);
 }
+
 .brand{display:flex; gap:12px; align-items:center}
+
 .logo{
   width:44px; height:44px; border-radius:14px;
   display:grid; place-items:center;
@@ -35,24 +41,30 @@ a{color:inherit}
   border:1px solid var(--border);
   font-weight:800;
 }
+
 .title{font-size:16px; font-weight:800; letter-spacing:.2px}
 .subtitle{font-size:12px; color:var(--muted)}
 .actions{display:flex; gap:10px}
+
 .container{max-width:1200px; margin:0 auto; padding:18px}
+
 .kpis{
   display:grid;
   grid-template-columns: repeat(3, minmax(0,1fr));
   gap:12px;
   margin-bottom:12px;
 }
+
 .kpi{
   background:rgba(17,26,51,.65);
   border:1px solid var(--border);
   border-radius:18px;
   padding:14px 14px;
 }
+
 .kpi-label{font-size:12px; color:var(--muted)}
 .kpi-value{font-size:22px; font-weight:900; margin-top:6px}
+
 .card{
   background:rgba(17,26,51,.65);
   border:1px solid var(--border);
@@ -60,15 +72,24 @@ a{color:inherit}
   padding:14px;
   margin-bottom:12px;
 }
+
 .card-header h2{margin:0; font-size:16px}
 .card-header p{margin:6px 0 0; color:var(--muted); font-size:12px}
+
 .filters{
   display:grid;
   grid-template-columns: repeat(6, minmax(0,1fr));
   gap:10px;
   margin-top:14px;
 }
-.field label{display:block; font-size:12px; color:var(--muted); margin-bottom:6px}
+
+.field label{
+  display:block;
+  font-size:12px;
+  color:var(--muted);
+  margin-bottom:6px;
+}
+
 .field input{
   width:100%;
   padding:10px 10px;
@@ -78,12 +99,19 @@ a{color:inherit}
   color:var(--text);
   outline:none;
 }
+
 .field input:focus{border-color: rgba(110,168,255,.55)}
+
 .field-wide{grid-column: span 2}
+
 .field-actions{
   grid-column: span 4;
-  display:flex; align-items:end; gap:10px;
+  display:flex;
+  align-items:end;
+  gap:10px;
+  flex-wrap:wrap;
 }
+
 .btn{
   padding:10px 12px;
   border-radius:14px;
@@ -93,25 +121,38 @@ a{color:inherit}
   cursor:pointer;
   font-weight:700;
 }
+
 .btn:hover{transform: translateY(-1px)}
+
 .btn-primary{
   background: linear-gradient(135deg, rgba(110,168,255,.35), rgba(110,168,255,.18));
   border-color: rgba(110,168,255,.35);
 }
+
 .btn-ghost{background:transparent}
+
+.btn-sm{
+  padding:8px 10px;
+  border-radius:12px;
+  font-size:12px;
+}
+
 .muted{color:var(--muted)}
+
 .table-wrap{
   overflow:auto;
   border-radius:18px;
   border:1px solid var(--border);
   margin-top:12px;
 }
+
 table{
   width:100%;
   border-collapse:collapse;
   min-width:980px;
   background:rgba(0,0,0,.15);
 }
+
 thead th{
   position:sticky; top:0;
   text-align:left;
@@ -121,26 +162,28 @@ thead th{
   background:rgba(11,16,32,.65);
   border-bottom:1px solid var(--border);
 }
+
 tbody td{
   padding:10px;
   border-bottom:1px solid rgba(255,255,255,.06);
   font-size:13px;
 }
-tbody tr:hover{background:rgba(110,168,255,.06)}
-.footer{
-  display:flex; justify-content:space-between; gap:12px;
-  margin-top:16px; padding:8px 2px; color:var(--muted); font-size:12px;
-}
 
-/* ============================================================
-   NOVO: Chips (multi seleção) + botões pequenos
-============================================================ */
-.btn-sm{
-  padding:8px 10px;
-  border-radius:12px;
+tbody tr:hover{background:rgba(110,168,255,.06)}
+
+.footer{
+  display:flex;
+  justify-content:space-between;
+  gap:12px;
+  margin-top:16px;
+  padding:8px 2px;
+  color:var(--muted);
   font-size:12px;
 }
 
+/* ============================================================
+   Chips (multi seleção)
+============================================================ */
 .chipbox{
   min-height:44px;
   padding:8px;
@@ -160,9 +203,7 @@ tbody tr:hover{background:rgba(110,168,255,.06)}
   align-items:center;
 }
 
-.chiprow input{
-  flex:1;
-}
+.chiprow input{ flex:1; }
 
 .chip{
   display:inline-flex;
@@ -196,118 +237,59 @@ tbody tr:hover{background:rgba(110,168,255,.06)}
 }
 
 /* ============================================================
-   NOVO: Modal (Cursos/Polos) com scroll + busca
+   Dropdown custom (scroll) — substitui datalist
 ============================================================ */
-.modal{
-  position:fixed;
-  inset:0;
-  background:rgba(0,0,0,.55);
-  display:none;
-  align-items:center;
-  justify-content:center;
-  padding:18px;
-  z-index:999;
-}
+.field-dd{ position: relative; }
 
-.modal.open{
-  display:flex;
-}
-
-.modal-card{
-  width:min(980px, 96vw);
-  max-height:88vh;
-  overflow:hidden;
-  border-radius:22px;
-  border:1px solid var(--border);
-  background:rgba(17,26,51,.92);
-  backdrop-filter: blur(10px);
-  box-shadow: 0 18px 60px rgba(0,0,0,.45);
-  display:flex;
-  flex-direction:column;
-}
-
-.modal-head{
-  display:flex;
-  justify-content:space-between;
-  align-items:flex-start;
-  gap:12px;
-  padding:14px;
-  border-bottom:1px solid var(--border);
-}
-
-.modal-title{
-  font-size:16px;
-  font-weight:900;
-}
-
-.modal-body{
-  padding:14px;
-  overflow:hidden;
-  display:flex;
-  flex-direction:column;
-  gap:10px;
-}
-
-.modal-tools{
-  display:flex;
-  gap:10px;
-  align-items:center;
-}
-
-.modal-tools input{
-  flex:1;
-  width:100%;
-  padding:10px 10px;
-  border-radius:14px;
-  border:1px solid var(--border);
-  background:rgba(0,0,0,.25);
-  color:var(--text);
-  outline:none;
-}
-
-.modal-tools input:focus{
-  border-color: rgba(110,168,255,.55);
-}
-
-.modal-list{
-  overflow:auto;
+.dd{
+  margin-top:8px;
   border-radius:18px;
   border:1px solid var(--border);
-  background:rgba(0,0,0,.15);
-  padding:8px;
-  max-height:55vh;
+  background:rgba(0,0,0,.18);
+  overflow:auto;
+  max-height:340px;
 }
 
-.modal-item{
+.dd-item{
   display:flex;
+  justify-content:space-between;
   align-items:center;
-  gap:10px;
-  padding:10px 10px;
-  border-radius:14px;
+  gap:12px;
+  padding:10px 12px;
   cursor:pointer;
+  border-bottom:1px solid rgba(255,255,255,.06);
 }
 
-.modal-item:hover{
+.dd-item:hover{
   background:rgba(110,168,255,.08);
 }
 
-.modal-item input{
-  width:18px;
-  height:18px;
-  accent-color: var(--accent);
-}
-
-.modal-item-text{
+.dd-text{
   font-size:13px;
   line-height:1.2;
+  max-width:75%;
+  overflow:hidden;
+  text-overflow:ellipsis;
+  white-space:nowrap;
 }
 
-.modal-foot{
-  padding:14px;
-  border-top:1px solid var(--border);
-  display:flex;
-  justify-content:flex-end;
-  gap:10px;
+.dd-tag{
+  font-size:11px;
+  color:var(--muted);
+  padding:6px 10px;
+  border-radius:999px;
+  border:1px solid var(--border);
+  background:rgba(255,255,255,.06);
+  white-space:nowrap;
+}
+
+.dd-on .dd-tag{
+  border-color: rgba(110,168,255,.35);
+  background: rgba(110,168,255,.12);
+}
+
+.dd-empty{
+  padding:12px;
 }
 
 /* ============================================================
@@ -316,10 +298,8 @@ tbody tr:hover{background:rgba(110,168,255,.06)}
 @media (max-width: 980px){
   .filters{grid-template-columns: repeat(2, minmax(0,1fr))}
   .field-wide{grid-column: span 2}
-  .field-actions{grid-column: span 2; flex-wrap:wrap}
+  .field-actions{grid-column: span 2}
   .kpis{grid-template-columns:1fr}
 
   .chip-text{max-width:240px}
-  .modal-card{width:96vw}
-  .modal-tools{flex-direction:column; align-items:stretch}
 }
