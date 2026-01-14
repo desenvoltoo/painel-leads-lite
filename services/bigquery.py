@@ -272,7 +272,7 @@ def _distinct(column: str, limit: int) -> List[str]:
 
 
 def query_options() -> Dict[str, List[str]]:
-    limit = int(_env("BQ_OPTIONS_LIMIT", "50000"))
+    limit = int(_env("BQ_OPTIONS_LIMIT", "5000"))
     limit = max(1000, min(limit, 200000))
     return {
         "status": _distinct("status", limit),
