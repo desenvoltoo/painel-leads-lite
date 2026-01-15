@@ -1,15 +1,13 @@
 /* ============================================================
    Painel Leads Lite — app.js (compatível com seu index.html)
-   - Mantém IDs e fluxo original (não mexe em variável/ENV)
-   - Multi-filtro por campo usando "||" (ex: DIREITO || PEDAGOGIA)
-   - Normalização de acentos (front) para busca/UX
-   - Datalist renderizado com segurança (evita travar)
+   - Multi-filtro por campo com "||" (SEM quebrar backend)
+   - Não envia parâmetros repetidos (não usa array)
+   - Ordena opções ignorando acento (UX)
 ============================================================ */
 
 const $ = (sel) => document.querySelector(sel);
 
 function showToast(msg, type = "ok") {
-  // Se não existir toast no HTML, usa statusLine/uploadStatus
   const statusLine = $("#statusLine");
   if (statusLine) {
     statusLine.textContent = msg;
@@ -36,13 +34,10 @@ function escapeHtml(str) {
     .replaceAll("'", "&#039;");
 }
 
-// aceita "Mon, 01 Jan 2024 00:00:00 GMT" e "2024-01-01"
 function fmtDate(d) {
   if (!d) return "";
   const s = String(d);
-
   if (/^\d{4}-\d{2}-\d{2}/.test(s)) return s.slice(0, 10);
-
   const ts = Date.parse(s);
   if (!Number.isNaN(ts)) {
     const dd = new Date(ts);
@@ -51,7 +46,6 @@ function fmtDate(d) {
     const day = String(dd.getUTCDate()).padStart(2, "0");
     return `${yyyy}-${mm}-${day}`;
   }
-
   return s.slice(0, 10);
 }
 
@@ -63,9 +57,6 @@ function debounce(fn, delay = 300) {
   };
 }
 
-/* ============================================================
-   Normalização (acentos) — FRONT
-============================================================ */
 function normTxt(s) {
   return String(s || "")
     .normalize("NFD")
@@ -75,20 +66,7 @@ function normTxt(s) {
 }
 
 /* ============================================================
-   Multi-filtro: "A || B || C" => ["A","B","C"]
-============================================================ */
-function splitMulti(raw) {
-  const s = String(raw || "").trim();
-  if (!s) return [];
-  // permite usar "||" como separador
-  return s
-    .split("||")
-    .map((x) => x.trim())
-    .filter(Boolean);
-}
-
-/* ============================================================
-   State (mantém seu formato base)
+   State
 ============================================================ */
 const state = {
   filters: {
@@ -110,16 +88,6 @@ async function apiGet(path, params = {}) {
 
   Object.entries(params).forEach(([k, v]) => {
     if (v === null || v === undefined) return;
-
-    // ✅ se for array: adiciona múltiplos params repetidos
-    if (Array.isArray(v)) {
-      v.forEach((item) => {
-        const s = String(item ?? "").trim();
-        if (s) url.searchParams.append(k, s);
-      });
-      return;
-    }
-
     const s = String(v).trim();
     if (s) url.searchParams.set(k, s);
   });
@@ -196,8 +164,7 @@ function fillDatalist(id, values) {
 
   dl.innerHTML = "";
 
-  // ✅ render com segurança: se vier muito grande, corta para não travar o browser
-  // (isso NÃO limita o que existe na API; só evita travar a tela)
+  // evita travar o browser se vier coisa absurda
   const MAX = 50000;
   const arr = Array.isArray(values) ? values.slice(0, MAX) : [];
 
@@ -212,16 +179,10 @@ function fillDatalist(id, values) {
    Filters
 ============================================================ */
 function readFiltersFromUI() {
-  // mantém seus campos originais
-  const statusRaw = ($("#fStatus")?.value || "").trim();
-  const cursoRaw = ($("#fCurso")?.value || "").trim();
-  const poloRaw = ($("#fPolo")?.value || "").trim();
-  const origemRaw = ($("#fOrigem")?.value || "").trim();
-
-  state.filters.status = statusRaw;
-  state.filters.curso = cursoRaw;
-  state.filters.polo = poloRaw;
-  state.filters.origem = origemRaw;
+  state.filters.status = ($("#fStatus")?.value || "").trim();
+  state.filters.curso = ($("#fCurso")?.value || "").trim();
+  state.filters.polo = ($("#fPolo")?.value || "").trim();
+  state.filters.origem = ($("#fOrigem")?.value || "").trim();
 
   state.filters.data_ini = ($("#fIni")?.value || "").trim();
   state.filters.data_fim = ($("#fFim")?.value || "").trim();
@@ -230,33 +191,20 @@ function readFiltersFromUI() {
   state.filters.limit = Number.isFinite(lim) ? Math.max(50, Math.min(lim, 5000)) : 500;
 }
 
-/* ============================================================
-   Monta params (✅ aqui entra o multi-filtro sem quebrar o antigo)
-============================================================ */
-function buildParamsFromFilters() {
+function buildParams() {
   readFiltersFromUI();
 
-  // Se o usuário colocou "||", vira múltiplos valores (params repetidos)
-  const statusList = splitMulti(state.filters.status);
-  const cursoList = splitMulti(state.filters.curso);
-  const poloList = splitMulti(state.filters.polo);
-  const origemList = splitMulti(state.filters.origem);
-
-  // Compatibilidade:
-  // - Se for só 1 valor (ou vazio), continua igual
-  // - Se for multi, envia como array => apiGet coloca params repetidos
-  const params = {
+  // ✅ mantém exatamente a string digitada, incluindo "||"
+  // (o backend services/bigquery.py agora entende isso)
+  return {
+    status: state.filters.status,
+    curso: state.filters.curso,
+    polo: state.filters.polo,
+    origem: state.filters.origem,
     data_ini: state.filters.data_ini,
     data_fim: state.filters.data_fim,
     limit: state.filters.limit,
   };
-
-  params.status = statusList.length <= 1 ? (statusList[0] || "") : statusList;
-  params.curso = cursoList.length <= 1 ? (cursoList[0] || "") : cursoList;
-  params.polo = poloList.length <= 1 ? (poloList[0] || "") : poloList;
-  params.origem = origemList.length <= 1 ? (origemList[0] || "") : origemList;
-
-  return params;
 }
 
 /* ============================================================
@@ -265,7 +213,6 @@ function buildParamsFromFilters() {
 async function loadOptions() {
   const data = await apiGet("/api/options");
 
-  // ✅ opcional: ordenação “smart” ignorando acento (não muda valor real)
   const sortSmart = (arr) =>
     (arr || []).slice().sort((a, b) => {
       const na = normTxt(a);
@@ -285,7 +232,7 @@ async function loadLeadsAndKpis() {
   const statusLine = $("#statusLine");
   if (statusLine) statusLine.textContent = "Carregando...";
 
-  const params = buildParamsFromFilters();
+  const params = buildParams();
 
   try {
     const [leads, kpis] = await Promise.all([
@@ -316,7 +263,6 @@ function bindUpload() {
   const file = $("#uploadFile");
   const source = $("#uploadSource");
   const btn = $("#btnUpload");
-
   if (!file || !btn) return;
 
   btn.addEventListener("click", async (e) => {
@@ -359,7 +305,7 @@ function bindUpload() {
 }
 
 /* ============================================================
-   Extras: Reload + Export
+   Reload + Export
 ============================================================ */
 function bindReload() {
   const btn = $("#btnReload");
@@ -384,8 +330,7 @@ function buildCsv(rows, headers, sep = ";") {
     lines.push(headers.map((h) => escapeCell(r?.[h])).join(sep));
   });
 
-  // BOM pro Excel
-  return "\uFEFF" + lines.join("\n");
+  return "\uFEFF" + lines.join("\n"); // BOM
 }
 
 function bindExport() {
@@ -395,11 +340,8 @@ function bindExport() {
   btn.addEventListener("click", async (e) => {
     e.preventDefault();
     try {
-      const params = buildParamsFromFilters();
-
-      // Para export: puxa mais (sem quebrar o painel)
-      // se seu backend respeitar "limit", beleza. Se não, continua igual.
-      params.limit = 5000;
+      const params = buildParams();
+      params.limit = "5000";
 
       const data = await apiGet("/api/leads", params);
       const rows = data?.rows || [];
@@ -440,7 +382,7 @@ function bindExport() {
 }
 
 /* ============================================================
-   Bind filters (apply/clear + auto refresh)
+   Bind filters
 ============================================================ */
 function bindFilters() {
   const ids = ["#fStatus", "#fCurso", "#fPolo", "#fOrigem", "#fIni", "#fFim", "#fLimit"];
@@ -452,32 +394,26 @@ function bindFilters() {
     el.addEventListener("keyup", loadLeadsAndKpisDebounced);
   });
 
-  const btnApply = $("#btnApply");
-  if (btnApply) {
-    btnApply.addEventListener("click", (e) => {
-      e.preventDefault();
-      loadLeadsAndKpis();
+  $("#btnApply")?.addEventListener("click", (e) => {
+    e.preventDefault();
+    loadLeadsAndKpis();
+  });
+
+  $("#btnClear")?.addEventListener("click", (e) => {
+    e.preventDefault();
+
+    ["#fStatus", "#fCurso", "#fPolo", "#fOrigem", "#fIni", "#fFim"].forEach((id) => {
+      const el = $(id);
+      if (el) el.value = "";
     });
-  }
 
-  const btnClear = $("#btnClear");
-  if (btnClear) {
-    btnClear.addEventListener("click", (e) => {
-      e.preventDefault();
+    const lim = $("#fLimit");
+    if (lim) lim.value = "500";
 
-      ["#fStatus", "#fCurso", "#fPolo", "#fOrigem", "#fIni", "#fFim"].forEach((id) => {
-        const el = $(id);
-        if (el) el.value = "";
-      });
-
-      const lim = $("#fLimit");
-      if (lim) lim.value = "500";
-
-      setUploadStatus("");
-      showToast("Filtros limpos.", "ok");
-      loadLeadsAndKpis();
-    });
-  }
+    setUploadStatus("");
+    showToast("Filtros limpos.", "ok");
+    loadLeadsAndKpis();
+  });
 }
 
 /* ============================================================
