@@ -1,5 +1,9 @@
 /* ============================================================
    Painel Leads Lite — app.js (compatível com seu index.html)
+   - Mantém IDs e fluxo original (não mexe em variável/ENV)
+   - Multi-filtro por campo usando "||" (ex: DIREITO || PEDAGOGIA)
+   - Normalização de acentos (front) para busca/UX
+   - Datalist renderizado com segurança (evita travar)
 ============================================================ */
 
 const $ = (sel) => document.querySelector(sel);
@@ -32,9 +36,23 @@ function escapeHtml(str) {
     .replaceAll("'", "&#039;");
 }
 
+// aceita "Mon, 01 Jan 2024 00:00:00 GMT" e "2024-01-01"
 function fmtDate(d) {
   if (!d) return "";
-  return String(d).slice(0, 10);
+  const s = String(d);
+
+  if (/^\d{4}-\d{2}-\d{2}/.test(s)) return s.slice(0, 10);
+
+  const ts = Date.parse(s);
+  if (!Number.isNaN(ts)) {
+    const dd = new Date(ts);
+    const yyyy = dd.getUTCFullYear();
+    const mm = String(dd.getUTCMonth() + 1).padStart(2, "0");
+    const day = String(dd.getUTCDate()).padStart(2, "0");
+    return `${yyyy}-${mm}-${day}`;
+  }
+
+  return s.slice(0, 10);
 }
 
 function debounce(fn, delay = 300) {
@@ -46,7 +64,31 @@ function debounce(fn, delay = 300) {
 }
 
 /* ============================================================
-   State
+   Normalização (acentos) — FRONT
+============================================================ */
+function normTxt(s) {
+  return String(s || "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .trim()
+    .toUpperCase();
+}
+
+/* ============================================================
+   Multi-filtro: "A || B || C" => ["A","B","C"]
+============================================================ */
+function splitMulti(raw) {
+  const s = String(raw || "").trim();
+  if (!s) return [];
+  // permite usar "||" como separador
+  return s
+    .split("||")
+    .map((x) => x.trim())
+    .filter(Boolean);
+}
+
+/* ============================================================
+   State (mantém seu formato base)
 ============================================================ */
 const state = {
   filters: {
@@ -65,19 +107,38 @@ const state = {
 ============================================================ */
 async function apiGet(path, params = {}) {
   const url = new URL(path, window.location.origin);
+
   Object.entries(params).forEach(([k, v]) => {
-    if (v !== null && v !== undefined) url.searchParams.set(k, v);
+    if (v === null || v === undefined) return;
+
+    // ✅ se for array: adiciona múltiplos params repetidos
+    if (Array.isArray(v)) {
+      v.forEach((item) => {
+        const s = String(item ?? "").trim();
+        if (s) url.searchParams.append(k, s);
+      });
+      return;
+    }
+
+    const s = String(v).trim();
+    if (s) url.searchParams.set(k, s);
   });
 
   const res = await fetch(url.toString(), { cache: "no-store" });
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  return res.json();
+  const data = await res.json().catch(() => ({}));
+
+  if (!res.ok) {
+    const msg = data?.error || data?.message || data?.details || `HTTP ${res.status}`;
+    throw new Error(msg);
+  }
+
+  return data;
 }
 
 async function apiPostForm(path, formData) {
   const res = await fetch(path, { method: "POST", body: formData });
   const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data?.error || `HTTP ${res.status}`);
+  if (!res.ok) throw new Error(data?.error || data?.message || `HTTP ${res.status}`);
   return data;
 }
 
@@ -114,10 +175,6 @@ function renderTable(rows) {
 }
 
 function renderKpis(k) {
-  // IDs do seu HTML:
-  // total: #kpiCount
-  // top status: #kpiTopStatus
-  // last: #kpiLastDate
   const total = $("#kpiCount");
   const top = $("#kpiTopStatus");
   const last = $("#kpiLastDate");
@@ -136,8 +193,15 @@ function renderKpis(k) {
 function fillDatalist(id, values) {
   const dl = document.getElementById(id);
   if (!dl) return;
+
   dl.innerHTML = "";
-  (values || []).forEach((v) => {
+
+  // ✅ render com segurança: se vier muito grande, corta para não travar o browser
+  // (isso NÃO limita o que existe na API; só evita travar a tela)
+  const MAX = 50000;
+  const arr = Array.isArray(values) ? values.slice(0, MAX) : [];
+
+  arr.forEach((v) => {
     const opt = document.createElement("option");
     opt.value = v;
     dl.appendChild(opt);
@@ -148,17 +212,51 @@ function fillDatalist(id, values) {
    Filters
 ============================================================ */
 function readFiltersFromUI() {
-  state.filters.status = ($("#fStatus")?.value || "").trim();
-  state.filters.curso = ($("#fCurso")?.value || "").trim();
-  state.filters.polo = ($("#fPolo")?.value || "").trim();
-  state.filters.origem = ($("#fOrigem")?.value || "").trim();
+  // mantém seus campos originais
+  const statusRaw = ($("#fStatus")?.value || "").trim();
+  const cursoRaw = ($("#fCurso")?.value || "").trim();
+  const poloRaw = ($("#fPolo")?.value || "").trim();
+  const origemRaw = ($("#fOrigem")?.value || "").trim();
 
-  // seu HTML usa fIni e fFim
+  state.filters.status = statusRaw;
+  state.filters.curso = cursoRaw;
+  state.filters.polo = poloRaw;
+  state.filters.origem = origemRaw;
+
   state.filters.data_ini = ($("#fIni")?.value || "").trim();
   state.filters.data_fim = ($("#fFim")?.value || "").trim();
 
   const lim = parseInt($("#fLimit")?.value || "500", 10);
-  state.filters.limit = Number.isFinite(lim) ? lim : 500;
+  state.filters.limit = Number.isFinite(lim) ? Math.max(50, Math.min(lim, 5000)) : 500;
+}
+
+/* ============================================================
+   Monta params (✅ aqui entra o multi-filtro sem quebrar o antigo)
+============================================================ */
+function buildParamsFromFilters() {
+  readFiltersFromUI();
+
+  // Se o usuário colocou "||", vira múltiplos valores (params repetidos)
+  const statusList = splitMulti(state.filters.status);
+  const cursoList = splitMulti(state.filters.curso);
+  const poloList = splitMulti(state.filters.polo);
+  const origemList = splitMulti(state.filters.origem);
+
+  // Compatibilidade:
+  // - Se for só 1 valor (ou vazio), continua igual
+  // - Se for multi, envia como array => apiGet coloca params repetidos
+  const params = {
+    data_ini: state.filters.data_ini,
+    data_fim: state.filters.data_fim,
+    limit: state.filters.limit,
+  };
+
+  params.status = statusList.length <= 1 ? (statusList[0] || "") : statusList;
+  params.curso = cursoList.length <= 1 ? (cursoList[0] || "") : cursoList;
+  params.polo = poloList.length <= 1 ? (poloList[0] || "") : poloList;
+  params.origem = origemList.length <= 1 ? (origemList[0] || "") : origemList;
+
+  return params;
 }
 
 /* ============================================================
@@ -166,22 +264,33 @@ function readFiltersFromUI() {
 ============================================================ */
 async function loadOptions() {
   const data = await apiGet("/api/options");
-  fillDatalist("dlStatus", data.status);
-  fillDatalist("dlCurso", data.curso);
-  fillDatalist("dlPolo", data.polo);
-  fillDatalist("dlOrigem", data.origem);
+
+  // ✅ opcional: ordenação “smart” ignorando acento (não muda valor real)
+  const sortSmart = (arr) =>
+    (arr || []).slice().sort((a, b) => {
+      const na = normTxt(a);
+      const nb = normTxt(b);
+      if (na < nb) return -1;
+      if (na > nb) return 1;
+      return 0;
+    });
+
+  fillDatalist("dlStatus", sortSmart(data.status));
+  fillDatalist("dlCurso", sortSmart(data.curso));
+  fillDatalist("dlPolo", sortSmart(data.polo));
+  fillDatalist("dlOrigem", sortSmart(data.origem));
 }
 
 async function loadLeadsAndKpis() {
-  readFiltersFromUI();
-
   const statusLine = $("#statusLine");
   if (statusLine) statusLine.textContent = "Carregando...";
 
+  const params = buildParamsFromFilters();
+
   try {
     const [leads, kpis] = await Promise.all([
-      apiGet("/api/leads", state.filters),
-      apiGet("/api/kpis", state.filters),
+      apiGet("/api/leads", params),
+      apiGet("/api/kpis", params),
     ]);
 
     const rows = leads?.rows || [];
@@ -190,11 +299,11 @@ async function loadLeadsAndKpis() {
 
     const count = leads?.count ?? rows.length ?? 0;
     if (statusLine) statusLine.textContent = `${count} registros carregados.`;
-
   } catch (e) {
     console.error(e);
     renderTable([]);
-    showToast("Falha ao carregar dados do BigQuery.", "err");
+    renderKpis({ total: 0, top_status: null, last_date: null });
+    showToast(`Falha ao carregar dados: ${e.message}`, "err");
   }
 }
 
@@ -236,10 +345,8 @@ function bindUpload() {
       setUploadStatus(`${msg} (${rows} linhas) — ${fname}`, "ok");
       showToast("Upload finalizado. Atualizando dados...", "ok");
 
-      // Atualiza painel após promote
       await loadLeadsAndKpis();
       showToast("Painel atualizado com os novos dados.", "ok");
-
     } catch (err) {
       console.error(err);
       setUploadStatus(`Falha: ${err.message}`, "error");
@@ -264,6 +371,23 @@ function bindReload() {
   });
 }
 
+function buildCsv(rows, headers, sep = ";") {
+  const escapeCell = (v) => {
+    const s = String(v ?? "");
+    const safe = s.replaceAll('"', '""');
+    return `"${safe}"`;
+  };
+
+  const lines = [];
+  lines.push(headers.map(escapeCell).join(sep));
+  rows.forEach((r) => {
+    lines.push(headers.map((h) => escapeCell(r?.[h])).join(sep));
+  });
+
+  // BOM pro Excel
+  return "\uFEFF" + lines.join("\n");
+}
+
 function bindExport() {
   const btn = $("#btnExport");
   if (!btn) return;
@@ -271,8 +395,13 @@ function bindExport() {
   btn.addEventListener("click", async (e) => {
     e.preventDefault();
     try {
-      readFiltersFromUI();
-      const data = await apiGet("/api/leads", state.filters);
+      const params = buildParamsFromFilters();
+
+      // Para export: puxa mais (sem quebrar o painel)
+      // se seu backend respeitar "limit", beleza. Se não, continua igual.
+      params.limit = 5000;
+
+      const data = await apiGet("/api/leads", params);
       const rows = data?.rows || [];
 
       if (!rows.length) {
@@ -285,21 +414,18 @@ function bindExport() {
         "origem","polo","curso","status","consultor"
       ];
 
-      const csv = [
-        headers.join(","),
-        ...rows.map(r => headers.map(h => {
-          const v = r[h] ?? "";
-          const s = String(v).replaceAll('"', '""');
-          return `"${s}"`;
-        }).join(","))
-      ].join("\n");
+      const csv = buildCsv(
+        rows.map((r) => ({ ...r, data_inscricao: fmtDate(r?.data_inscricao) })),
+        headers,
+        ";"
+      );
 
       const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
       const url = URL.createObjectURL(blob);
 
       const a = document.createElement("a");
       a.href = url;
-      a.download = `leads_export_${new Date().toISOString().slice(0,10)}.csv`;
+      a.download = `leads_export_${new Date().toISOString().slice(0, 10)}.csv`;
       document.body.appendChild(a);
       a.click();
       a.remove();
@@ -308,13 +434,13 @@ function bindExport() {
       showToast("CSV exportado.", "ok");
     } catch (err) {
       console.error(err);
-      showToast("Falha ao exportar CSV.", "err");
+      showToast(`Falha ao exportar CSV: ${err.message}`, "err");
     }
   });
 }
 
 /* ============================================================
-   Bind filters (apply/clear + auto refresh on typing)
+   Bind filters (apply/clear + auto refresh)
 ============================================================ */
 function bindFilters() {
   const ids = ["#fStatus", "#fCurso", "#fPolo", "#fOrigem", "#fIni", "#fFim", "#fLimit"];
@@ -366,9 +492,8 @@ document.addEventListener("DOMContentLoaded", async () => {
 
     await loadOptions();
     await loadLeadsAndKpis();
-
   } catch (e) {
     console.error(e);
-    showToast("Erro ao iniciar o painel.", "err");
+    showToast(`Erro ao iniciar o painel: ${e.message}`, "err");
   }
 });
