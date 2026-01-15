@@ -1,37 +1,15 @@
 /* ============================================================
-   Painel Leads Lite — app.js
-   Chips + Dropdown custom (overlay) + infinite scroll + export server
-   + Paginação no front (cache dos resultados atuais)
+   Painel Leads Lite — app.js (compatível com seu index.html)
 ============================================================ */
 
 const $ = (sel) => document.querySelector(sel);
 
-/* ============================================================
-   ERROS GLOBAIS (pra nunca mais ficar “vazio e sem explicação”)
-============================================================ */
-window.addEventListener("error", (ev) => {
-  try {
-    const msg = ev?.message || "Erro JS";
-    console.error("JS ERROR:", ev);
-    alert(`ERRO NO JAVASCRIPT:\n${msg}\n\nAbra o Console (F12) para ver detalhes.`);
-  } catch (_) {}
-});
-
-window.addEventListener("unhandledrejection", (ev) => {
-  try {
-    console.error("PROMISE REJECTION:", ev?.reason || ev);
-    alert(`ERRO (Promise):\n${String(ev?.reason?.message || ev?.reason || ev)}`);
-  } catch (_) {}
-});
-
-/* ============================================================
-   Toast / Status
-============================================================ */
 function showToast(msg, type = "ok") {
+  // Se não existir toast no HTML, usa statusLine/uploadStatus
   const statusLine = $("#statusLine");
   if (statusLine) {
     statusLine.textContent = msg;
-    statusLine.dataset.type = type === "err" ? "err" : "ok";
+    statusLine.className = type === "err" ? "error" : "";
   } else {
     alert(msg);
   }
@@ -41,12 +19,9 @@ function setUploadStatus(msg, type = "muted") {
   const el = $("#uploadStatus");
   if (!el) return;
   el.textContent = msg || "";
-  el.dataset.type = type; // "ok" | "warn" | "error" | "muted"
+  el.className = type;
 }
 
-/* ============================================================
-   Utils
-============================================================ */
 function escapeHtml(str) {
   if (str === null || str === undefined) return "";
   return String(str)
@@ -57,25 +32,9 @@ function escapeHtml(str) {
     .replaceAll("'", "&#039;");
 }
 
-// formata datas tipo "Mon, 01 Jan 2024 00:00:00 GMT" OU "2025-11-09"
 function fmtDate(d) {
   if (!d) return "";
-  const s = String(d);
-
-  // ISO direto
-  if (/^\d{4}-\d{2}-\d{2}/.test(s)) return s.slice(0, 10);
-
-  // tenta parsear Date string
-  const ts = Date.parse(s);
-  if (!Number.isNaN(ts)) {
-    const dd = new Date(ts);
-    const yyyy = dd.getUTCFullYear();
-    const mm = String(dd.getUTCMonth() + 1).padStart(2, "0");
-    const day = String(dd.getUTCDate()).padStart(2, "0");
-    return `${yyyy}-${mm}-${day}`;
-  }
-
-  return s.slice(0, 10);
+  return String(d).slice(0, 10);
 }
 
 function debounce(fn, delay = 300) {
@@ -90,99 +49,80 @@ function debounce(fn, delay = 300) {
    State
 ============================================================ */
 const state = {
-  options: { status: [], curso: [], polo: [], origem: [] },
   filters: {
     status: "",
+    curso: "",
+    polo: "",
     origem: "",
     data_ini: "",
     data_fim: "",
-    limit: 5000,
-    curso_list: [],
-    polo_list: [],
-  },
-
-  dd: {
-    curso: { q: "", idx: 0, filtered: [], open: false },
-    polo: { q: "", idx: 0, filtered: [], open: false },
-  },
-
-  table: {
-    allRows: [],
-    filteredRows: [],
-    page: 1,
-    pageSize: 50,
+    limit: 500,
   },
 };
 
 /* ============================================================
-   API helpers
+   API
 ============================================================ */
 async function apiGet(path, params = {}) {
   const url = new URL(path, window.location.origin);
-
   Object.entries(params).forEach(([k, v]) => {
-    if (v === null || v === undefined) return;
-
-    if (Array.isArray(v)) {
-      v.forEach((item) => {
-        const s = String(item ?? "").trim();
-        if (s) url.searchParams.append(k, s);
-      });
-      return;
-    }
-
-    const s = String(v).trim();
-    if (s) url.searchParams.set(k, s);
+    if (v !== null && v !== undefined) url.searchParams.set(k, v);
   });
 
   const res = await fetch(url.toString(), { cache: "no-store" });
-  const data = await res.json().catch(() => null);
-
-  if (!res.ok) {
-    const msg = data?.error || data?.message || data?.details || `HTTP ${res.status}`;
-    const err = new Error(msg);
-    err.payload = data;
-    err.status = res.status;
-    throw err;
-  }
-
-  return data;
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return res.json();
 }
 
 async function apiPostForm(path, formData) {
   const res = await fetch(path, { method: "POST", body: formData });
-  const data = await res.json().catch(() => null);
-
-  if (!res.ok) {
-    const msg = data?.error || data?.message || data?.details || `HTTP ${res.status}`;
-    const err = new Error(msg);
-    err.payload = data;
-    err.status = res.status;
-    throw err;
-  }
-
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data?.error || `HTTP ${res.status}`);
   return data;
 }
 
-function explainErr(prefix, err) {
-  console.error(prefix, err);
-  const p = err?.payload;
-  if (p?.error || p?.details) {
-    const details = p?.details ? ` | ${p.details}` : "";
-    return `${p.error || err.message}${details}`;
+/* ============================================================
+   UI: render
+============================================================ */
+function renderTable(rows) {
+  const tbody = $("#tbl tbody");
+  if (!tbody) return;
+
+  if (!rows || rows.length === 0) {
+    tbody.innerHTML = `<tr><td colspan="10" class="muted">Nenhum lead encontrado.</td></tr>`;
+    return;
   }
-  return err?.message || String(err);
+
+  tbody.innerHTML = rows
+    .map((r) => {
+      return `
+        <tr>
+          <td>${escapeHtml(fmtDate(r.data_inscricao))}</td>
+          <td>${escapeHtml(r.nome)}</td>
+          <td>${escapeHtml(r.cpf)}</td>
+          <td>${escapeHtml(r.celular)}</td>
+          <td>${escapeHtml(r.email)}</td>
+          <td>${escapeHtml(r.origem)}</td>
+          <td>${escapeHtml(r.polo)}</td>
+          <td>${escapeHtml(r.curso)}</td>
+          <td>${escapeHtml(r.status)}</td>
+          <td>${escapeHtml(r.consultor)}</td>
+        </tr>
+      `;
+    })
+    .join("");
 }
 
-/* ============================================================
-   UI: KPIs
-============================================================ */
 function renderKpis(k) {
+  // IDs do seu HTML:
+  // total: #kpiCount
+  // top status: #kpiTopStatus
+  // last: #kpiLastDate
   const total = $("#kpiCount");
   const top = $("#kpiTopStatus");
   const last = $("#kpiLastDate");
 
-  if (total) total.textContent = (k?.total ?? 0).toString();
+  if (total) total.textContent = k?.total ?? 0;
 
   if (top) {
     const s = k?.top_status?.status ?? "-";
@@ -205,358 +145,20 @@ function fillDatalist(id, values) {
 }
 
 /* ============================================================
-   Paginação + Tabela
-============================================================ */
-function setPageInfo() {
-  const info = $("#pageInfo");
-  const btnPrev = $("#btnPrev");
-  const btnNext = $("#btnNext");
-
-  const rows = state.table.filteredRows || [];
-  const total = rows.length;
-  const pageSize = state.table.pageSize;
-  const totalPages = Math.max(1, Math.ceil(total / pageSize));
-
-  state.table.page = Math.min(Math.max(1, state.table.page), totalPages);
-
-  const page = state.table.page;
-  const start = total ? (page - 1) * pageSize + 1 : 0;
-  const end = total ? Math.min(page * pageSize, total) : 0;
-
-  if (info) {
-    info.textContent = total
-      ? `Mostrando ${start}-${end} de ${total} • Página ${page}/${totalPages}`
-      : `—`;
-  }
-
-  if (btnPrev) btnPrev.disabled = page <= 1 || total === 0;
-  if (btnNext) btnNext.disabled = page >= totalPages || total === 0;
-}
-
-function renderTablePage() {
-  const tbody = $("#tbl tbody");
-  if (!tbody) {
-    alert("ERRO: não achei a tabela #tbl tbody no HTML. Confere o id da tabela.");
-    return;
-  }
-
-  const rows = state.table.filteredRows || [];
-  const page = state.table.page;
-  const pageSize = state.table.pageSize;
-
-  if (!rows.length) {
-    tbody.innerHTML = `<tr><td colspan="10" class="muted">Nenhum lead encontrado.</td></tr>`;
-    setPageInfo();
-    return;
-  }
-
-  const total = rows.length;
-  const totalPages = Math.max(1, Math.ceil(total / pageSize));
-
-  state.table.page = Math.min(Math.max(1, page), totalPages);
-
-  const start = (state.table.page - 1) * pageSize;
-  const end = Math.min(start + pageSize, total);
-  const slice = rows.slice(start, end);
-
-  tbody.innerHTML = slice
-    .map(
-      (r) => `
-      <tr>
-        <td>${escapeHtml(fmtDate(r.data_inscricao))}</td>
-        <td>${escapeHtml(r.nome)}</td>
-        <td>${escapeHtml(r.cpf)}</td>
-        <td>${escapeHtml(r.celular)}</td>
-        <td>${escapeHtml(r.email)}</td>
-        <td>${escapeHtml(r.origem)}</td>
-        <td>${escapeHtml(r.polo)}</td>
-        <td>${escapeHtml(r.curso)}</td>
-        <td>${escapeHtml(r.status)}</td>
-        <td>${escapeHtml(r.consultor)}</td>
-      </tr>
-    `
-    )
-    .join("");
-
-  setPageInfo();
-}
-
-function bindPagination() {
-  const sel = $("#pageSize");
-  const btnPrev = $("#btnPrev");
-  const btnNext = $("#btnNext");
-
-  if (sel) {
-    const v = parseInt(sel.value || "50", 10);
-    state.table.pageSize = Number.isFinite(v) ? v : 50;
-
-    sel.addEventListener("change", () => {
-      const n = parseInt(sel.value || "50", 10);
-      state.table.pageSize = Number.isFinite(n) ? n : 50;
-      state.table.page = 1;
-      renderTablePage();
-    });
-  }
-
-  if (btnPrev) {
-    btnPrev.addEventListener("click", (e) => {
-      e.preventDefault();
-      state.table.page = Math.max(1, state.table.page - 1);
-      renderTablePage();
-    });
-  }
-
-  if (btnNext) {
-    btnNext.addEventListener("click", (e) => {
-      e.preventDefault();
-      state.table.page = state.table.page + 1;
-      renderTablePage();
-    });
-  }
-}
-
-/* ============================================================
-   Chips (multi seleção)
-============================================================ */
-function _uniqPush(arr, value) {
-  const v = String(value || "").trim();
-  if (!v) return;
-  if (!arr.some((x) => String(x).toUpperCase() === v.toUpperCase())) arr.push(v);
-}
-
-function _removeValue(arr, value) {
-  const v = String(value || "").trim().toUpperCase();
-  const idx = arr.findIndex((x) => String(x).trim().toUpperCase() === v);
-  if (idx >= 0) arr.splice(idx, 1);
-}
-
-function renderChips(kind) {
-  const box = kind === "curso" ? $("#cursoChipBox") : $("#poloChipBox");
-  const hidden = kind === "curso" ? $("#fCursoMulti") : $("#fPoloMulti");
-  const list = kind === "curso" ? state.filters.curso_list : state.filters.polo_list;
-
-  if (!box || !hidden) return;
-
-  hidden.value = list.join("||");
-  box.innerHTML = "";
-
-  if (!list.length) {
-    const empty = document.createElement("div");
-    empty.className = "muted";
-    empty.textContent = "Nenhum selecionado.";
-    box.appendChild(empty);
-    return;
-  }
-
-  list.forEach((v) => {
-    const chip = document.createElement("button");
-    chip.type = "button";
-    chip.className = "chip";
-    chip.innerHTML = `<span class="chip-text">${escapeHtml(v)}</span><span class="chip-x">×</span>`;
-    chip.addEventListener("click", () => {
-      _removeValue(list, v);
-      renderChips(kind);
-      ddRebuild(kind);
-      loadLeadsAndKpisDebounced(true);
-    });
-    box.appendChild(chip);
-  });
-}
-
-/* ============================================================
-   Dropdown overlay (Curso/Polo) + Infinite scroll
-============================================================ */
-function ddGet(kind) {
-  return kind === "curso" ? $("#ddCursos") : $("#ddPolos");
-}
-function ddInput(kind) {
-  return kind === "curso" ? $("#fCurso") : $("#fPolo");
-}
-function ddAll(kind) {
-  return kind === "curso" ? (state.options.curso || []) : (state.options.polo || []);
-}
-function ddSelected(kind) {
-  return kind === "curso" ? state.filters.curso_list : state.filters.polo_list;
-}
-function ddState(kind) {
-  return kind === "curso" ? state.dd.curso : state.dd.polo;
-}
-
-function ddOpen(kind) {
-  const dd = ddGet(kind);
-  if (!dd) return;
-  dd.hidden = false;
-  ddState(kind).open = true;
-}
-
-function ddClose(kind) {
-  const dd = ddGet(kind);
-  if (!dd) return;
-  dd.hidden = true;
-  ddState(kind).open = false;
-}
-
-function ddMakeRow(kind, v) {
-  const selected = ddSelected(kind);
-  const isOn = selected.some(
-    (x) => String(x).trim().toUpperCase() === String(v).trim().toUpperCase()
-  );
-
-  const row = document.createElement("div");
-  row.className = "dd-item" + (isOn ? " dd-on" : "");
-  row.innerHTML = `
-    <div class="dd-text">${escapeHtml(v)}</div>
-    <div class="dd-tag">${isOn ? "Selecionado" : "Adicionar"}</div>
-  `;
-
-  row.addEventListener("mousedown", (e) => {
-    e.preventDefault();
-
-    if (isOn) _removeValue(selected, v);
-    else _uniqPush(selected, v);
-
-    renderChips(kind);
-    ddRebuild(kind);
-    loadLeadsAndKpisDebounced(true);
-  });
-
-  return row;
-}
-
-function ddFilterList(kind, qUpper) {
-  const all = ddAll(kind);
-  if (!qUpper) return all.slice();
-
-  const out = [];
-  for (let i = 0; i < all.length; i++) {
-    const v = String(all[i] || "");
-    if (!v) continue;
-    if (v.toUpperCase().includes(qUpper)) out.push(v);
-  }
-  return out;
-}
-
-const DD_BATCH = 350;
-
-function ddRenderNext(kind) {
-  const dd = ddGet(kind);
-  const st = ddState(kind);
-  if (!dd) return;
-
-  if (!st.filtered || st.filtered.length === 0) {
-    dd.innerHTML = `<div class="dd-empty muted">Nada encontrado.</div>`;
-    st.idx = 0;
-    return;
-  }
-
-  if (st.idx === 0) dd.innerHTML = "";
-
-  const end = Math.min(st.idx + DD_BATCH, st.filtered.length);
-  const frag = document.createDocumentFragment();
-
-  for (let i = st.idx; i < end; i++) {
-    frag.appendChild(ddMakeRow(kind, st.filtered[i]));
-  }
-
-  dd.appendChild(frag);
-  st.idx = end;
-
-  const footerId = `ddFooter_${kind}`;
-  let footer = dd.querySelector(`#${footerId}`);
-  if (!footer) {
-    footer = document.createElement("div");
-    footer.id = footerId;
-    footer.className = "dd-footer muted";
-    dd.appendChild(footer);
-  }
-
-  footer.textContent =
-    st.idx >= st.filtered.length
-      ? `Fim — ${st.filtered.length} itens`
-      : `Mostrando ${st.idx} de ${st.filtered.length} — role para carregar mais`;
-}
-
-function ddRebuild(kind) {
-  const dd = ddGet(kind);
-  const input = ddInput(kind);
-  if (!dd || !input) return;
-
-  const st = ddState(kind);
-  const q = (input.value || "").trim().toUpperCase();
-
-  st.q = q;
-  st.filtered = ddFilterList(kind, q);
-  st.idx = 0;
-
-  ddRenderNext(kind);
-}
-
-function ddAttachScroll(kind) {
-  const dd = ddGet(kind);
-  if (!dd) return;
-
-  dd.addEventListener("scroll", () => {
-    const st = ddState(kind);
-    if (!st.open) return;
-
-    const nearBottom = dd.scrollTop + dd.clientHeight >= dd.scrollHeight - 60;
-    if (nearBottom && st.idx < st.filtered.length) ddRenderNext(kind);
-  });
-}
-
-function bindDropdown(kind) {
-  const input = ddInput(kind);
-  const dd = ddGet(kind);
-  if (!input || !dd) return;
-
-  input.addEventListener("focus", () => {
-    ddOpen(kind);
-    ddRebuild(kind);
-  });
-
-  input.addEventListener(
-    "input",
-    debounce(() => {
-      ddOpen(kind);
-      ddRebuild(kind);
-    }, 120)
-  );
-
-  input.addEventListener("keydown", (e) => {
-    if (e.key === "Enter") {
-      e.preventDefault();
-      const v = (input.value || "").trim();
-      if (v) {
-        _uniqPush(ddSelected(kind), v);
-        input.value = "";
-        renderChips(kind);
-        ddRebuild(kind);
-        loadLeadsAndKpisDebounced(true);
-      }
-    }
-    if (e.key === "Escape") ddClose(kind);
-  });
-
-  document.addEventListener("mousedown", (e) => {
-    if (e.target === input) return;
-    if (dd.contains(e.target)) return;
-    ddClose(kind);
-  });
-
-  ddAttachScroll(kind);
-}
-
-/* ============================================================
-   Filters (read UI)
+   Filters
 ============================================================ */
 function readFiltersFromUI() {
   state.filters.status = ($("#fStatus")?.value || "").trim();
+  state.filters.curso = ($("#fCurso")?.value || "").trim();
+  state.filters.polo = ($("#fPolo")?.value || "").trim();
   state.filters.origem = ($("#fOrigem")?.value || "").trim();
+
+  // seu HTML usa fIni e fFim
   state.filters.data_ini = ($("#fIni")?.value || "").trim();
   state.filters.data_fim = ($("#fFim")?.value || "").trim();
 
-  const lim = parseInt($("#fLimit")?.value || "5000", 10);
-  state.filters.limit = Number.isFinite(lim) ? lim : 5000;
+  const lim = parseInt($("#fLimit")?.value || "500", 10);
+  state.filters.limit = Number.isFinite(lim) ? lim : 500;
 }
 
 /* ============================================================
@@ -564,104 +166,39 @@ function readFiltersFromUI() {
 ============================================================ */
 async function loadOptions() {
   const data = await apiGet("/api/options");
-
-  state.options = {
-    status: data.status || [],
-    curso: data.curso || [],
-    polo: data.polo || [],
-    origem: data.origem || [],
-  };
-
-  fillDatalist("dlStatus", state.options.status);
-  fillDatalist("dlOrigem", state.options.origem);
-
-  renderChips("curso");
-  renderChips("polo");
-
-  if (ddState("curso").open) ddRebuild("curso");
-  if (ddState("polo").open) ddRebuild("polo");
+  fillDatalist("dlStatus", data.status);
+  fillDatalist("dlCurso", data.curso);
+  fillDatalist("dlPolo", data.polo);
+  fillDatalist("dlOrigem", data.origem);
 }
 
-async function loadLeadsAndKpis(resetPage = false) {
+async function loadLeadsAndKpis() {
   readFiltersFromUI();
 
   const statusLine = $("#statusLine");
   if (statusLine) statusLine.textContent = "Carregando...";
 
-  const params = {
-    status: state.filters.status,
-    origem: state.filters.origem,
-    data_ini: state.filters.data_ini,
-    data_fim: state.filters.data_fim,
-    limit: state.filters.limit,
-    curso: state.filters.curso_list,
-    polo: state.filters.polo_list,
-  };
-
   try {
     const [leads, kpis] = await Promise.all([
-      apiGet("/api/leads", params),
-      apiGet("/api/kpis", params),
+      apiGet("/api/leads", state.filters),
+      apiGet("/api/kpis", state.filters),
     ]);
 
-    console.log("LEADS RESPONSE:", leads);
-    console.log("KPIS RESPONSE:", kpis);
-
     const rows = leads?.rows || [];
-
-    state.table.allRows = rows;
-    state.table.filteredRows = rows;
-
-    if (resetPage) state.table.page = 1;
-
-    renderTablePage();
+    renderTable(rows);
     renderKpis(kpis);
 
     const count = leads?.count ?? rows.length ?? 0;
     if (statusLine) statusLine.textContent = `${count} registros carregados.`;
 
-    // Se chegou aqui e mesmo assim a tabela ficou vazia, avisa
-    if (rows.length > 0) {
-      const tbody = $("#tbl tbody");
-      if (tbody && tbody.children.length === 0) {
-        alert(
-          "Chegaram registros da API, mas a tabela não renderizou.\n" +
-            "Abra o Console (F12) e veja se existe algum erro JS após o render."
-        );
-      }
-    }
-  } catch (err) {
-    const msg = explainErr("loadLeadsAndKpis", err);
-
-    state.table.allRows = [];
-    state.table.filteredRows = [];
-    state.table.page = 1;
-
-    renderTablePage();
-    renderKpis({ total: 0, top_status: null, last_date: null });
-
-    showToast(`Erro: ${msg}`, "err");
-
-    // mostra payload real se existir
-    const p = err?.payload || null;
-    if (p) {
-      alert(
-        `ERRO BACKEND:\n${p.error || err.message}\n\nDETAILS:\n${p.details || "-"}\n\nSOURCE:\n${JSON.stringify(
-          p.source || {},
-          null,
-          2
-        )}`
-      );
-    } else {
-      alert(`ERRO:\n${msg}`);
-    }
+  } catch (e) {
+    console.error(e);
+    renderTable([]);
+    showToast("Falha ao carregar dados do BigQuery.", "err");
   }
 }
 
-const loadLeadsAndKpisDebounced = debounce(
-  (resetPage = false) => loadLeadsAndKpis(resetPage),
-  250
-);
+const loadLeadsAndKpisDebounced = debounce(loadLeadsAndKpis, 250);
 
 /* ============================================================
    Upload
@@ -670,6 +207,7 @@ function bindUpload() {
   const file = $("#uploadFile");
   const source = $("#uploadSource");
   const btn = $("#btnUpload");
+
   if (!file || !btn) return;
 
   btn.addEventListener("click", async (e) => {
@@ -690,6 +228,7 @@ function bindUpload() {
 
     try {
       const data = await apiPostForm("/api/upload", fd);
+
       const rows = data.rows_loaded ?? 0;
       const fname = data.filename ?? f.name ?? "arquivo";
       const msg = data.message ?? "Upload concluído.";
@@ -697,14 +236,14 @@ function bindUpload() {
       setUploadStatus(`${msg} (${rows} linhas) — ${fname}`, "ok");
       showToast("Upload finalizado. Atualizando dados...", "ok");
 
-      await loadOptions();
-      await loadLeadsAndKpis(true);
-
+      // Atualiza painel após promote
+      await loadLeadsAndKpis();
       showToast("Painel atualizado com os novos dados.", "ok");
+
     } catch (err) {
-      const msg = explainErr("upload", err);
-      setUploadStatus(`Falha: ${msg}`, "error");
-      showToast(`Falha no upload: ${msg}`, "err");
+      console.error(err);
+      setUploadStatus(`Falha: ${err.message}`, "error");
+      showToast(`Falha no upload: ${err.message}`, "err");
     } finally {
       btn.disabled = false;
       file.value = "";
@@ -713,93 +252,106 @@ function bindUpload() {
 }
 
 /* ============================================================
-   Reload + Export (server)
+   Extras: Reload + Export
 ============================================================ */
 function bindReload() {
   const btn = $("#btnReload");
   if (!btn) return;
-
   btn.addEventListener("click", async (e) => {
     e.preventDefault();
     await loadOptions();
-    await loadLeadsAndKpis(true);
+    await loadLeadsAndKpis();
   });
 }
 
-function exportCsvServer() {
-  readFiltersFromUI();
-
-  const url = new URL("/api/export", window.location.origin);
-
-  if (state.filters.status) url.searchParams.set("status", state.filters.status);
-  if (state.filters.origem) url.searchParams.set("origem", state.filters.origem);
-  if (state.filters.data_ini) url.searchParams.set("data_ini", state.filters.data_ini);
-  if (state.filters.data_fim) url.searchParams.set("data_fim", state.filters.data_fim);
-
-  (state.filters.curso_list || []).forEach((c) => url.searchParams.append("curso", c));
-  (state.filters.polo_list || []).forEach((p) => url.searchParams.append("polo", p));
-
-  url.searchParams.set("export_limit", "200000");
-  window.open(url.toString(), "_blank", "noopener");
-}
-
 function bindExport() {
-  const btn = $("#btnExportFilters");
+  const btn = $("#btnExport");
   if (!btn) return;
 
-  btn.addEventListener("click", (e) => {
+  btn.addEventListener("click", async (e) => {
     e.preventDefault();
-    showToast("Exportando CSV...", "ok");
-    exportCsvServer();
+    try {
+      readFiltersFromUI();
+      const data = await apiGet("/api/leads", state.filters);
+      const rows = data?.rows || [];
+
+      if (!rows.length) {
+        showToast("Nada para exportar com esses filtros.", "warn");
+        return;
+      }
+
+      const headers = [
+        "data_inscricao","nome","cpf","celular","email",
+        "origem","polo","curso","status","consultor"
+      ];
+
+      const csv = [
+        headers.join(","),
+        ...rows.map(r => headers.map(h => {
+          const v = r[h] ?? "";
+          const s = String(v).replaceAll('"', '""');
+          return `"${s}"`;
+        }).join(","))
+      ].join("\n");
+
+      const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
+      const url = URL.createObjectURL(blob);
+
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `leads_export_${new Date().toISOString().slice(0,10)}.csv`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+
+      showToast("CSV exportado.", "ok");
+    } catch (err) {
+      console.error(err);
+      showToast("Falha ao exportar CSV.", "err");
+    }
   });
 }
 
 /* ============================================================
-   Bind filtros
+   Bind filters (apply/clear + auto refresh on typing)
 ============================================================ */
 function bindFilters() {
-  const ids = ["#fStatus", "#fOrigem", "#fIni", "#fFim", "#fLimit"];
+  const ids = ["#fStatus", "#fCurso", "#fPolo", "#fOrigem", "#fIni", "#fFim", "#fLimit"];
 
   ids.forEach((id) => {
     const el = $(id);
     if (!el) return;
-    el.addEventListener("change", () => loadLeadsAndKpisDebounced(true));
-    el.addEventListener("keyup", () => loadLeadsAndKpisDebounced(true));
+    el.addEventListener("change", loadLeadsAndKpisDebounced);
+    el.addEventListener("keyup", loadLeadsAndKpisDebounced);
   });
 
-  $("#btnApply")?.addEventListener("click", (e) => {
-    e.preventDefault();
-    loadLeadsAndKpis(true);
-  });
-
-  $("#btnClear")?.addEventListener("click", (e) => {
-    e.preventDefault();
-
-    ["#fStatus", "#fOrigem", "#fIni", "#fFim"].forEach((id) => {
-      const el = $(id);
-      if (el) el.value = "";
+  const btnApply = $("#btnApply");
+  if (btnApply) {
+    btnApply.addEventListener("click", (e) => {
+      e.preventDefault();
+      loadLeadsAndKpis();
     });
+  }
 
-    const lim = $("#fLimit");
-    if (lim) lim.value = "5000";
+  const btnClear = $("#btnClear");
+  if (btnClear) {
+    btnClear.addEventListener("click", (e) => {
+      e.preventDefault();
 
-    state.filters.curso_list = [];
-    state.filters.polo_list = [];
+      ["#fStatus", "#fCurso", "#fPolo", "#fOrigem", "#fIni", "#fFim"].forEach((id) => {
+        const el = $(id);
+        if (el) el.value = "";
+      });
 
-    const inCurso = $("#fCurso");
-    const inPolo = $("#fPolo");
-    if (inCurso) inCurso.value = "";
-    if (inPolo) inPolo.value = "";
+      const lim = $("#fLimit");
+      if (lim) lim.value = "500";
 
-    renderChips("curso");
-    renderChips("polo");
-    ddClose("curso");
-    ddClose("polo");
-
-    setUploadStatus("");
-    showToast("Filtros limpos.", "ok");
-    loadLeadsAndKpis(true);
-  });
+      setUploadStatus("");
+      showToast("Filtros limpos.", "ok");
+      loadLeadsAndKpis();
+    });
+  }
 }
 
 /* ============================================================
@@ -811,19 +363,12 @@ document.addEventListener("DOMContentLoaded", async () => {
     bindFilters();
     bindReload();
     bindExport();
-    bindPagination();
-
-    renderChips("curso");
-    renderChips("polo");
-
-    bindDropdown("curso");
-    bindDropdown("polo");
 
     await loadOptions();
-    await loadLeadsAndKpis(true);
-  } catch (err) {
-    const msg = explainErr("init", err);
-    showToast(`Erro ao iniciar: ${msg}`, "err");
-    alert(`Erro ao iniciar:\n${msg}`);
+    await loadLeadsAndKpis();
+
+  } catch (e) {
+    console.error(e);
+    showToast("Erro ao iniciar o painel.", "err");
   }
 });
