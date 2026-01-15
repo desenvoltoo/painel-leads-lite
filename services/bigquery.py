@@ -7,41 +7,33 @@ from google.cloud import bigquery
 
 
 # ============================================================
-# ENV / CLIENT (DEFAULTS SEGUROS)
+# DEFAULTS (funciona mesmo sem ENV no Cloud Run)
 # ============================================================
 DEFAULT_PROJECT = "painel-universidade"
 DEFAULT_DATASET = "modelo_estrela"
 DEFAULT_VIEW_LEADS = "vw_leads_painel_lite"
-# Seu dataset está em us-central1 (confirmado pelo print)
-DEFAULT_BQ_LOCATION = "us-central1"
+DEFAULT_BQ_LOCATION = "us-central1"  # ✅ seu dataset é regional em us-central1
 
 
+# ============================================================
+# ENV / CLIENT
+# ============================================================
 def _env(name: str, default: str = "") -> str:
     v = os.getenv(name)
     v = v.strip() if isinstance(v, str) else v
     return v if v else default
 
 
-def _require_env(names: List[str]) -> Dict[str, str]:
-    values = {n: _env(n, "") for n in names}
-    missing = [n for n, v in values.items() if not v]
-    if missing:
-        snapshot = {n: (values.get(n) or None) for n in names}
-        raise RuntimeError(f"ENV obrigatórias faltando: {missing} | snapshot={snapshot}")
-    return values
-
-
 def _bq_location() -> str:
     """
-    IMPORTANTE:
-    - Dataset multi-região: use "US" (ou "EU")
-    - Dataset regional: "us-central1" (seu caso)
-    Ajuste via env BQ_LOCATION.
+    - Regional: us-central1 (seu caso)
+    - Multi-região: US / EU
     """
     return _env("BQ_LOCATION", DEFAULT_BQ_LOCATION)
 
 
 def _client() -> bigquery.Client:
+    # ✅ padrão igual seu primeiro: se não setar ENV, usa default
     project = _env("GCP_PROJECT_ID", DEFAULT_PROJECT)
     return bigquery.Client(project=project) if project else bigquery.Client()
 
@@ -49,65 +41,32 @@ def _client() -> bigquery.Client:
 def _table_ref() -> str:
     """
     View de leitura do painel.
+    ✅ Igual ao primeiro: sempre resolve com defaults.
     """
     project = _env("GCP_PROJECT_ID", DEFAULT_PROJECT)
     dataset = _env("BQ_DATASET", DEFAULT_DATASET)
     view = _env("BQ_VIEW_LEADS", DEFAULT_VIEW_LEADS)
-
-    if not project:
-        _require_env(["GCP_PROJECT_ID"])
-
     return f"`{project}.{dataset}.{view}`"
 
 
 def _date_field() -> str:
     """
-    Na view lite normalmente é data_inscricao.
-    Se mudar, setar via env BQ_DATE_FIELD.
+    Seu padrão na view lite é data_inscricao (DATE).
+    Se mudar, pode setar BQ_DATE_FIELD.
     """
     return _env("BQ_DATE_FIELD", "data_inscricao")
 
 
 def _date_expr() -> str:
     """
-    SUPER IMPORTANTE (evita painel "zerado"):
-    Converte a data de forma resiliente para DATE.
-
-    Cobre estes cenários:
-    - DATE/DATETIME/TIMESTAMP: SAFE_CAST -> DATE
-    - STRING ISO: 'YYYY-MM-DD'
-    - STRING BR:  'DD/MM/YYYY'
-
-    Se tudo falhar -> NULL (mas agora é bem menos provável).
+    ✅ Igual ao primeiro: DATE(campo)
+    Isso evita 'SAFE_CAST virar NULL' e matar o painel.
     """
-    f = _date_field()
-    s = f"CAST({f} AS STRING)"
-    return (
-        "COALESCE("
-        f"SAFE_CAST({f} AS DATE),"
-        f"SAFE.PARSE_DATE('%Y-%m-%d', {s}),"
-        f"SAFE.PARSE_DATE('%d/%m/%Y', {s})"
-        ")"
-    )
-
-
-def _norm_list_upper(values: List[str]) -> List[str]:
-    out: List[str] = []
-    seen = set()
-    for x in values or []:
-        s = str(x or "").strip()
-        if not s:
-            continue
-        u = s.upper()
-        if u in seen:
-            continue
-        seen.add(u)
-        out.append(u)
-    return out
+    return f"DATE({_date_field()})"
 
 
 # ============================================================
-# NORMALIZAÇÃO UPLOAD
+# NORMALIZAÇÃO (upload)
 # ============================================================
 def _normalize_cols(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
@@ -137,7 +96,6 @@ def _to_bool(v):
 
 def _normalize_datetime_cols(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
-
     dt_cols = ("data_envio_dt", "data_inscricao_dt", "data_disparo_dt", "data_contato_dt")
     for col in dt_cols:
         if col in df.columns:
@@ -153,34 +111,30 @@ def _normalize_datetime_cols(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def _norm_list_upper(values: List[str]) -> List[str]:
+    out = []
+    seen = set()
+    for x in values or []:
+        s = str(x or "").strip()
+        if not s:
+            continue
+        u = s.upper()
+        if u in seen:
+            continue
+        seen.add(u)
+        out.append(u)
+    return out
+
+
 # ============================================================
-# LEADS / KPIS (MULTI-FILTER + COMPAT SINGLE)
+# LEADS
 # ============================================================
-def _coerce_single_to_list(filters: Dict[str, Any]) -> Dict[str, List[str]]:
-    """
-    Compatibilidade:
-    - Se front mandar curso/polo single (antigo), converte para list.
-    - Se mandar curso_list/polo_list (novo), usa.
-    """
-    curso_list = filters.get("curso_list") or []
-    polo_list = filters.get("polo_list") or []
-    curso_single = (filters.get("curso") or "").strip()
-    polo_single = (filters.get("polo") or "").strip()
-
-    if curso_single and not curso_list:
-        curso_list = [curso_single]
-    if polo_single and not polo_list:
-        polo_list = [polo_single]
-
-    return {"curso_list": curso_list, "polo_list": polo_list}
-
-
 def query_leads(filters: Dict[str, Any]) -> List[Dict[str, Any]]:
     dt = _date_expr()
 
-    coerced = _coerce_single_to_list(filters)
-    curso_list_up = _norm_list_upper(coerced["curso_list"])
-    polo_list_up = _norm_list_upper(coerced["polo_list"])
+    # ✅ compat com seu app.py atual (multi)
+    curso_list_up = _norm_list_upper(filters.get("curso_list") or [])
+    polo_list_up = _norm_list_upper(filters.get("polo_list") or [])
 
     sql = f"""
     SELECT
@@ -207,17 +161,14 @@ def query_leads(filters: Dict[str, Any]) -> List[Dict[str, Any]]:
     LIMIT @limit
     """
 
-    data_ini = filters.get("data_ini") or None
-    data_fim = filters.get("data_fim") or None
-
     job_config = bigquery.QueryJobConfig(
         query_parameters=[
             bigquery.ScalarQueryParameter("status", "STRING", filters.get("status") or None),
             bigquery.ScalarQueryParameter("origem", "STRING", filters.get("origem") or None),
             bigquery.ArrayQueryParameter("curso_list", "STRING", curso_list_up),
             bigquery.ArrayQueryParameter("polo_list", "STRING", polo_list_up),
-            bigquery.ScalarQueryParameter("data_ini", "DATE", data_ini),
-            bigquery.ScalarQueryParameter("data_fim", "DATE", data_fim),
+            bigquery.ScalarQueryParameter("data_ini", "DATE", filters.get("data_ini") or None),
+            bigquery.ScalarQueryParameter("data_fim", "DATE", filters.get("data_fim") or None),
             bigquery.ScalarQueryParameter("limit", "INT64", int(filters.get("limit") or 500)),
         ]
     )
@@ -226,18 +177,18 @@ def query_leads(filters: Dict[str, Any]) -> List[Dict[str, Any]]:
     return [{k: r.get(k) for k in r.keys()} for r in rows]
 
 
+# ============================================================
+# KPIs
+# ============================================================
 def query_kpis(filters: Dict[str, Any]) -> Dict[str, Any]:
     dt = _date_expr()
 
-    coerced = _coerce_single_to_list(filters)
-    curso_list_up = _norm_list_upper(coerced["curso_list"])
-    polo_list_up = _norm_list_upper(coerced["polo_list"])
+    curso_list_up = _norm_list_upper(filters.get("curso_list") or [])
+    polo_list_up = _norm_list_upper(filters.get("polo_list") or [])
 
     sql = f"""
     WITH base AS (
-      SELECT
-        {dt} AS data_inscricao,
-        status, curso, polo, origem
+      SELECT {dt} AS data_inscricao, status, curso, polo, origem
       FROM {_table_ref()}
       WHERE 1=1
         AND (@status IS NULL OR UPPER(TRIM(status)) = UPPER(TRIM(@status)))
@@ -248,9 +199,7 @@ def query_kpis(filters: Dict[str, Any]) -> Dict[str, Any]:
         AND (@data_fim IS NULL OR {dt} <= @data_fim)
     ),
     agg AS (
-      SELECT status, COUNT(*) cnt
-      FROM base
-      GROUP BY status
+      SELECT status, COUNT(*) cnt FROM base GROUP BY status
     )
     SELECT
       (SELECT COUNT(*) FROM base) AS total,
@@ -259,17 +208,14 @@ def query_kpis(filters: Dict[str, Any]) -> Dict[str, Any]:
       (SELECT ARRAY_AGG(STRUCT(status, cnt) ORDER BY cnt DESC) FROM agg) AS by_status
     """
 
-    data_ini = filters.get("data_ini") or None
-    data_fim = filters.get("data_fim") or None
-
     job_config = bigquery.QueryJobConfig(
         query_parameters=[
             bigquery.ScalarQueryParameter("status", "STRING", filters.get("status") or None),
             bigquery.ScalarQueryParameter("origem", "STRING", filters.get("origem") or None),
             bigquery.ArrayQueryParameter("curso_list", "STRING", curso_list_up),
             bigquery.ArrayQueryParameter("polo_list", "STRING", polo_list_up),
-            bigquery.ScalarQueryParameter("data_ini", "DATE", data_ini),
-            bigquery.ScalarQueryParameter("data_fim", "DATE", data_fim),
+            bigquery.ScalarQueryParameter("data_ini", "DATE", filters.get("data_ini") or None),
+            bigquery.ScalarQueryParameter("data_fim", "DATE", filters.get("data_fim") or None),
         ]
     )
 
@@ -289,9 +235,9 @@ def query_kpis(filters: Dict[str, Any]) -> Dict[str, Any]:
 # ============================================================
 # OPTIONS
 # ============================================================
-def _distinct(column: str, limit: int) -> List[str]:
+def _distinct(column: str, limit: int = 250) -> List[str]:
     sql = f"""
-    SELECT DISTINCT TRIM(CAST({column} AS STRING)) v
+    SELECT DISTINCT {column} v
     FROM {_table_ref()}
     WHERE {column} IS NOT NULL AND TRIM(CAST({column} AS STRING)) != ""
     ORDER BY v
@@ -316,7 +262,7 @@ def query_options() -> Dict[str, List[str]]:
 
 
 # ============================================================
-# UPLOAD + PIPELINE (mantido)
+# UPLOAD + PIPELINE (mantido igual ao seu atual)
 # ============================================================
 def ingest_upload_file(file_storage, source: str = "UPLOAD_PAINEL") -> Dict[str, Any]:
     project = _env("GCP_PROJECT_ID", DEFAULT_PROJECT)
@@ -325,9 +271,6 @@ def ingest_upload_file(file_storage, source: str = "UPLOAD_PAINEL") -> Dict[str,
 
     upload_table = _env("BQ_UPLOAD_TABLE", "stg_leads_upload")
     pipeline_proc = _env("BQ_PIPELINE_PROC", "sp_v9_run_pipeline")
-
-    if not project or not dataset:
-        _require_env(["GCP_PROJECT_ID", "BQ_DATASET"])
 
     stg_table_id = f"{project}.{dataset}.{upload_table}"
     proc_id = f"{project}.{dataset}.{pipeline_proc}"
