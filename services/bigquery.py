@@ -12,7 +12,9 @@ from google.cloud import bigquery
 DEFAULT_PROJECT = "painel-universidade"
 DEFAULT_DATASET = "modelo_estrela"
 DEFAULT_VIEW_LEADS = "vw_leads_painel_lite"
-DEFAULT_BQ_LOCATION = "us-central1"  # mais seguro p/ multi-região. Se seu dataset for regional, use "us-central1" via ENV.
+# Dataset regional (confirmado: us-central1). Se no futuro seu dataset virar multi-região,
+# ajuste via ENV BQ_LOCATION ("US" ou "EU").
+DEFAULT_BQ_LOCATION = "us-central1"
 
 
 def _env(name: str, default: str = "") -> str:
@@ -68,9 +70,22 @@ def _date_field() -> str:
 
 
 def _date_expr() -> str:
-    # Robustez: aceita DATE/DATETIME/TIMESTAMP/STRING
+    """Expressão de data mais resiliente.
+
+    Objetivo: evitar "tela vazia" quando a view expõe data em formatos diferentes.
+
+    - DATE/DATETIME/TIMESTAMP: SAFE_CAST -> DATE
+    - STRING: tenta ISO (YYYY-MM-DD) e BR (DD/MM/YYYY)
+    """
     f = _date_field()
-    return f"SAFE_CAST({f} AS DATE)"
+    s = f"CAST({f} AS STRING)"
+    return (
+        f"COALESCE("
+        f"  SAFE_CAST({f} AS DATE),"
+        f"  SAFE.PARSE_DATE('%Y-%m-%d', {s}),"
+        f"  SAFE.PARSE_DATE('%d/%m/%Y', {s})"
+        f")"
+    )
 
 
 def _norm_list_upper(values: List[str]) -> List[str]:
@@ -141,8 +156,15 @@ def _normalize_datetime_cols(df: pd.DataFrame) -> pd.DataFrame:
 def query_leads(filters: Dict[str, Any]) -> List[Dict[str, Any]]:
     dt = _date_expr()
 
+    # Compatibilidade: aceita filtros single (curso/polo) e multi (curso_list/polo_list)
     curso_list = filters.get("curso_list") or []
     polo_list = filters.get("polo_list") or []
+    curso_single = (filters.get("curso") or "").strip()
+    polo_single = (filters.get("polo") or "").strip()
+    if curso_single and not curso_list:
+        curso_list = [curso_single]
+    if polo_single and not polo_list:
+        polo_list = [polo_single]
 
     curso_list_up = _norm_list_upper(curso_list)
     polo_list_up = _norm_list_upper(polo_list)
@@ -194,8 +216,15 @@ def query_leads(filters: Dict[str, Any]) -> List[Dict[str, Any]]:
 def query_kpis(filters: Dict[str, Any]) -> Dict[str, Any]:
     dt = _date_expr()
 
+    # Compatibilidade: aceita filtros single (curso/polo) e multi (curso_list/polo_list)
     curso_list = filters.get("curso_list") or []
     polo_list = filters.get("polo_list") or []
+    curso_single = (filters.get("curso") or "").strip()
+    polo_single = (filters.get("polo") or "").strip()
+    if curso_single and not curso_list:
+        curso_list = [curso_single]
+    if polo_single and not polo_list:
+        polo_list = [polo_single]
 
     curso_list_up = _norm_list_upper(curso_list)
     polo_list_up = _norm_list_upper(polo_list)
