@@ -249,7 +249,7 @@ function renderTablePage() {
         <td>${escapeHtml(fmtDate(r.data_inscricao))}</td>
         <td>${escapeHtml(r.nome)}</td>
         <td>${escapeHtml(r.cpf)}</td>
-        <td>${escapeHtml(r.celular))}</td>
+        <td>${escapeHtml(r.celular)}</td>
         <td>${escapeHtml(r.email)}</td>
         <td>${escapeHtml(r.origem)}</td>
         <td>${escapeHtml(r.polo)}</td>
