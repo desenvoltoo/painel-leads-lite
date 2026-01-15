@@ -1,56 +1,22 @@
 # -*- coding: utf-8 -*-
-"""
-Painel Leads Lite (Flask + BigQuery)
-
-Rotas:
-- /                      -> tela
-- /health                -> status do app + envs
-- /api/leads             -> lista leads (BigQuery) (multi curso/polo)
-- /api/kpis              -> KPIs (BigQuery) (multi curso/polo)
-- /api/options           -> distincts (curso/polo/status/origem)
-- /api/upload            -> upload CSV/XLSX -> staging -> CALL procedure
-- /api/export            -> export CSV (UTF-8 BOM + ;) sem quebrar acentos
-- /download/modelo       -> baixa modelo XLSX de importação
-- /api/debug/source      -> mostra de onde está lendo
-- /api/debug/sample      -> retorna 5 linhas da view
-- /api/debug/count       -> count(*) na view
-
-ENV (opcionais, pois temos defaults seguros):
-- GCP_PROJECT_ID (default: painel-universidade)
-- BQ_DATASET     (default: modelo_estrela)
-- BQ_VIEW_LEADS  (default: vw_leads_painel_lite)
-- BQ_LOCATION    (default: US)  # se seu dataset for regional, use us-central1
-"""
-
 import os
-import io
-import traceback
-import datetime as dt
-from typing import Optional, Dict, Any, List
+from typing import Any, Dict, List
 
 import pandas as pd
-from flask import Flask, render_template, request, jsonify, send_file
+from google.cloud import bigquery
 
-from services.bigquery import (
-    query_leads,
-    query_kpis,
-    query_options,
-    ingest_upload_file,
-    debug_count,
-    debug_sample,
-)
 
 # ============================================================
-# DEFAULTS SEGUROS (IGUAL AO services/bigquery.py)
+# DEFAULTS (funciona mesmo sem ENV no Cloud Run)
 # ============================================================
 DEFAULT_PROJECT = "painel-universidade"
 DEFAULT_DATASET = "modelo_estrela"
 DEFAULT_VIEW_LEADS = "vw_leads_painel_lite"
-DEFAULT_BQ_LOCATION = "us-central1"
+DEFAULT_BQ_LOCATION = "us-central1"  # ✅ seu dataset é regional em us-central1
 
 
 # ============================================================
-# HELPERS
+# ENV / CLIENT
 # ============================================================
 def _env(name: str, default: str = "") -> str:
     v = os.getenv(name)
@@ -58,280 +24,431 @@ def _env(name: str, default: str = "") -> str:
     return v if v else default
 
 
-def _source_ref():
-    # não explode se options_limit vier zoado
-    try:
-        opt_lim = int(_env("BQ_OPTIONS_LIMIT", "50000"))
-    except Exception:
-        opt_lim = 50000
+def _bq_location() -> str:
+    """
+    - Regional: us-central1 (seu caso)
+    - Multi-região: US / EU
+    """
+    return _env("BQ_LOCATION", DEFAULT_BQ_LOCATION)
 
-    # defaults seguros aqui também
+
+def _client() -> bigquery.Client:
+    # ✅ padrão igual seu primeiro: se não setar ENV, usa default
+    project = _env("GCP_PROJECT_ID", DEFAULT_PROJECT)
+    return bigquery.Client(project=project) if project else bigquery.Client()
+
+
+def _table_ref() -> str:
+    """
+    View de leitura do painel.
+    ✅ Igual ao primeiro: sempre resolve com defaults.
+    """
     project = _env("GCP_PROJECT_ID", DEFAULT_PROJECT)
     dataset = _env("BQ_DATASET", DEFAULT_DATASET)
     view = _env("BQ_VIEW_LEADS", DEFAULT_VIEW_LEADS)
-    location = _env("BQ_LOCATION", DEFAULT_BQ_LOCATION)
-
-    return {
-        "project": project,
-        "dataset": dataset,
-        "view": view,
-        "location": location,
-        "upload_table": _env("BQ_UPLOAD_TABLE", "stg_leads_upload"),
-        "pipeline_proc": _env("BQ_PIPELINE_PROC", "sp_v9_run_pipeline"),
-        "options_limit": opt_lim,
-    }
+    return f"`{project}.{dataset}.{view}`"
 
 
-def _required_envs_ok():
+def _date_field() -> str:
     """
-    Agora: SEM BLOQUEIO.
-    Retorna ok sempre, mas informa quais envs estão faltando (apenas informativo).
-    Isso evita o painel ficar "sem nada" por falta de ENV no Cloud Run.
+    Seu padrão na view lite é data_inscricao (DATE).
+    Se mudar, pode setar BQ_DATE_FIELD.
     """
-    missing = []
-    for k in ("GCP_PROJECT_ID", "BQ_DATASET", "BQ_VIEW_LEADS", "BQ_LOCATION"):
-        if not _env(k):
-            missing.append(k)
-    return (True, missing)
+    return _env("BQ_DATE_FIELD", "data_inscricao")
 
 
-def _error_payload(e: Exception, public_msg: str):
-    return {
-        "ok": False,
-        "error": public_msg,
-        "details": str(e),
-        "trace": traceback.format_exc(limit=8),
-        "source": _source_ref(),
-    }
-
-
-def _n(v):
-    v = (v or "").strip()
-    return v if v else None
-
-
-def _to_date(v: Optional[str]) -> Optional[dt.date]:
+def _date_expr() -> str:
     """
-    Converte YYYY-MM-DD -> datetime.date
-    (BigQuery DATE param precisa ser date, não string)
+    ✅ Igual ao primeiro: DATE(campo)
+    Isso evita 'SAFE_CAST virar NULL' e matar o painel.
     """
-    s = (v or "").strip()
-    if not s:
+    return f"DATE({_date_field()})"
+
+
+# ============================================================
+# NORMALIZAÇÃO (upload)
+# ============================================================
+def _normalize_cols(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
+    df.columns = [str(c).strip().lower() for c in df.columns]
+    return df
+
+
+def _clean_str(x) -> str:
+    if x is None:
+        return ""
+    s = str(x).strip()
+    if s.lower() in ("nan", "nat", "none", "<na>"):
+        return ""
+    return s
+
+
+def _to_bool(v):
+    if v is None:
         return None
-    try:
-        return dt.date.fromisoformat(s[:10])
-    except Exception:
-        return None
+    s = str(v).strip().lower()
+    if s in ("true", "t", "1", "sim", "s", "yes", "y"):
+        return True
+    if s in ("false", "f", "0", "nao", "não", "n", "no"):
+        return False
+    return None
 
 
-def _get_list(name: str) -> List[str]:
-    """
-    Aceita:
-    - ?curso=ABC&curso=DEF (getlist)
-    - ou hidden no formato "A||B||C": ?curso_multi=A||B||C
-    """
-    items = [x.strip() for x in request.args.getlist(name) if (x or "").strip()]
+def _normalize_datetime_cols(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
+    dt_cols = ("data_envio_dt", "data_inscricao_dt", "data_disparo_dt", "data_contato_dt")
+    for col in dt_cols:
+        if col in df.columns:
+            parsed = pd.to_datetime(df[col], errors="coerce", utc=True)
+            df[col] = parsed.dt.tz_convert(None)
 
-    if not items:
-        raw = (request.args.get(f"{name}_multi") or "").strip()
-        if raw:
-            items = [x.strip() for x in raw.split("||") if x.strip()]
+    d_cols = ("data_matricula_d", "data_nascimento_d")
+    for col in d_cols:
+        if col in df.columns:
+            parsed = pd.to_datetime(df[col], errors="coerce")
+            df[col] = parsed.dt.date
 
-    # remove duplicados (case-insensitive)
-    seen = set()
+    return df
+
+
+def _norm_list_upper(values: List[str]) -> List[str]:
     out = []
-    for x in items:
-        k = x.upper()
-        if k not in seen:
-            seen.add(k)
-            out.append(x)
+    seen = set()
+    for x in values or []:
+        s = str(x or "").strip()
+        if not s:
+            continue
+        u = s.upper()
+        if u in seen:
+            continue
+        seen.add(u)
+        out.append(u)
     return out
 
 
-def _get_filters_from_request(for_export: bool = False) -> Dict[str, Any]:
-    # limites: UI e export têm limites diferentes
-    if for_export:
-        lim = int(request.args.get("export_limit") or 200000)
-        lim = max(1000, min(lim, 500000))
-    else:
-        lim = int(request.args.get("limit") or 500)
-        lim = max(50, min(lim, 5000))
+# ============================================================
+# LEADS
+# ============================================================
+def query_leads(filters: Dict[str, Any]) -> List[Dict[str, Any]]:
+    dt = _date_expr()
 
+    # ✅ compat com seu app.py atual (multi)
+    curso_list_up = _norm_list_upper(filters.get("curso_list") or [])
+    polo_list_up = _norm_list_upper(filters.get("polo_list") or [])
+
+    sql = f"""
+    SELECT
+      {dt} AS data_inscricao,
+      nome, cpf, celular, email,
+      origem, polo, curso, status, consultor
+    FROM {_table_ref()}
+    WHERE 1=1
+      AND (@status IS NULL OR UPPER(TRIM(status)) = UPPER(TRIM(@status)))
+      AND (@origem IS NULL OR UPPER(TRIM(origem)) = UPPER(TRIM(@origem)))
+
+      AND (
+        ARRAY_LENGTH(@curso_list) = 0
+        OR UPPER(TRIM(curso)) IN UNNEST(@curso_list)
+      )
+      AND (
+        ARRAY_LENGTH(@polo_list) = 0
+        OR UPPER(TRIM(polo)) IN UNNEST(@polo_list)
+      )
+
+      AND (@data_ini IS NULL OR {dt} >= @data_ini)
+      AND (@data_fim IS NULL OR {dt} <= @data_fim)
+    ORDER BY {dt} DESC
+    LIMIT @limit
+    """
+
+    job_config = bigquery.QueryJobConfig(
+        query_parameters=[
+            bigquery.ScalarQueryParameter("status", "STRING", filters.get("status") or None),
+            bigquery.ScalarQueryParameter("origem", "STRING", filters.get("origem") or None),
+            bigquery.ArrayQueryParameter("curso_list", "STRING", curso_list_up),
+            bigquery.ArrayQueryParameter("polo_list", "STRING", polo_list_up),
+            bigquery.ScalarQueryParameter("data_ini", "DATE", filters.get("data_ini") or None),
+            bigquery.ScalarQueryParameter("data_fim", "DATE", filters.get("data_fim") or None),
+            bigquery.ScalarQueryParameter("limit", "INT64", int(filters.get("limit") or 500)),
+        ]
+    )
+
+    rows = _client().query(sql, job_config=job_config, location=_bq_location()).result()
+    return [{k: r.get(k) for k in r.keys()} for r in rows]
+
+
+# ============================================================
+# KPIs
+# ============================================================
+def query_kpis(filters: Dict[str, Any]) -> Dict[str, Any]:
+    dt = _date_expr()
+
+    curso_list_up = _norm_list_upper(filters.get("curso_list") or [])
+    polo_list_up = _norm_list_upper(filters.get("polo_list") or [])
+
+    sql = f"""
+    WITH base AS (
+      SELECT {dt} AS data_inscricao, status, curso, polo, origem
+      FROM {_table_ref()}
+      WHERE 1=1
+        AND (@status IS NULL OR UPPER(TRIM(status)) = UPPER(TRIM(@status)))
+        AND (@origem IS NULL OR UPPER(TRIM(origem)) = UPPER(TRIM(@origem)))
+        AND (ARRAY_LENGTH(@curso_list) = 0 OR UPPER(TRIM(curso)) IN UNNEST(@curso_list))
+        AND (ARRAY_LENGTH(@polo_list)  = 0 OR UPPER(TRIM(polo))  IN UNNEST(@polo_list))
+        AND (@data_ini IS NULL OR {dt} >= @data_ini)
+        AND (@data_fim IS NULL OR {dt} <= @data_fim)
+    ),
+    agg AS (
+      SELECT status, COUNT(*) cnt FROM base GROUP BY status
+    )
+    SELECT
+      (SELECT COUNT(*) FROM base) AS total,
+      (SELECT MAX(data_inscricao) FROM base) AS last_date,
+      (SELECT AS STRUCT status, cnt FROM agg ORDER BY cnt DESC LIMIT 1) AS top_status,
+      (SELECT ARRAY_AGG(STRUCT(status, cnt) ORDER BY cnt DESC) FROM agg) AS by_status
+    """
+
+    job_config = bigquery.QueryJobConfig(
+        query_parameters=[
+            bigquery.ScalarQueryParameter("status", "STRING", filters.get("status") or None),
+            bigquery.ScalarQueryParameter("origem", "STRING", filters.get("origem") or None),
+            bigquery.ArrayQueryParameter("curso_list", "STRING", curso_list_up),
+            bigquery.ArrayQueryParameter("polo_list", "STRING", polo_list_up),
+            bigquery.ScalarQueryParameter("data_ini", "DATE", filters.get("data_ini") or None),
+            bigquery.ScalarQueryParameter("data_fim", "DATE", filters.get("data_fim") or None),
+        ]
+    )
+
+    row = next(iter(_client().query(sql, job_config=job_config, location=_bq_location()).result()), None)
+    if not row:
+        return {"total": 0, "last_date": None, "top_status": None, "by_status": []}
+
+    top = row.get("top_status")
     return {
-        "status": _n(request.args.get("status")),
-        "origem": _n(request.args.get("origem")),
-        "data_ini": _to_date(request.args.get("data_ini")),
-        "data_fim": _to_date(request.args.get("data_fim")),
-        "limit": lim,
-        "curso_list": _get_list("curso"),
-        "polo_list": _get_list("polo"),
+        "total": int(row.get("total") or 0),
+        "last_date": str(row.get("last_date")) if row.get("last_date") else None,
+        "top_status": {"status": top.get("status"), "cnt": int(top.get("cnt") or 0)} if top else None,
+        "by_status": [{"status": x.get("status"), "cnt": int(x.get("cnt") or 0)} for x in (row.get("by_status") or [])],
     }
 
 
 # ============================================================
-# APP FACTORY
+# OPTIONS
 # ============================================================
-def create_app() -> Flask:
-    app = Flask(__name__)
-    app.config["MAX_CONTENT_LENGTH"] = 25 * 1024 * 1024  # 25MB
+def _distinct(column: str, limit: int = 250) -> List[str]:
+    sql = f"""
+    SELECT DISTINCT {column} v
+    FROM {_table_ref()}
+    WHERE {column} IS NOT NULL AND TRIM(CAST({column} AS STRING)) != ""
+    ORDER BY v
+    LIMIT @limit
+    """
+    job_config = bigquery.QueryJobConfig(
+        query_parameters=[bigquery.ScalarQueryParameter("limit", "INT64", int(limit))]
+    )
+    rows = _client().query(sql, job_config=job_config, location=_bq_location()).result()
+    return [str(r.get("v")) for r in rows if r.get("v")]
 
-    # ------------------- páginas -------------------
-    @app.get("/")
-    def index():
-        ok, missing = _required_envs_ok()
-        if missing:
-            print("⚠️ ENV ausentes (usando defaults):", missing, "| source:", _source_ref())
-        return render_template("index.html")
 
-    @app.get("/health")
-    def health():
-        _, missing = _required_envs_ok()
-        return jsonify({
-            "status": "ok",
-            "missing_env": missing,  # informativo
-            "source": _source_ref(),
-        })
+def query_options() -> Dict[str, List[str]]:
+    limit = int(_env("BQ_OPTIONS_LIMIT", "5000"))
+    limit = max(1000, min(limit, 200000))
+    return {
+        "status": _distinct("status", limit),
+        "curso": _distinct("curso", limit),
+        "polo": _distinct("polo", limit),
+        "origem": _distinct("origem", limit),
+    }
 
-    # ------------------- api: leads -------------------
-    @app.get("/api/leads")
-    def api_leads():
-        filters = _get_filters_from_request(for_export=False)
+
+# ============================================================
+# UPLOAD + PIPELINE (mantido igual ao seu atual)
+# ============================================================
+def ingest_upload_file(file_storage, source: str = "UPLOAD_PAINEL") -> Dict[str, Any]:
+    project = _env("GCP_PROJECT_ID", DEFAULT_PROJECT)
+    dataset = _env("BQ_DATASET", DEFAULT_DATASET)
+    location = _bq_location()
+
+    upload_table = _env("BQ_UPLOAD_TABLE", "stg_leads_upload")
+    pipeline_proc = _env("BQ_PIPELINE_PROC", "sp_v9_run_pipeline")
+
+    stg_table_id = f"{project}.{dataset}.{upload_table}"
+    proc_id = f"{project}.{dataset}.{pipeline_proc}"
+
+    filename = (getattr(file_storage, "filename", "") or "").strip()
+    filename_lower = filename.lower()
+
+    client = _client()
+
+    schema = [
+        bigquery.SchemaField("origem", "STRING"),
+        bigquery.SchemaField("polo", "STRING"),
+        bigquery.SchemaField("tipo_negocio", "STRING"),
+        bigquery.SchemaField("curso", "STRING"),
+        bigquery.SchemaField("modalidade", "STRING"),
+        bigquery.SchemaField("nome", "STRING"),
+        bigquery.SchemaField("cpf", "STRING"),
+        bigquery.SchemaField("celular", "STRING"),
+        bigquery.SchemaField("email", "STRING"),
+        bigquery.SchemaField("endereco", "STRING"),
+        bigquery.SchemaField("convenio", "STRING"),
+        bigquery.SchemaField("empresa_conveniada", "STRING"),
+        bigquery.SchemaField("voucher", "STRING"),
+        bigquery.SchemaField("campanha", "STRING"),
+        bigquery.SchemaField("consultor", "STRING"),
+        bigquery.SchemaField("status", "STRING"),
+        bigquery.SchemaField("obs", "STRING"),
+        bigquery.SchemaField("peca_disparo", "STRING"),
+        bigquery.SchemaField("texto_disparo", "STRING"),
+        bigquery.SchemaField("consultor_disparo", "STRING"),
+        bigquery.SchemaField("tipo_disparo", "STRING"),
+        bigquery.SchemaField("matriculado", "BOOL"),
+        bigquery.SchemaField("inscrito", "BOOL"),
+        bigquery.SchemaField("data_envio_dt", "DATETIME"),
+        bigquery.SchemaField("data_inscricao_dt", "DATETIME"),
+        bigquery.SchemaField("data_disparo_dt", "DATETIME"),
+        bigquery.SchemaField("data_contato_dt", "DATETIME"),
+        bigquery.SchemaField("data_matricula_d", "DATE"),
+        bigquery.SchemaField("data_nascimento_d", "DATE"),
+        bigquery.SchemaField("origem_upload", "STRING"),
+        bigquery.SchemaField("data_ingestao", "TIMESTAMP"),
+    ]
+
+    schema_cols = [f.name for f in schema]
+    dt_cols = {"data_envio_dt", "data_inscricao_dt", "data_disparo_dt", "data_contato_dt"}
+    d_cols = {"data_matricula_d", "data_nascimento_d"}
+    bool_cols = {"matriculado", "inscrito"}
+
+    def _ensure_schema_cols(df: pd.DataFrame) -> pd.DataFrame:
+        df = df.copy()
+        for col in schema_cols:
+            if col not in df.columns:
+                if col in dt_cols:
+                    df[col] = pd.NaT
+                elif col in d_cols:
+                    df[col] = pd.NaT
+                elif col in bool_cols:
+                    df[col] = None
+                else:
+                    df[col] = ""
+        return df[schema_cols]
+
+    def _apply_transformations(df: pd.DataFrame) -> pd.DataFrame:
+        df = _normalize_cols(df)
+
+        for col in ("matriculado", "inscrito"):
+            if col in df.columns:
+                df[col] = df[col].apply(_to_bool)
+
+        df = _normalize_datetime_cols(df)
+
+        df["origem_upload"] = source
+        df["data_ingestao"] = pd.Timestamp.utcnow()
+
+        for c in df.columns:
+            if c in dt_cols or c in d_cols or c in bool_cols:
+                continue
+            if df[c].dtype == "object":
+                df[c] = df[c].apply(_clean_str)
+
+        return _ensure_schema_cols(df)
+
+    def _load_df(df: pd.DataFrame, write_disposition: str) -> bigquery.LoadJob:
+        job_config = bigquery.LoadJobConfig(
+            write_disposition=write_disposition,
+            schema=schema,
+            autodetect=False,
+            ignore_unknown_values=True,
+        )
+        job = client.load_table_from_dataframe(
+            df,
+            stg_table_id,
+            job_config=job_config,
+            location=location,
+        )
+        job.result()
+        return job
+
+    rows_loaded_total = 0
+    last_load_job_id = None
+
+    if filename_lower.endswith(".csv"):
+        chunksize = int(_env("UPLOAD_CHUNKSIZE", "20000"))
         try:
-            rows = query_leads(filters)
-            return jsonify({"count": len(rows), "rows": rows, "source": _source_ref()})
-        except Exception as e:
-            print("🚨 /api/leads ERROR:", repr(e))
-            return jsonify(_error_payload(e, "Falha ao consultar o BigQuery (leads).")), 500
+            file_storage.stream.seek(0)
+        except Exception:
+            pass
 
-    # ------------------- api: kpis -------------------
-    @app.get("/api/kpis")
-    def api_kpis():
-        filters = _get_filters_from_request(for_export=False)
+        first = True
+        for chunk in pd.read_csv(
+            file_storage.stream,
+            dtype=str,
+            sep=None,
+            engine="python",
+            chunksize=chunksize,
+            keep_default_na=False,
+        ):
+            chunk = _apply_transformations(chunk)
+            wd = bigquery.WriteDisposition.WRITE_TRUNCATE if first else bigquery.WriteDisposition.WRITE_APPEND
+            job = _load_df(chunk, wd)
+
+            rows_loaded_total += int(job.output_rows or 0)
+            last_load_job_id = job.job_id
+            first = False
+
+        if first:
+            raise ValueError("CSV vazio ou sem linhas válidas para importar.")
+
+    elif filename_lower.endswith(".xlsx") or filename_lower.endswith(".xls"):
         try:
-            data = query_kpis(filters)
-            return jsonify({**data, "source": _source_ref()})
-        except Exception as e:
-            print("🚨 /api/kpis ERROR:", repr(e))
-            return jsonify(_error_payload(e, "Falha ao consultar o BigQuery (KPIs).")), 500
+            file_storage.stream.seek(0)
+        except Exception:
+            pass
 
-    # ------------------- api: options -------------------
-    @app.get("/api/options")
-    def api_options():
-        try:
-            data = query_options()
-            return jsonify({**data, "source": _source_ref()})
-        except Exception as e:
-            print("🚨 /api/options ERROR:", repr(e))
-            return jsonify(_error_payload(e, "Falha ao consultar o BigQuery (options).")), 500
+        df = pd.read_excel(file_storage.stream, dtype=str, keep_default_na=False)
+        df = _apply_transformations(df)
 
-    # ------------------- api: upload -------------------
-    @app.post("/api/upload")
-    def api_upload():
-        try:
-            if "file" not in request.files:
-                return jsonify({"ok": False, "error": "Nenhum arquivo enviado (campo 'file')."}), 400
+        job = _load_df(df, bigquery.WriteDisposition.WRITE_TRUNCATE)
+        rows_loaded_total = int(job.output_rows or 0)
+        last_load_job_id = job.job_id
 
-            f = request.files["file"]
-            if not f or not f.filename:
-                return jsonify({"ok": False, "error": "Nome de arquivo vazio."}), 400
+    else:
+        raise ValueError("Formato inválido. Envie CSV ou XLSX.")
 
-            source = (request.form.get("source") or "UPLOAD_PAINEL").strip() or "UPLOAD_PAINEL"
-            result = ingest_upload_file(f, source=source)
+    pipeline_sql = f"CALL `{proc_id}`(@fn);"
+    pipeline_job = client.query(
+        pipeline_sql,
+        job_config=bigquery.QueryJobConfig(
+            query_parameters=[bigquery.ScalarQueryParameter("fn", "STRING", filename)]
+        ),
+        location=location,
+    )
+    pipeline_job.result()
 
-            return jsonify({
-                "ok": True,
-                **result,
-                "filename": f.filename,
-                "source": _source_ref(),
-            })
-
-        except Exception as e:
-            print("🚨 /api/upload ERROR:", repr(e))
-            return jsonify(_error_payload(e, "Falha no upload/ingestão.")), 500
-
-    # ------------------- api: export (CSV BOM + ;) -------------------
-    @app.get("/api/export")
-    def api_export():
-        try:
-            filters = _get_filters_from_request(for_export=True)
-            rows = query_leads(filters)
-            df = pd.DataFrame(rows)
-
-            out = io.StringIO()
-            df.to_csv(out, index=False, sep=";")
-            raw = out.getvalue().encode("utf-8-sig")  # BOM pro Excel
-
-            filename = f"leads_export_{pd.Timestamp.now().strftime('%Y-%m-%d')}.csv"
-            return send_file(
-                io.BytesIO(raw),
-                mimetype="text/csv; charset=utf-8",
-                as_attachment=True,
-                download_name=filename,
-            )
-
-        except Exception as e:
-            print("🚨 /api/export ERROR:", repr(e))
-            return jsonify(_error_payload(e, "Falha ao exportar CSV.")), 500
-
-    # ------------------- download modelo (XLSX) -------------------
-    @app.get("/download/modelo")
-    def download_modelo():
-        try:
-            cols = [
-                "origem","polo","tipo_negocio","curso","modalidade","nome","cpf","celular","email",
-                "endereco","convenio","empresa_conveniada","voucher","campanha","consultor","status","obs",
-                "peca_disparo","texto_disparo","consultor_disparo","tipo_disparo",
-                "matriculado","inscrito",
-                "data_envio_dt","data_inscricao_dt","data_disparo_dt","data_contato_dt",
-                "data_matricula_d","data_nascimento_d"
-            ]
-
-            df = pd.DataFrame(columns=cols)
-
-            bio = io.BytesIO()
-            with pd.ExcelWriter(bio, engine="openpyxl") as writer:
-                df.to_excel(writer, index=False, sheet_name="modelo_upload")
-            bio.seek(0)
-
-            return send_file(
-                bio,
-                mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                as_attachment=True,
-                download_name="modelo_importacao_leads.xlsx",
-            )
-        except Exception as e:
-            print("🚨 /download/modelo ERROR:", repr(e))
-            return jsonify(_error_payload(e, "Falha ao gerar modelo.")), 500
-
-    # ============================================================
-    # DEBUG
-    # ============================================================
-    @app.get("/api/debug/source")
-    def api_debug_source():
-        return jsonify({"ok": True, "source": _source_ref()})
-
-    @app.get("/api/debug/count")
-    def api_debug_count():
-        try:
-            c = debug_count()
-            return jsonify({"ok": True, "count": c, "source": _source_ref()})
-        except Exception as e:
-            return jsonify(_error_payload(e, "Falha ao contar registros na view.")), 500
-
-    @app.get("/api/debug/sample")
-    def api_debug_sample():
-        try:
-            rows = debug_sample(limit=5)
-            return jsonify({"ok": True, "rows": rows, "source": _source_ref()})
-        except Exception as e:
-            return jsonify(_error_payload(e, "Falha ao coletar amostra da view.")), 500
-
-    return app
+    return {
+        "staging_table": stg_table_id,
+        "rows_loaded": int(rows_loaded_total),
+        "load_job_id": last_load_job_id,
+        "pipeline_proc": proc_id,
+        "pipeline_job_id": pipeline_job.job_id,
+        "filename": filename,
+        "location": location,
+    }
 
 
-# Muito importante pro Cloud Run/Gunicorn:
-app = create_app()
+# ============================================================
+# DEBUG
+# ============================================================
+def debug_count() -> int:
+    sql = f"SELECT COUNT(1) c FROM {_table_ref()}"
+    row = next(iter(_client().query(sql, location=_bq_location()).result()), None)
+    return int(row.get("c") or 0) if row else 0
 
-if __name__ == "__main__":
-    port = int(_env("PORT", "8080"))
-    app.run(host="0.0.0.0", port=port, debug=True)
+
+def debug_sample(limit: int = 5):
+    sql = f"SELECT * FROM {_table_ref()} LIMIT @limit"
+    job_config = bigquery.QueryJobConfig(
+        query_parameters=[bigquery.ScalarQueryParameter("limit", "INT64", limit)]
+    )
+    rows = _client().query(sql, job_config=job_config, location=_bq_location()).result()
+    return [{k: r.get(k) for k in r.keys()} for r in rows]
