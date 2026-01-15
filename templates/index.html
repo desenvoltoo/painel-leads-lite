@@ -18,7 +18,8 @@
     </div>
 
     <div class="actions">
-      <!-- (opcional) se quiser botões no topo depois -->
+      <button id="btnReload" class="btn">Recarregar</button>
+      <button id="btnExport" class="btn btn-ghost">Exportar CSV</button>
     </div>
   </header>
 
@@ -30,12 +31,10 @@
         <div class="kpi-label">Total de leads</div>
         <div class="kpi-value" id="kpiCount">—</div>
       </div>
-
       <div class="kpi">
         <div class="kpi-label">Status predominante</div>
         <div class="kpi-value" id="kpiTopStatus">—</div>
       </div>
-
       <div class="kpi">
         <div class="kpi-label">Última inscrição</div>
         <div class="kpi-value" id="kpiLastDate">—</div>
@@ -57,16 +56,11 @@
 
         <div class="field" style="grid-column: span 2;">
           <label>Origem do upload (opcional)</label>
-          <input id="uploadSource" placeholder="Ex: CAPTACAO_JANEIRO" autocomplete="off" />
+          <input id="uploadSource" placeholder="Ex: CAPTACAO_JANEIRO" />
         </div>
 
         <div class="field field-actions" style="grid-column: span 6;">
-          <button id="btnUpload" class="btn btn-primary" type="button">Importar</button>
-
-          <a class="btn btn-ghost" id="btnDownloadModel" href="/download/modelo" target="_blank" rel="noopener">
-            Baixar modelo
-          </a>
-
+          <button id="btnUpload" class="btn btn-primary">Importar</button>
           <span id="uploadStatus" class="muted"></span>
         </div>
       </div>
@@ -80,56 +74,27 @@
       </div>
 
       <div class="filters">
-
         <div class="field">
           <label>Status</label>
-          <input id="fStatus" list="dlStatus" placeholder="Ex: NOVO" autocomplete="off" />
+          <input id="fStatus" list="dlStatus" placeholder="Ex: NOVO" />
           <datalist id="dlStatus"></datalist>
         </div>
 
-        <!-- CURSO MULTI -->
-        <div class="field field-dd" style="isolation:isolate;">
-          <label>Curso (multi)</label>
-
-          <div class="chipbox" id="cursoChipBox" aria-label="Cursos selecionados"></div>
-
-          <div class="chiprow">
-            <input
-              id="fCurso"
-              placeholder="Clique para ver todos • digite para filtrar • Enter adiciona"
-              autocomplete="off"
-              spellcheck="false"
-            />
-          </div>
-
-          <div id="ddCursos" class="dd" hidden></div>
-
-          <input type="hidden" id="fCursoMulti" value="" />
+        <div class="field">
+          <label>Curso</label>
+          <input id="fCurso" list="dlCurso" placeholder="Ex: Administração" />
+          <datalist id="dlCurso"></datalist>
         </div>
 
-        <!-- POLO MULTI -->
-        <div class="field field-dd" style="isolation:isolate;">
-          <label>Polo (multi)</label>
-
-          <div class="chipbox" id="poloChipBox" aria-label="Polos selecionados"></div>
-
-          <div class="chiprow">
-            <input
-              id="fPolo"
-              placeholder="Clique para ver todos • digite para filtrar • Enter adiciona"
-              autocomplete="off"
-              spellcheck="false"
-            />
-          </div>
-
-          <div id="ddPolos" class="dd" hidden></div>
-
-          <input type="hidden" id="fPoloMulti" value="" />
+        <div class="field">
+          <label>Polo</label>
+          <input id="fPolo" list="dlPolo" placeholder="Ex: Tatuapé" />
+          <datalist id="dlPolo"></datalist>
         </div>
 
         <div class="field">
           <label>Origem</label>
-          <input id="fOrigem" list="dlOrigem" placeholder="Ex: CAPTAR EXPRESS" autocomplete="off" />
+          <input id="fOrigem" list="dlOrigem" placeholder="Ex: Meta Ads" />
           <datalist id="dlOrigem"></datalist>
         </div>
 
@@ -144,18 +109,13 @@
         </div>
 
         <div class="field field-wide">
-          <label>Limite (busca no BigQuery)</label>
-          <!-- sugestão: 5000 pra paginar no front -->
-          <input id="fLimit" type="number" min="50" step="50" value="5000" />
+          <label>Limite</label>
+          <input id="fLimit" type="number" min="50" step="50" value="500" />
         </div>
 
-        <!-- AÇÕES -->
         <div class="field field-actions">
-          <button id="btnApply" class="btn btn-primary" type="button">Aplicar filtros</button>
-          <button id="btnClear" class="btn btn-ghost" type="button">Limpar</button>
-
-          <button id="btnReload" class="btn btn-ghost" type="button">Recarregar</button>
-          <button id="btnExportFilters" class="btn btn-ghost" type="button">Exportar CSV</button>
+          <button id="btnApply" class="btn btn-primary">Aplicar filtros</button>
+          <button id="btnClear" class="btn btn-ghost">Limpar</button>
         </div>
       </div>
     </section>
@@ -164,31 +124,7 @@
     <section class="card">
       <div class="card-header">
         <h2>Resultados</h2>
-
-        <!-- ✅ o JS escreve mensagens aqui -->
-        <p id="statusLine" class="muted">—</p>
-      </div>
-
-      <!-- ✅ Barra de paginação (necessária pro seu JS) -->
-      <div class="table-toolbar">
-        <div class="pager-left">
-          <label class="muted" for="pageSize">Linhas por página</label>
-          <select id="pageSize" class="select">
-            <option value="50">50</option>
-            <option value="100">100</option>
-            <option value="200" selected>200</option>
-            <option value="500">500</option>
-          </select>
-        </div>
-
-        <div class="pager-mid">
-          <span id="pageInfo" class="muted">—</span>
-        </div>
-
-        <div class="pager-right">
-          <button id="btnPrev" class="btn btn-ghost" type="button">◀ Anterior</button>
-          <button id="btnNext" class="btn btn-ghost" type="button">Próxima ▶</button>
-        </div>
+        <p id="statusLine">—</p>
       </div>
 
       <div class="table-wrap">
