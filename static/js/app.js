@@ -7,6 +7,24 @@
 const $ = (sel) => document.querySelector(sel);
 
 /* ============================================================
+   ERROS GLOBAIS (pra nunca mais ficar “vazio e sem explicação”)
+============================================================ */
+window.addEventListener("error", (ev) => {
+  try {
+    const msg = ev?.message || "Erro JS";
+    console.error("JS ERROR:", ev);
+    alert(`ERRO NO JAVASCRIPT:\n${msg}\n\nAbra o Console (F12) para ver detalhes.`);
+  } catch (_) {}
+});
+
+window.addEventListener("unhandledrejection", (ev) => {
+  try {
+    console.error("PROMISE REJECTION:", ev?.reason || ev);
+    alert(`ERRO (Promise):\n${String(ev?.reason?.message || ev?.reason || ev)}`);
+  } catch (_) {}
+});
+
+/* ============================================================
    Toast / Status
 ============================================================ */
 function showToast(msg, type = "ok") {
@@ -39,7 +57,7 @@ function escapeHtml(str) {
     .replaceAll("'", "&#039;");
 }
 
-// ✅ formata datas que chegam como "Sun, 09 Nov 2025 00:00:00 GMT" OU "2025-11-09"
+// formata datas tipo "Mon, 01 Jan 2024 00:00:00 GMT" OU "2025-11-09"
 function fmtDate(d) {
   if (!d) return "";
   const s = String(d);
@@ -47,7 +65,7 @@ function fmtDate(d) {
   // ISO direto
   if (/^\d{4}-\d{2}-\d{2}/.test(s)) return s.slice(0, 10);
 
-  // tenta parsear RFC/Date string
+  // tenta parsear Date string
   const ts = Date.parse(s);
   if (!Number.isNaN(ts)) {
     const dd = new Date(ts);
@@ -78,7 +96,7 @@ const state = {
     origem: "",
     data_ini: "",
     data_fim: "",
-    limit: 5000, // sugestão default pra ter várias páginas
+    limit: 5000,
     curso_list: [],
     polo_list: [],
   },
@@ -88,17 +106,16 @@ const state = {
     polo: { q: "", idx: 0, filtered: [], open: false },
   },
 
-  // ✅ paginação
   table: {
     allRows: [],
     filteredRows: [],
     page: 1,
-    pageSize: 50, // default (bate com index que deixei 50 selected)
+    pageSize: 50,
   },
 };
 
 /* ============================================================
-   API helpers (mostra erro real do backend)
+   API helpers
 ============================================================ */
 async function apiGet(path, params = {}) {
   const url = new URL(path, window.location.origin);
@@ -200,11 +217,9 @@ function setPageInfo() {
   const pageSize = state.table.pageSize;
   const totalPages = Math.max(1, Math.ceil(total / pageSize));
 
-  // clamp
   state.table.page = Math.min(Math.max(1, state.table.page), totalPages);
 
   const page = state.table.page;
-
   const start = total ? (page - 1) * pageSize + 1 : 0;
   const end = total ? Math.min(page * pageSize, total) : 0;
 
@@ -220,7 +235,10 @@ function setPageInfo() {
 
 function renderTablePage() {
   const tbody = $("#tbl tbody");
-  if (!tbody) return;
+  if (!tbody) {
+    alert("ERRO: não achei a tabela #tbl tbody no HTML. Confere o id da tabela.");
+    return;
+  }
 
   const rows = state.table.filteredRows || [];
   const page = state.table.page;
@@ -235,7 +253,6 @@ function renderTablePage() {
   const total = rows.length;
   const totalPages = Math.max(1, Math.ceil(total / pageSize));
 
-  // clamp
   state.table.page = Math.min(Math.max(1, page), totalPages);
 
   const start = (state.table.page - 1) * pageSize;
@@ -587,6 +604,9 @@ async function loadLeadsAndKpis(resetPage = false) {
       apiGet("/api/kpis", params),
     ]);
 
+    console.log("LEADS RESPONSE:", leads);
+    console.log("KPIS RESPONSE:", kpis);
+
     const rows = leads?.rows || [];
 
     state.table.allRows = rows;
@@ -599,10 +619,19 @@ async function loadLeadsAndKpis(resetPage = false) {
 
     const count = leads?.count ?? rows.length ?? 0;
     if (statusLine) statusLine.textContent = `${count} registros carregados.`;
-  } catch (err) {
-    console.error("loadLeadsAndKpis ERROR:", err);
 
-    const p = err?.payload || null;
+    // Se chegou aqui e mesmo assim a tabela ficou vazia, avisa
+    if (rows.length > 0) {
+      const tbody = $("#tbl tbody");
+      if (tbody && tbody.children.length === 0) {
+        alert(
+          "Chegaram registros da API, mas a tabela não renderizou.\n" +
+            "Abra o Console (F12) e veja se existe algum erro JS após o render."
+        );
+      }
+    }
+  } catch (err) {
+    const msg = explainErr("loadLeadsAndKpis", err);
 
     state.table.allRows = [];
     state.table.filteredRows = [];
@@ -611,23 +640,28 @@ async function loadLeadsAndKpis(resetPage = false) {
     renderTablePage();
     renderKpis({ total: 0, top_status: null, last_date: null });
 
+    showToast(`Erro: ${msg}`, "err");
+
+    // mostra payload real se existir
+    const p = err?.payload || null;
     if (p) {
-      const msg =
-        `${p.error || err.message}\n\n` +
-        `DETAILS:\n${p.details || "-"}\n\n` +
-        `SOURCE:\n${JSON.stringify(p.source || {}, null, 2)}\n\n` +
-        `TRACE:\n${(p.trace || "").slice(0, 1200)}`;
-      showToast(`Erro: ${p.error || err.message}`, "err");
-      alert(msg);
+      alert(
+        `ERRO BACKEND:\n${p.error || err.message}\n\nDETAILS:\n${p.details || "-"}\n\nSOURCE:\n${JSON.stringify(
+          p.source || {},
+          null,
+          2
+        )}`
+      );
     } else {
-      const msg = err?.message || String(err);
-      showToast(`Erro: ${msg}`, "err");
-      alert(msg);
+      alert(`ERRO:\n${msg}`);
     }
   }
 }
 
-const loadLeadsAndKpisDebounced = debounce((resetPage = false) => loadLeadsAndKpis(resetPage), 250);
+const loadLeadsAndKpisDebounced = debounce(
+  (resetPage = false) => loadLeadsAndKpis(resetPage),
+  250
+);
 
 /* ============================================================
    Upload
@@ -671,7 +705,6 @@ function bindUpload() {
       const msg = explainErr("upload", err);
       setUploadStatus(`Falha: ${msg}`, "error");
       showToast(`Falha no upload: ${msg}`, "err");
-      alert(JSON.stringify(err?.payload || { message: err.message }, null, 2));
     } finally {
       btn.disabled = false;
       file.value = "";
@@ -791,6 +824,6 @@ document.addEventListener("DOMContentLoaded", async () => {
   } catch (err) {
     const msg = explainErr("init", err);
     showToast(`Erro ao iniciar: ${msg}`, "err");
-    alert(JSON.stringify(err?.payload || { message: err.message }, null, 2));
+    alert(`Erro ao iniciar:\n${msg}`);
   }
 });
