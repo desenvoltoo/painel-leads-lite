@@ -12,8 +12,7 @@ from google.cloud import bigquery
 DEFAULT_PROJECT = "painel-universidade"
 DEFAULT_DATASET = "modelo_estrela"
 DEFAULT_VIEW_LEADS = "vw_leads_painel_lite"
-# Dataset regional (confirmado: us-central1). Se no futuro seu dataset virar multi-região,
-# ajuste via ENV BQ_LOCATION ("US" ou "EU").
+# Seu dataset está em us-central1 (confirmado pelo print)
 DEFAULT_BQ_LOCATION = "us-central1"
 
 
@@ -36,14 +35,13 @@ def _bq_location() -> str:
     """
     IMPORTANTE:
     - Dataset multi-região: use "US" (ou "EU")
-    - Dataset regional: "us-central1" (exemplo)
+    - Dataset regional: "us-central1" (seu caso)
     Ajuste via env BQ_LOCATION.
     """
     return _env("BQ_LOCATION", DEFAULT_BQ_LOCATION)
 
 
 def _client() -> bigquery.Client:
-    # Default seguro evita cair em project errado quando ENV não está setada.
     project = _env("GCP_PROJECT_ID", DEFAULT_PROJECT)
     return bigquery.Client(project=project) if project else bigquery.Client()
 
@@ -51,13 +49,11 @@ def _client() -> bigquery.Client:
 def _table_ref() -> str:
     """
     View de leitura do painel.
-    Defaults seguros evitam "tela vazia" por falta de ENV no Cloud Run.
     """
     project = _env("GCP_PROJECT_ID", DEFAULT_PROJECT)
     dataset = _env("BQ_DATASET", DEFAULT_DATASET)
     view = _env("BQ_VIEW_LEADS", DEFAULT_VIEW_LEADS)
 
-    # se por algum motivo project vier vazio, força erro explícito
     if not project:
         _require_env(["GCP_PROJECT_ID"])
 
@@ -65,31 +61,38 @@ def _table_ref() -> str:
 
 
 def _date_field() -> str:
-    # Na view lite normalmente é data_inscricao (DATE)
+    """
+    Na view lite normalmente é data_inscricao.
+    Se mudar, setar via env BQ_DATE_FIELD.
+    """
     return _env("BQ_DATE_FIELD", "data_inscricao")
 
 
 def _date_expr() -> str:
-    """Expressão de data mais resiliente.
+    """
+    SUPER IMPORTANTE (evita painel "zerado"):
+    Converte a data de forma resiliente para DATE.
 
-    Objetivo: evitar "tela vazia" quando a view expõe data em formatos diferentes.
-
+    Cobre estes cenários:
     - DATE/DATETIME/TIMESTAMP: SAFE_CAST -> DATE
-    - STRING: tenta ISO (YYYY-MM-DD) e BR (DD/MM/YYYY)
+    - STRING ISO: 'YYYY-MM-DD'
+    - STRING BR:  'DD/MM/YYYY'
+
+    Se tudo falhar -> NULL (mas agora é bem menos provável).
     """
     f = _date_field()
     s = f"CAST({f} AS STRING)"
     return (
-        f"COALESCE("
-        f"  SAFE_CAST({f} AS DATE),"
-        f"  SAFE.PARSE_DATE('%Y-%m-%d', {s}),"
-        f"  SAFE.PARSE_DATE('%d/%m/%Y', {s})"
-        f")"
+        "COALESCE("
+        f"SAFE_CAST({f} AS DATE),"
+        f"SAFE.PARSE_DATE('%Y-%m-%d', {s}),"
+        f"SAFE.PARSE_DATE('%d/%m/%Y', {s})"
+        ")"
     )
 
 
 def _norm_list_upper(values: List[str]) -> List[str]:
-    out = []
+    out: List[str] = []
     seen = set()
     for x in values or []:
         s = str(x or "").strip()
@@ -104,7 +107,7 @@ def _norm_list_upper(values: List[str]) -> List[str]:
 
 
 # ============================================================
-# NORMALIZAÇÃO UPLOAD (mantida)
+# NORMALIZAÇÃO UPLOAD
 # ============================================================
 def _normalize_cols(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
@@ -151,23 +154,33 @@ def _normalize_datetime_cols(df: pd.DataFrame) -> pd.DataFrame:
 
 
 # ============================================================
-# LEADS (MULTI FILTER) — COM DEFAULTS SEGUROS
+# LEADS / KPIS (MULTI-FILTER + COMPAT SINGLE)
 # ============================================================
-def query_leads(filters: Dict[str, Any]) -> List[Dict[str, Any]]:
-    dt = _date_expr()
-
-    # Compatibilidade: aceita filtros single (curso/polo) e multi (curso_list/polo_list)
+def _coerce_single_to_list(filters: Dict[str, Any]) -> Dict[str, List[str]]:
+    """
+    Compatibilidade:
+    - Se front mandar curso/polo single (antigo), converte para list.
+    - Se mandar curso_list/polo_list (novo), usa.
+    """
     curso_list = filters.get("curso_list") or []
     polo_list = filters.get("polo_list") or []
     curso_single = (filters.get("curso") or "").strip()
     polo_single = (filters.get("polo") or "").strip()
+
     if curso_single and not curso_list:
         curso_list = [curso_single]
     if polo_single and not polo_list:
         polo_list = [polo_single]
 
-    curso_list_up = _norm_list_upper(curso_list)
-    polo_list_up = _norm_list_upper(polo_list)
+    return {"curso_list": curso_list, "polo_list": polo_list}
+
+
+def query_leads(filters: Dict[str, Any]) -> List[Dict[str, Any]]:
+    dt = _date_expr()
+
+    coerced = _coerce_single_to_list(filters)
+    curso_list_up = _norm_list_upper(coerced["curso_list"])
+    polo_list_up = _norm_list_upper(coerced["polo_list"])
 
     sql = f"""
     SELECT
@@ -216,18 +229,9 @@ def query_leads(filters: Dict[str, Any]) -> List[Dict[str, Any]]:
 def query_kpis(filters: Dict[str, Any]) -> Dict[str, Any]:
     dt = _date_expr()
 
-    # Compatibilidade: aceita filtros single (curso/polo) e multi (curso_list/polo_list)
-    curso_list = filters.get("curso_list") or []
-    polo_list = filters.get("polo_list") or []
-    curso_single = (filters.get("curso") or "").strip()
-    polo_single = (filters.get("polo") or "").strip()
-    if curso_single and not curso_list:
-        curso_list = [curso_single]
-    if polo_single and not polo_list:
-        polo_list = [polo_single]
-
-    curso_list_up = _norm_list_upper(curso_list)
-    polo_list_up = _norm_list_upper(polo_list)
+    coerced = _coerce_single_to_list(filters)
+    curso_list_up = _norm_list_upper(coerced["curso_list"])
+    polo_list_up = _norm_list_upper(coerced["polo_list"])
 
     sql = f"""
     WITH base AS (
@@ -322,7 +326,6 @@ def ingest_upload_file(file_storage, source: str = "UPLOAD_PAINEL") -> Dict[str,
     upload_table = _env("BQ_UPLOAD_TABLE", "stg_leads_upload")
     pipeline_proc = _env("BQ_PIPELINE_PROC", "sp_v9_run_pipeline")
 
-    # Aqui defaults já cobrem, mas se alguém zerar envs, explodimos com mensagem boa
     if not project or not dataset:
         _require_env(["GCP_PROJECT_ID", "BQ_DATASET"])
 
