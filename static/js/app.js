@@ -249,7 +249,7 @@ function renderTablePage() {
         <td>${escapeHtml(fmtDate(r.data_inscricao))}</td>
         <td>${escapeHtml(r.nome)}</td>
         <td>${escapeHtml(r.cpf)}</td>
-        <td>${escapeHtml(r.celular)}</td>
+        <td>${escapeHtml(r.celular))}</td>
         <td>${escapeHtml(r.email)}</td>
         <td>${escapeHtml(r.origem)}</td>
         <td>${escapeHtml(r.polo)}</td>
@@ -392,7 +392,6 @@ function ddMakeRow(kind, v) {
     <div class="dd-tag">${isOn ? "Selecionado" : "Adicionar"}</div>
   `;
 
-  // mousedown pra não perder o foco antes do click (importante)
   row.addEventListener("mousedown", (e) => {
     e.preventDefault();
 
@@ -521,7 +520,6 @@ function bindDropdown(kind) {
     if (e.key === "Escape") ddClose(kind);
   });
 
-  // fecha clicando fora
   document.addEventListener("mousedown", (e) => {
     if (e.target === input) return;
     if (dd.contains(e.target)) return;
@@ -579,8 +577,6 @@ async function loadLeadsAndKpis(resetPage = false) {
     data_ini: state.filters.data_ini,
     data_fim: state.filters.data_fim,
     limit: state.filters.limit,
-
-    // multi (backend aceita curso & polo repetidos)
     curso: state.filters.curso_list,
     polo: state.filters.polo_list,
   };
@@ -593,7 +589,6 @@ async function loadLeadsAndKpis(resetPage = false) {
 
     const rows = leads?.rows || [];
 
-    // cache para paginação
     state.table.allRows = rows;
     state.table.filteredRows = rows;
 
@@ -605,7 +600,9 @@ async function loadLeadsAndKpis(resetPage = false) {
     const count = leads?.count ?? rows.length ?? 0;
     if (statusLine) statusLine.textContent = `${count} registros carregados.`;
   } catch (err) {
-    const msg = explainErr("loadLeadsAndKpis", err);
+    console.error("loadLeadsAndKpis ERROR:", err);
+
+    const p = err?.payload || null;
 
     state.table.allRows = [];
     state.table.filteredRows = [];
@@ -614,7 +611,19 @@ async function loadLeadsAndKpis(resetPage = false) {
     renderTablePage();
     renderKpis({ total: 0, top_status: null, last_date: null });
 
-    showToast(`Erro: ${msg}`, "err");
+    if (p) {
+      const msg =
+        `${p.error || err.message}\n\n` +
+        `DETAILS:\n${p.details || "-"}\n\n` +
+        `SOURCE:\n${JSON.stringify(p.source || {}, null, 2)}\n\n` +
+        `TRACE:\n${(p.trace || "").slice(0, 1200)}`;
+      showToast(`Erro: ${p.error || err.message}`, "err");
+      alert(msg);
+    } else {
+      const msg = err?.message || String(err);
+      showToast(`Erro: ${msg}`, "err");
+      alert(msg);
+    }
   }
 }
 
@@ -662,6 +671,7 @@ function bindUpload() {
       const msg = explainErr("upload", err);
       setUploadStatus(`Falha: ${msg}`, "error");
       showToast(`Falha no upload: ${msg}`, "err");
+      alert(JSON.stringify(err?.payload || { message: err.message }, null, 2));
     } finally {
       btn.disabled = false;
       file.value = "";
@@ -781,5 +791,6 @@ document.addEventListener("DOMContentLoaded", async () => {
   } catch (err) {
     const msg = explainErr("init", err);
     showToast(`Erro ao iniciar: ${msg}`, "err");
+    alert(JSON.stringify(err?.payload || { message: err.message }, null, 2));
   }
 });
