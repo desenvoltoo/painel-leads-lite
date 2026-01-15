@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 import os
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 import pandas as pd
 from google.cloud import bigquery
@@ -25,7 +25,6 @@ def _require_env(names: List[str]) -> Dict[str, str]:
 
 
 def _bq_location() -> str:
-    # seu dataset é us-central1, então ok
     return _env("BQ_LOCATION", "us-central1")
 
 
@@ -38,8 +37,10 @@ def _table_ref() -> str:
     project = _env("GCP_PROJECT_ID", "painel-universidade")
     dataset = _env("BQ_DATASET", "modelo_estrela")
     view = _env("BQ_VIEW_LEADS", "vw_leads_painel_lite")
+
     if not project:
         _require_env(["GCP_PROJECT_ID"])
+
     return f"`{project}.{dataset}.{view}`"
 
 
@@ -52,7 +53,7 @@ def _date_expr() -> str:
 
 
 # ============================================================
-# Helpers: multi filtro via "||"
+# Helpers: multi-filtro via "||" (sempre retorna LISTA)
 # ============================================================
 def _split_multi(v: Any) -> List[str]:
     """
@@ -74,14 +75,13 @@ def _split_multi(v: Any) -> List[str]:
     s = str(v).strip()
     if not s:
         return []
-    # suporta separador "||"
     parts = [p.strip() for p in s.split("||")]
     return [p for p in parts if p]
 
 
-def _arr_or_none(v: Any) -> Optional[List[str]]:
+def _upper_list(v: Any) -> List[str]:
     arr = _split_multi(v)
-    return arr if arr else None
+    return [x.strip().upper() for x in arr if str(x or "").strip()]
 
 
 # ============================================================
@@ -137,6 +137,7 @@ def _normalize_datetime_cols(df: pd.DataFrame) -> pd.DataFrame:
 def query_leads(filters: Dict[str, Any]) -> List[Dict[str, Any]]:
     dt = _date_expr()
 
+    # ✅ Agora os filtros usam ARRAY_LENGTH(...) = 0 para "sem filtro"
     sql = f"""
     SELECT
       {dt} AS data_inscricao,
@@ -144,11 +145,10 @@ def query_leads(filters: Dict[str, Any]) -> List[Dict[str, Any]]:
       origem, polo, curso, status, consultor
     FROM {_table_ref()}
     WHERE 1=1
-      -- ✅ multi-filtro: se lista vier nula, ignora
-      AND (@status_list IS NULL OR UPPER(status) IN UNNEST(@status_list))
-      AND (@curso_list  IS NULL OR UPPER(curso)  IN UNNEST(@curso_list))
-      AND (@polo_list   IS NULL OR UPPER(polo)   IN UNNEST(@polo_list))
-      AND (@origem_list IS NULL OR UPPER(origem) IN UNNEST(@origem_list))
+      AND (ARRAY_LENGTH(@status_list)=0 OR UPPER(status) IN UNNEST(@status_list))
+      AND (ARRAY_LENGTH(@curso_list)=0  OR UPPER(curso)  IN UNNEST(@curso_list))
+      AND (ARRAY_LENGTH(@polo_list)=0   OR UPPER(polo)   IN UNNEST(@polo_list))
+      AND (ARRAY_LENGTH(@origem_list)=0 OR UPPER(origem) IN UNNEST(@origem_list))
       AND (@data_ini IS NULL OR {dt} >= @data_ini)
       AND (@data_fim IS NULL OR {dt} <= @data_fim)
     ORDER BY {dt} DESC
@@ -158,22 +158,11 @@ def query_leads(filters: Dict[str, Any]) -> List[Dict[str, Any]]:
     data_ini = filters.get("data_ini") or None
     data_fim = filters.get("data_fim") or None
 
-    # ✅ pega tanto "curso" quanto "curso_list" se você já estiver mandando assim
-    status_list = _arr_or_none(filters.get("status_list") or filters.get("status"))
-    curso_list  = _arr_or_none(filters.get("curso_list")  or filters.get("curso"))
-    polo_list   = _arr_or_none(filters.get("polo_list")   or filters.get("polo"))
-    origem_list = _arr_or_none(filters.get("origem_list") or filters.get("origem"))
-
-    # transforma para UPPER no parâmetro para bater com UPPER(campo)
-    def _upper_arr(a: Optional[List[str]]) -> Optional[List[str]]:
-        if not a:
-            return None
-        return [x.strip().upper() for x in a if str(x or "").strip()]
-
-    status_list = _upper_arr(status_list)
-    curso_list  = _upper_arr(curso_list)
-    polo_list   = _upper_arr(polo_list)
-    origem_list = _upper_arr(origem_list)
+    # ✅ aceita tanto status quanto status_list, etc.
+    status_list = _upper_list(filters.get("status_list") or filters.get("status"))
+    curso_list  = _upper_list(filters.get("curso_list")  or filters.get("curso"))
+    polo_list   = _upper_list(filters.get("polo_list")   or filters.get("polo"))
+    origem_list = _upper_list(filters.get("origem_list") or filters.get("origem"))
 
     job_config = bigquery.QueryJobConfig(
         query_parameters=[
@@ -192,7 +181,7 @@ def query_leads(filters: Dict[str, Any]) -> List[Dict[str, Any]]:
 
 
 # ============================================================
-# KPIs (multi filtro)
+# KPIs (multi filtro) — CORRIGIDO
 # ============================================================
 def query_kpis(filters: Dict[str, Any]) -> Dict[str, Any]:
     dt = _date_expr()
@@ -202,10 +191,10 @@ def query_kpis(filters: Dict[str, Any]) -> Dict[str, Any]:
       SELECT {dt} AS data_inscricao, status, curso, polo, origem
       FROM {_table_ref()}
       WHERE 1=1
-        AND (@status_list IS NULL OR UPPER(status) IN UNNEST(@status_list))
-        AND (@curso_list  IS NULL OR UPPER(curso)  IN UNNEST(@curso_list))
-        AND (@polo_list   IS NULL OR UPPER(polo)   IN UNNEST(@polo_list))
-        AND (@origem_list IS NULL OR UPPER(origem) IN UNNEST(@origem_list))
+        AND (ARRAY_LENGTH(@status_list)=0 OR UPPER(status) IN UNNEST(@status_list))
+        AND (ARRAY_LENGTH(@curso_list)=0  OR UPPER(curso)  IN UNNEST(@curso_list))
+        AND (ARRAY_LENGTH(@polo_list)=0   OR UPPER(polo)   IN UNNEST(@polo_list))
+        AND (ARRAY_LENGTH(@origem_list)=0 OR UPPER(origem) IN UNNEST(@origem_list))
         AND (@data_ini IS NULL OR {dt} >= @data_ini)
         AND (@data_fim IS NULL OR {dt} <= @data_fim)
     ),
@@ -222,20 +211,10 @@ def query_kpis(filters: Dict[str, Any]) -> Dict[str, Any]:
     data_ini = filters.get("data_ini") or None
     data_fim = filters.get("data_fim") or None
 
-    status_list = _arr_or_none(filters.get("status_list") or filters.get("status"))
-    curso_list  = _arr_or_none(filters.get("curso_list")  or filters.get("curso"))
-    polo_list   = _arr_or_none(filters.get("polo_list")   or filters.get("polo"))
-    origem_list = _arr_or_none(filters.get("origem_list") or filters.get("origem"))
-
-    def _upper_arr(a: Optional[List[str]]) -> Optional[List[str]]:
-        if not a:
-            return None
-        return [x.strip().upper() for x in a if str(x or "").strip()]
-
-    status_list = _upper_arr(status_list)
-    curso_list  = _upper_arr(curso_list)
-    polo_list   = _upper_arr(polo_list)
-    origem_list = _upper_arr(origem_list)
+    status_list = _upper_list(filters.get("status_list") or filters.get("status"))
+    curso_list  = _upper_list(filters.get("curso_list")  or filters.get("curso"))
+    polo_list   = _upper_list(filters.get("polo_list")   or filters.get("polo"))
+    origem_list = _upper_list(filters.get("origem_list") or filters.get("origem"))
 
     job_config = bigquery.QueryJobConfig(
         query_parameters=[
@@ -262,10 +241,9 @@ def query_kpis(filters: Dict[str, Any]) -> Dict[str, Any]:
 
 
 # ============================================================
-# OPTIONS (sem "limit travando", mas com limite seguro grande)
+# OPTIONS (sem travar em 250)
 # ============================================================
 def _options_limit() -> int:
-    # ✅ não mexe em ENV, só respeita se existir
     try:
         return int(_env("BQ_OPTIONS_LIMIT", "50000"))
     except Exception:
@@ -273,12 +251,7 @@ def _options_limit() -> int:
 
 
 def _distinct(column: str, limit: int) -> List[str]:
-    # se quiser, você pode colocar 0 no ENV pra "sem limit"
-    if limit and limit > 0:
-        lim_sql = "LIMIT @limit"
-    else:
-        lim_sql = ""
-
+    lim_sql = "LIMIT @limit" if (limit and limit > 0) else ""
     sql = f"""
     SELECT DISTINCT {column} v
     FROM {_table_ref()}
@@ -307,7 +280,7 @@ def query_options() -> Dict[str, List[str]]:
 
 
 # ============================================================
-# UPLOAD + PIPELINE (mantido igual)
+# UPLOAD + PIPELINE (MANTIDO)
 # ============================================================
 def ingest_upload_file(file_storage, source: str = "UPLOAD_PAINEL") -> Dict[str, Any]:
     project = _env("GCP_PROJECT_ID", "painel-universidade")
