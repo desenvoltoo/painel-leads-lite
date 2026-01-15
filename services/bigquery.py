@@ -1,13 +1,22 @@
 # -*- coding: utf-8 -*-
 import os
-from typing import Any, Dict, List
+import unicodedata
+from typing import Any, Dict, List, Optional
 
 import pandas as pd
 from google.cloud import bigquery
 
+# ============================================================
+# DEFAULTS
+# ============================================================
+DEFAULT_PROJECT = "painel-universidade"
+DEFAULT_DATASET = "modelo_estrela"
+DEFAULT_VIEW_LEADS = "vw_leads_painel_lite"
+DEFAULT_BQ_LOCATION = "us-central1"
+
 
 # ============================================================
-# ENV / CLIENT (À PROVA DE CLOUD RUN)
+# ENV / CLIENT
 # ============================================================
 def _env(name: str, default: str = "") -> str:
     v = os.getenv(name)
@@ -15,64 +24,264 @@ def _env(name: str, default: str = "") -> str:
     return v if v else default
 
 
-def _require_env(names: List[str]) -> Dict[str, str]:
-    values = {n: _env(n, "") for n in names}
-    missing = [n for n, v in values.items() if not v]
-    if missing:
-        snapshot = {n: (values.get(n) or None) for n in names}
-        raise RuntimeError(f"ENV obrigatórias faltando: {missing} | snapshot={snapshot}")
-    return values
-
-
 def _bq_location() -> str:
-    """
-    IMPORTANTÍSSIMO:
-    - Se seu dataset for multi-região: use "US" (ou "EU")
-    - Se seu dataset for região: "us-central1"
-    Ajuste via env BQ_LOCATION.
-    """
-    return _env("BQ_LOCATION", "us-central1")
+    return _env("BQ_LOCATION", DEFAULT_BQ_LOCATION)
 
 
 def _client() -> bigquery.Client:
-    project = _env("GCP_PROJECT_ID", "painel-universidade")
+    project = _env("GCP_PROJECT_ID", DEFAULT_PROJECT)
     return bigquery.Client(project=project) if project else bigquery.Client()
 
 
 def _table_ref() -> str:
-    """
-    View de leitura do painel.
-    """
-    project = _env("GCP_PROJECT_ID", "painel-universidade")
-    dataset = _env("BQ_DATASET", "modelo_estrela")
-    view = _env("BQ_VIEW_LEADS", "vw_leads_painel_lite")  # ajuste se precisar
-
-    if not project:
-        _require_env(["GCP_PROJECT_ID"])
-
+    project = _env("GCP_PROJECT_ID", DEFAULT_PROJECT)
+    dataset = _env("BQ_DATASET", DEFAULT_DATASET)
+    view = _env("BQ_VIEW_LEADS", DEFAULT_VIEW_LEADS)
     return f"`{project}.{dataset}.{view}`"
 
 
 def _date_field() -> str:
-    """
-    Sua view (pelo SQL que você mandou) expõe:
-      DATE(v.data_inscricao_dt) AS data_inscricao
-
-    Então o padrão certo aqui é "data_inscricao".
-    Se sua view tiver data_inscricao_dt, troque via env BQ_DATE_FIELD.
-    """
+    # sua view tem data_inscricao DATE
     return _env("BQ_DATE_FIELD", "data_inscricao")
 
 
 def _date_expr() -> str:
-    """
-    Sempre converte pra DATE com segurança.
-    """
+    # como sua coluna já é DATE, isso é perfeito
     return f"DATE({_date_field()})"
 
 
 # ============================================================
-# NORMALIZAÇÃO
+# NORMALIZAÇÃO (ACCENTS)
+# ============================================================
+def _strip_accents_upper(s: str) -> str:
+    """
+    Remove acentos e normaliza em UPPER.
+    Ex: 'São Miguel' -> 'SAO MIGUEL'
+    """
+    if s is None:
+        return ""
+    s = str(s).strip()
+    if not s:
+        return ""
+    s = unicodedata.normalize("NFD", s)
+    s = "".join(ch for ch in s if unicodedata.category(ch) != "Mn")
+    return s.upper().strip()
+
+
+def _norm_list(values: List[str]) -> List[str]:
+    out: List[str] = []
+    seen = set()
+    for x in values or []:
+        nx = _strip_accents_upper(x)
+        if not nx:
+            continue
+        if nx in seen:
+            continue
+        seen.add(nx)
+        out.append(nx)
+    return out
+
+
+def _sql_norm(expr: str) -> str:
+    """
+    Expressão SQL no BigQuery pra comparar ignorando acento/case.
+    """
+    # NORMALIZE(..., NFD) + remove marcas \pM (diacríticos) + UPPER
+    return f"UPPER(REGEXP_REPLACE(NORMALIZE(TRIM(CAST({expr} AS STRING)), NFD), r'\\pM', ''))"
+
+
+# ============================================================
+# LEADS (MULTI FILTER + NORMALIZAÇÃO)
+# ============================================================
+def query_leads(filters: Dict[str, Any]) -> List[Dict[str, Any]]:
+    dt = _date_expr()
+
+    # suporte multi + compat com single
+    curso_list = filters.get("curso_list") or []
+    polo_list = filters.get("polo_list") or []
+    status_list = filters.get("status_list") or []
+    origem_list = filters.get("origem_list") or []
+
+    # compat: se veio status/origem single, converte
+    if filters.get("status") and not status_list:
+        status_list = [filters.get("status")]
+    if filters.get("origem") and not origem_list:
+        origem_list = [filters.get("origem")]
+
+    curso_norm = _norm_list(curso_list)
+    polo_norm = _norm_list(polo_list)
+    status_norm = _norm_list(status_list)
+    origem_norm = _norm_list(origem_list)
+
+    data_ini = filters.get("data_ini") or None
+    data_fim = filters.get("data_fim") or None
+
+    sql = f"""
+    SELECT
+      {dt} AS data_inscricao,
+      nome, cpf, celular, email,
+      origem, polo, curso, status, consultor
+    FROM {_table_ref()}
+    WHERE 1=1
+      AND {dt} IS NOT NULL
+
+      -- MULTI: STATUS
+      AND (
+        ARRAY_LENGTH(@status_list) = 0
+        OR {_sql_norm("status")} IN UNNEST(@status_list)
+      )
+
+      -- MULTI: ORIGEM
+      AND (
+        ARRAY_LENGTH(@origem_list) = 0
+        OR {_sql_norm("origem")} IN UNNEST(@origem_list)
+      )
+
+      -- MULTI: CURSO
+      AND (
+        ARRAY_LENGTH(@curso_list) = 0
+        OR {_sql_norm("curso")} IN UNNEST(@curso_list)
+      )
+
+      -- MULTI: POLO
+      AND (
+        ARRAY_LENGTH(@polo_list) = 0
+        OR {_sql_norm("polo")} IN UNNEST(@polo_list)
+      )
+
+      AND (@data_ini IS NULL OR {dt} >= @data_ini)
+      AND (@data_fim IS NULL OR {dt} <= @data_fim)
+    ORDER BY {dt} DESC
+    LIMIT @limit
+    """
+
+    job_config = bigquery.QueryJobConfig(
+        query_parameters=[
+            bigquery.ArrayQueryParameter("status_list", "STRING", status_norm),
+            bigquery.ArrayQueryParameter("origem_list", "STRING", origem_norm),
+            bigquery.ArrayQueryParameter("curso_list", "STRING", curso_norm),
+            bigquery.ArrayQueryParameter("polo_list", "STRING", polo_norm),
+            bigquery.ScalarQueryParameter("data_ini", "DATE", data_ini),
+            bigquery.ScalarQueryParameter("data_fim", "DATE", data_fim),
+            bigquery.ScalarQueryParameter("limit", "INT64", int(filters.get("limit") or 500)),
+        ]
+    )
+
+    rows = _client().query(sql, job_config=job_config, location=_bq_location()).result()
+    return [{k: r.get(k) for k in r.keys()} for r in rows]
+
+
+# ============================================================
+# KPIs (MULTI FILTER + NORMALIZAÇÃO)
+# ============================================================
+def query_kpis(filters: Dict[str, Any]) -> Dict[str, Any]:
+    dt = _date_expr()
+
+    curso_list = filters.get("curso_list") or []
+    polo_list = filters.get("polo_list") or []
+    status_list = filters.get("status_list") or []
+    origem_list = filters.get("origem_list") or []
+
+    if filters.get("status") and not status_list:
+        status_list = [filters.get("status")]
+    if filters.get("origem") and not origem_list:
+        origem_list = [filters.get("origem")]
+
+    curso_norm = _norm_list(curso_list)
+    polo_norm = _norm_list(polo_list)
+    status_norm = _norm_list(status_list)
+    origem_norm = _norm_list(origem_list)
+
+    data_ini = filters.get("data_ini") or None
+    data_fim = filters.get("data_fim") or None
+
+    sql = f"""
+    WITH base AS (
+      SELECT
+        {dt} AS data_inscricao,
+        status, curso, polo, origem
+      FROM {_table_ref()}
+      WHERE 1=1
+        AND {dt} IS NOT NULL
+
+        AND (ARRAY_LENGTH(@status_list) = 0 OR {_sql_norm("status")} IN UNNEST(@status_list))
+        AND (ARRAY_LENGTH(@origem_list) = 0 OR {_sql_norm("origem")} IN UNNEST(@origem_list))
+        AND (ARRAY_LENGTH(@curso_list)  = 0 OR {_sql_norm("curso")}  IN UNNEST(@curso_list))
+        AND (ARRAY_LENGTH(@polo_list)   = 0 OR {_sql_norm("polo")}   IN UNNEST(@polo_list))
+
+        AND (@data_ini IS NULL OR {dt} >= @data_ini)
+        AND (@data_fim IS NULL OR {dt} <= @data_fim)
+    ),
+    agg AS (
+      SELECT status, COUNT(*) cnt
+      FROM base
+      GROUP BY status
+    )
+    SELECT
+      (SELECT COUNT(*) FROM base) AS total,
+      (SELECT MAX(data_inscricao) FROM base) AS last_date,
+      (SELECT AS STRUCT status, cnt FROM agg ORDER BY cnt DESC LIMIT 1) AS top_status,
+      (SELECT ARRAY_AGG(STRUCT(status, cnt) ORDER BY cnt DESC) FROM agg) AS by_status
+    """
+
+    job_config = bigquery.QueryJobConfig(
+        query_parameters=[
+            bigquery.ArrayQueryParameter("status_list", "STRING", status_norm),
+            bigquery.ArrayQueryParameter("origem_list", "STRING", origem_norm),
+            bigquery.ArrayQueryParameter("curso_list", "STRING", curso_norm),
+            bigquery.ArrayQueryParameter("polo_list", "STRING", polo_norm),
+            bigquery.ScalarQueryParameter("data_ini", "DATE", data_ini),
+            bigquery.ScalarQueryParameter("data_fim", "DATE", data_fim),
+        ]
+    )
+
+    row = next(iter(_client().query(sql, job_config=job_config, location=_bq_location()).result()), None)
+    if not row:
+        return {"total": 0, "last_date": None, "top_status": None, "by_status": []}
+
+    top = row.get("top_status")
+    return {
+        "total": int(row.get("total") or 0),
+        "last_date": str(row.get("last_date")) if row.get("last_date") else None,
+        "top_status": {"status": top.get("status"), "cnt": int(top.get("cnt") or 0)} if top else None,
+        "by_status": [{"status": x.get("status"), "cnt": int(x.get("cnt") or 0)} for x in (row.get("by_status") or [])],
+    }
+
+
+# ============================================================
+# OPTIONS (SEM LIMIT BAIXO) + NORMALIZAÇÃO
+# ============================================================
+def _distinct(column: str, limit: int) -> List[str]:
+    # AQUI NÃO NORMALIZA o retorno — retorna texto original para UI.
+    # A normalização é usada só na comparação/filtro.
+    sql = f"""
+    SELECT DISTINCT TRIM(CAST({column} AS STRING)) v
+    FROM {_table_ref()}
+    WHERE {column} IS NOT NULL AND TRIM(CAST({column} AS STRING)) != ""
+    ORDER BY v
+    LIMIT @limit
+    """
+    job_config = bigquery.QueryJobConfig(
+        query_parameters=[bigquery.ScalarQueryParameter("limit", "INT64", int(limit))]
+    )
+    rows = _client().query(sql, job_config=job_config, location=_bq_location()).result()
+    return [str(r.get("v")) for r in rows if r.get("v")]
+
+
+def query_options() -> Dict[str, List[str]]:
+    # ✅ Padrão alto e configurável (evita “cap” no dropdown)
+    limit = int(_env("BQ_OPTIONS_LIMIT", "200000"))
+    limit = max(5000, min(limit, 500000))  # proteção
+    return {
+        "status": _distinct("status", limit),
+        "curso": _distinct("curso", limit),
+        "polo": _distinct("polo", limit),
+        "origem": _distinct("origem", limit),
+    }
+
+
+# ============================================================
+# UPLOAD + PIPELINE (MANTIDO COMO VOCÊ JÁ TINHA)
 # ============================================================
 def _normalize_cols(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
@@ -101,10 +310,6 @@ def _to_bool(v):
 
 
 def _normalize_datetime_cols(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    - DATETIME -> pandas datetime64[ns] NAIVE (sem timezone)
-    - DATE -> python date
-    """
     df = df.copy()
 
     dt_cols = ("data_envio_dt", "data_inscricao_dt", "data_disparo_dt", "data_contato_dt")
@@ -122,147 +327,13 @@ def _normalize_datetime_cols(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-# ============================================================
-# LEADS
-# ============================================================
-def query_leads(filters: Dict[str, Any]) -> List[Dict[str, Any]]:
-    dt = _date_expr()
-
-    sql = f"""
-    SELECT
-      {dt} AS data_inscricao,
-      nome, cpf, celular, email,
-      origem, polo, curso, status, consultor
-    FROM {_table_ref()}
-    WHERE 1=1
-      AND (@status IS NULL OR UPPER(status) = UPPER(@status))
-      AND (@curso  IS NULL OR UPPER(curso)  = UPPER(@curso))
-      AND (@polo   IS NULL OR UPPER(polo)   = UPPER(@polo))
-      AND (@origem IS NULL OR UPPER(origem) = UPPER(@origem))
-      AND (@data_ini IS NULL OR {dt} >= @data_ini)
-      AND (@data_fim IS NULL OR {dt} <= @data_fim)
-    ORDER BY {dt} DESC
-    LIMIT @limit
-    """
-
-    data_ini = filters.get("data_ini") or None
-    data_fim = filters.get("data_fim") or None
-
-    job_config = bigquery.QueryJobConfig(
-        query_parameters=[
-            bigquery.ScalarQueryParameter("status", "STRING", filters.get("status") or None),
-            bigquery.ScalarQueryParameter("curso", "STRING", filters.get("curso") or None),
-            bigquery.ScalarQueryParameter("polo", "STRING", filters.get("polo") or None),
-            bigquery.ScalarQueryParameter("origem", "STRING", filters.get("origem") or None),
-            bigquery.ScalarQueryParameter("data_ini", "DATE", data_ini),
-            bigquery.ScalarQueryParameter("data_fim", "DATE", data_fim),
-            bigquery.ScalarQueryParameter("limit", "INT64", int(filters.get("limit") or 500)),
-        ]
-    )
-
-    rows = _client().query(sql, job_config=job_config, location=_bq_location()).result()
-    return [{k: r.get(k) for k in r.keys()} for r in rows]
-
-
-# ============================================================
-# KPIs
-# ============================================================
-def query_kpis(filters: Dict[str, Any]) -> Dict[str, Any]:
-    dt = _date_expr()
-
-    sql = f"""
-    WITH base AS (
-      SELECT {dt} AS data_inscricao, status, curso, polo, origem
-      FROM {_table_ref()}
-      WHERE 1=1
-        AND (@status IS NULL OR UPPER(status) = UPPER(@status))
-        AND (@curso  IS NULL OR UPPER(curso)  = UPPER(@curso))
-        AND (@polo   IS NULL OR UPPER(polo)   = UPPER(@polo))
-        AND (@origem IS NULL OR UPPER(origem) = UPPER(@origem))
-        AND (@data_ini IS NULL OR {dt} >= @data_ini)
-        AND (@data_fim IS NULL OR {dt} <= @data_fim)
-    ),
-    agg AS (
-      SELECT status, COUNT(*) cnt FROM base GROUP BY status
-    )
-    SELECT
-      (SELECT COUNT(*) FROM base) AS total,
-      (SELECT MAX(data_inscricao) FROM base) AS last_date,
-      (SELECT AS STRUCT status, cnt FROM agg ORDER BY cnt DESC LIMIT 1) AS top_status,
-      (SELECT ARRAY_AGG(STRUCT(status, cnt) ORDER BY cnt DESC) FROM agg) AS by_status
-    """
-
-    data_ini = filters.get("data_ini") or None
-    data_fim = filters.get("data_fim") or None
-
-    job_config = bigquery.QueryJobConfig(
-        query_parameters=[
-            bigquery.ScalarQueryParameter("status", "STRING", filters.get("status") or None),
-            bigquery.ScalarQueryParameter("curso", "STRING", filters.get("curso") or None),
-            bigquery.ScalarQueryParameter("polo", "STRING", filters.get("polo") or None),
-            bigquery.ScalarQueryParameter("origem", "STRING", filters.get("origem") or None),
-            bigquery.ScalarQueryParameter("data_ini", "DATE", data_ini),
-            bigquery.ScalarQueryParameter("data_fim", "DATE", data_fim),
-        ]
-    )
-
-    row = next(iter(_client().query(sql, job_config=job_config, location=_bq_location()).result()), None)
-    if not row:
-        return {"total": 0, "last_date": None, "top_status": None, "by_status": []}
-
-    top = row.get("top_status")
-    return {
-        "total": int(row.get("total") or 0),
-        "last_date": str(row.get("last_date")) if row.get("last_date") else None,
-        "top_status": {"status": top.get("status"), "cnt": int(top.get("cnt") or 0)} if top else None,
-        "by_status": [{"status": x.get("status"), "cnt": int(x.get("cnt") or 0)} for x in (row.get("by_status") or [])],
-    }
-
-
-# ============================================================
-# OPTIONS
-# ============================================================
-def _distinct(column: str, limit: int = 250) -> List[str]:
-    sql = f"""
-    SELECT DISTINCT {column} v
-    FROM {_table_ref()}
-    WHERE {column} IS NOT NULL AND TRIM(CAST({column} AS STRING)) != ""
-    ORDER BY v
-    LIMIT @limit
-    """
-
-    job_config = bigquery.QueryJobConfig(
-        query_parameters=[bigquery.ScalarQueryParameter("limit", "INT64", limit)]
-    )
-    rows = _client().query(sql, job_config=job_config, location=_bq_location()).result()
-    return [str(r.get("v")) for r in rows if r.get("v")]
-
-
-def query_options() -> Dict[str, List[str]]:
-    return {
-        "status": _distinct("status"),
-        "curso": _distinct("curso"),
-        "polo": _distinct("polo"),
-        "origem": _distinct("origem"),
-    }
-
-
-# ============================================================
-# UPLOAD + PIPELINE (BLINDADO)
-# ============================================================
 def ingest_upload_file(file_storage, source: str = "UPLOAD_PAINEL") -> Dict[str, Any]:
-    """
-    Carrega CSV/XLSX em stg_leads_upload e executa procedure do pipeline.
-    """
-    project = _env("GCP_PROJECT_ID", "painel-universidade")
-    dataset = _env("BQ_DATASET", "modelo_estrela")
+    project = _env("GCP_PROJECT_ID", DEFAULT_PROJECT)
+    dataset = _env("BQ_DATASET", DEFAULT_DATASET)
     location = _bq_location()
 
     upload_table = _env("BQ_UPLOAD_TABLE", "stg_leads_upload")
     pipeline_proc = _env("BQ_PIPELINE_PROC", "sp_v9_run_pipeline")
-
-    if not project or not dataset:
-        _require_env(["GCP_PROJECT_ID", "BQ_DATASET"])
 
     stg_table_id = f"{project}.{dataset}.{upload_table}"
     proc_id = f"{project}.{dataset}.{pipeline_proc}"
@@ -366,7 +437,6 @@ def ingest_upload_file(file_storage, source: str = "UPLOAD_PAINEL") -> Dict[str,
 
     if filename_lower.endswith(".csv"):
         chunksize = int(_env("UPLOAD_CHUNKSIZE", "20000"))
-
         try:
             file_storage.stream.seek(0)
         except Exception:
@@ -408,7 +478,6 @@ def ingest_upload_file(file_storage, source: str = "UPLOAD_PAINEL") -> Dict[str,
     else:
         raise ValueError("Formato inválido. Envie CSV ou XLSX.")
 
-    # chama pipeline (com location!)
     pipeline_sql = f"CALL `{proc_id}`(@fn);"
     pipeline_job = client.query(
         pipeline_sql,
