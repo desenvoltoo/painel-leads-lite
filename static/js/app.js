@@ -1,8 +1,8 @@
 /* ============================================================
    Painel Leads Lite — app.js (compatível com seu index.html)
-   - Multi-filtro por campo com "||" (SEM quebrar backend)
-   - Não envia parâmetros repetidos (não usa array)
-   - Ordena opções ignorando acento (UX)
+   - Multi-filtro por campo com "||" (seguro)
+   - NÃO envia parâmetros repetidos (não usa array)
+   - Ordena opções ignorando acento (UX), mas NÃO altera o texto enviado pro backend
 ============================================================ */
 
 const $ = (sel) => document.querySelector(sel);
@@ -37,7 +37,11 @@ function escapeHtml(str) {
 function fmtDate(d) {
   if (!d) return "";
   const s = String(d);
+
+  // ISO direto
   if (/^\d{4}-\d{2}-\d{2}/.test(s)) return s.slice(0, 10);
+
+  // tenta parsear RFC/Date string
   const ts = Date.parse(s);
   if (!Number.isNaN(ts)) {
     const dd = new Date(ts);
@@ -46,6 +50,7 @@ function fmtDate(d) {
     const day = String(dd.getUTCDate()).padStart(2, "0");
     return `${yyyy}-${mm}-${day}`;
   }
+
   return s.slice(0, 10);
 }
 
@@ -57,12 +62,27 @@ function debounce(fn, delay = 300) {
   };
 }
 
-function normTxt(s) {
+/** Só para ordenação (UX), NÃO use isso para enviar pro backend */
+function normTxtForSort(s) {
   return String(s || "")
     .normalize("NFD")
     .replace(/[\u0300-\u036f]/g, "")
     .trim()
     .toUpperCase();
+}
+
+/** ✅ Sanitiza multi: mantém o conteúdo, mas limpa espaços e separadores */
+function cleanMultiRaw(v) {
+  const raw = String(v || "").trim();
+  if (!raw) return "";
+
+  // divide por ||, remove vazios, trim, e junta novamente
+  const parts = raw
+    .split("||")
+    .map((x) => String(x || "").trim())
+    .filter(Boolean);
+
+  return parts.join("||");
 }
 
 /* ============================================================
@@ -179,10 +199,11 @@ function fillDatalist(id, values) {
    Filters
 ============================================================ */
 function readFiltersFromUI() {
-  state.filters.status = ($("#fStatus")?.value || "").trim();
-  state.filters.curso = ($("#fCurso")?.value || "").trim();
-  state.filters.polo = ($("#fPolo")?.value || "").trim();
-  state.filters.origem = ($("#fOrigem")?.value || "").trim();
+  // ✅ multi seguro: limpa espaços e separadores, mas NÃO altera acento/letras
+  state.filters.status = cleanMultiRaw($("#fStatus")?.value || "");
+  state.filters.curso = cleanMultiRaw($("#fCurso")?.value || "");
+  state.filters.polo = cleanMultiRaw($("#fPolo")?.value || "");
+  state.filters.origem = cleanMultiRaw($("#fOrigem")?.value || "");
 
   state.filters.data_ini = ($("#fIni")?.value || "").trim();
   state.filters.data_fim = ($("#fFim")?.value || "").trim();
@@ -194,8 +215,7 @@ function readFiltersFromUI() {
 function buildParams() {
   readFiltersFromUI();
 
-  // ✅ mantém exatamente a string digitada, incluindo "||"
-  // (o backend services/bigquery.py agora entende isso)
+  // ✅ mantém exatamente a string digitada, incluindo "||" (já saneada)
   return {
     status: state.filters.status,
     curso: state.filters.curso,
@@ -215,8 +235,8 @@ async function loadOptions() {
 
   const sortSmart = (arr) =>
     (arr || []).slice().sort((a, b) => {
-      const na = normTxt(a);
-      const nb = normTxt(b);
+      const na = normTxtForSort(a);
+      const nb = normTxtForSort(b);
       if (na < nb) return -1;
       if (na > nb) return 1;
       return 0;
@@ -291,7 +311,9 @@ function bindUpload() {
       setUploadStatus(`${msg} (${rows} linhas) — ${fname}`, "ok");
       showToast("Upload finalizado. Atualizando dados...", "ok");
 
+      await loadOptions();
       await loadLeadsAndKpis();
+
       showToast("Painel atualizado com os novos dados.", "ok");
     } catch (err) {
       console.error(err);
@@ -352,8 +374,16 @@ function bindExport() {
       }
 
       const headers = [
-        "data_inscricao","nome","cpf","celular","email",
-        "origem","polo","curso","status","consultor"
+        "data_inscricao",
+        "nome",
+        "cpf",
+        "celular",
+        "email",
+        "origem",
+        "polo",
+        "curso",
+        "status",
+        "consultor",
       ];
 
       const csv = buildCsv(
