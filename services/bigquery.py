@@ -137,7 +137,6 @@ def _normalize_datetime_cols(df: pd.DataFrame) -> pd.DataFrame:
 def query_leads(filters: Dict[str, Any]) -> List[Dict[str, Any]]:
     dt = _date_expr()
 
-    # ✅ Agora os filtros usam ARRAY_LENGTH(...) = 0 para "sem filtro"
     sql = f"""
     SELECT
       {dt} AS data_inscricao,
@@ -145,10 +144,10 @@ def query_leads(filters: Dict[str, Any]) -> List[Dict[str, Any]]:
       origem, polo, curso, status, consultor
     FROM {_table_ref()}
     WHERE 1=1
-      AND (ARRAY_LENGTH(@status_list)=0 OR UPPER(status) IN UNNEST(@status_list))
-      AND (ARRAY_LENGTH(@curso_list)=0  OR UPPER(curso)  IN UNNEST(@curso_list))
-      AND (ARRAY_LENGTH(@polo_list)=0   OR UPPER(polo)   IN UNNEST(@polo_list))
-      AND (ARRAY_LENGTH(@origem_list)=0 OR UPPER(origem) IN UNNEST(@origem_list))
+      AND (ARRAY_LENGTH(@status_list)=0 OR UPPER(CAST(status AS STRING)) IN UNNEST(@status_list))
+      AND (ARRAY_LENGTH(@curso_list)=0  OR UPPER(CAST(curso  AS STRING)) IN UNNEST(@curso_list))
+      AND (ARRAY_LENGTH(@polo_list)=0   OR UPPER(CAST(polo   AS STRING)) IN UNNEST(@polo_list))
+      AND (ARRAY_LENGTH(@origem_list)=0 OR UPPER(CAST(origem AS STRING)) IN UNNEST(@origem_list))
       AND (@data_ini IS NULL OR {dt} >= @data_ini)
       AND (@data_fim IS NULL OR {dt} <= @data_fim)
     ORDER BY {dt} DESC
@@ -158,17 +157,17 @@ def query_leads(filters: Dict[str, Any]) -> List[Dict[str, Any]]:
     data_ini = filters.get("data_ini") or None
     data_fim = filters.get("data_fim") or None
 
-    # ✅ aceita tanto status quanto status_list, etc.
+    # aceita tanto status quanto status_list, etc.
     status_list = _upper_list(filters.get("status_list") or filters.get("status"))
-    curso_list  = _upper_list(filters.get("curso_list")  or filters.get("curso"))
-    polo_list   = _upper_list(filters.get("polo_list")   or filters.get("polo"))
+    curso_list = _upper_list(filters.get("curso_list") or filters.get("curso"))
+    polo_list = _upper_list(filters.get("polo_list") or filters.get("polo"))
     origem_list = _upper_list(filters.get("origem_list") or filters.get("origem"))
 
     job_config = bigquery.QueryJobConfig(
         query_parameters=[
             bigquery.ArrayQueryParameter("status_list", "STRING", status_list),
-            bigquery.ArrayQueryParameter("curso_list",  "STRING", curso_list),
-            bigquery.ArrayQueryParameter("polo_list",   "STRING", polo_list),
+            bigquery.ArrayQueryParameter("curso_list", "STRING", curso_list),
+            bigquery.ArrayQueryParameter("polo_list", "STRING", polo_list),
             bigquery.ArrayQueryParameter("origem_list", "STRING", origem_list),
             bigquery.ScalarQueryParameter("data_ini", "DATE", data_ini),
             bigquery.ScalarQueryParameter("data_fim", "DATE", data_fim),
@@ -181,7 +180,7 @@ def query_leads(filters: Dict[str, Any]) -> List[Dict[str, Any]]:
 
 
 # ============================================================
-# KPIs (multi filtro) — CORRIGIDO
+# KPIs (multi filtro)
 # ============================================================
 def query_kpis(filters: Dict[str, Any]) -> Dict[str, Any]:
     dt = _date_expr()
@@ -191,10 +190,10 @@ def query_kpis(filters: Dict[str, Any]) -> Dict[str, Any]:
       SELECT {dt} AS data_inscricao, status, curso, polo, origem
       FROM {_table_ref()}
       WHERE 1=1
-        AND (ARRAY_LENGTH(@status_list)=0 OR UPPER(status) IN UNNEST(@status_list))
-        AND (ARRAY_LENGTH(@curso_list)=0  OR UPPER(curso)  IN UNNEST(@curso_list))
-        AND (ARRAY_LENGTH(@polo_list)=0   OR UPPER(polo)   IN UNNEST(@polo_list))
-        AND (ARRAY_LENGTH(@origem_list)=0 OR UPPER(origem) IN UNNEST(@origem_list))
+        AND (ARRAY_LENGTH(@status_list)=0 OR UPPER(CAST(status AS STRING)) IN UNNEST(@status_list))
+        AND (ARRAY_LENGTH(@curso_list)=0  OR UPPER(CAST(curso  AS STRING)) IN UNNEST(@curso_list))
+        AND (ARRAY_LENGTH(@polo_list)=0   OR UPPER(CAST(polo   AS STRING)) IN UNNEST(@polo_list))
+        AND (ARRAY_LENGTH(@origem_list)=0 OR UPPER(CAST(origem AS STRING)) IN UNNEST(@origem_list))
         AND (@data_ini IS NULL OR {dt} >= @data_ini)
         AND (@data_fim IS NULL OR {dt} <= @data_fim)
     ),
@@ -212,15 +211,15 @@ def query_kpis(filters: Dict[str, Any]) -> Dict[str, Any]:
     data_fim = filters.get("data_fim") or None
 
     status_list = _upper_list(filters.get("status_list") or filters.get("status"))
-    curso_list  = _upper_list(filters.get("curso_list")  or filters.get("curso"))
-    polo_list   = _upper_list(filters.get("polo_list")   or filters.get("polo"))
+    curso_list = _upper_list(filters.get("curso_list") or filters.get("curso"))
+    polo_list = _upper_list(filters.get("polo_list") or filters.get("polo"))
     origem_list = _upper_list(filters.get("origem_list") or filters.get("origem"))
 
     job_config = bigquery.QueryJobConfig(
         query_parameters=[
             bigquery.ArrayQueryParameter("status_list", "STRING", status_list),
-            bigquery.ArrayQueryParameter("curso_list",  "STRING", curso_list),
-            bigquery.ArrayQueryParameter("polo_list",   "STRING", polo_list),
+            bigquery.ArrayQueryParameter("curso_list", "STRING", curso_list),
+            bigquery.ArrayQueryParameter("polo_list", "STRING", polo_list),
             bigquery.ArrayQueryParameter("origem_list", "STRING", origem_list),
             bigquery.ScalarQueryParameter("data_ini", "DATE", data_ini),
             bigquery.ScalarQueryParameter("data_fim", "DATE", data_fim),
@@ -273,8 +272,8 @@ def query_options() -> Dict[str, List[str]]:
     lim = _options_limit()
     return {
         "status": _distinct("status", lim),
-        "curso":  _distinct("curso", lim),
-        "polo":   _distinct("polo", lim),
+        "curso": _distinct("curso", lim),
+        "polo": _distinct("polo", lim),
         "origem": _distinct("origem", lim),
     }
 
