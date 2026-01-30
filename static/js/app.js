@@ -1,10 +1,12 @@
 /* ============================================================
-   Painel Leads Lite — app.js (Versão TomSelect Corrigida)
-   - Adicionado renderizador de checkbox
-   - Sincronizado com index.html
+   Painel Leads Lite — app.js (Versão Final Consolidada)
+   - Suporte Total a TomSelect com Checkboxes
+   - Integração com BigQuery Backend
 ============================================================ */
 
 const $ = (sel) => document.querySelector(sel);
+
+// Instâncias globais do TomSelect
 let tsCurso, tsPolo;
 
 /* ============================================================
@@ -26,8 +28,10 @@ function setUploadStatus(msg, type = "muted") {
 }
 
 function escapeHtml(str) {
-    if (str === null || str === undefined) return "";
-    return String(str).replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;").replaceAll("'", "&#039;");
+    if (!str) return "";
+    return String(str).replace(/[&<>"']/g, m => ({
+        '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+    }[m]));
 }
 
 function fmtDate(d) {
@@ -35,11 +39,7 @@ function fmtDate(d) {
     const s = String(d);
     if (/^\d{4}-\d{2}-\d{2}/.test(s)) return s.slice(0, 10);
     const ts = Date.parse(s);
-    if (!Number.isNaN(ts)) {
-        const dd = new Date(ts);
-        return dd.toISOString().slice(0, 10);
-    }
-    return s.slice(0, 10);
+    return !Number.isNaN(ts) ? new Date(ts).toISOString().slice(0, 10) : s.slice(0, 10);
 }
 
 function sortSmart(arr) {
@@ -51,12 +51,18 @@ function sortSmart(arr) {
 ============================================================ */
 async function apiGet(path, params = {}) {
     const url = new URL(path, window.location.origin);
+    
     Object.entries(params).forEach(([k, v]) => {
-        if (v === null || v === undefined || v === "") return;
-        // Se for array (TomSelect), vira "Item1 || Item2" para o Python
-        const val = Array.isArray(v) ? v.join(" || ") : v;
-        url.searchParams.set(k, val);
+        if (v === null || v === undefined || v === "" || (Array.isArray(v) && v.length === 0)) return;
+        
+        // Se for Array (Curso/Polo), transforma em "VAL1 || VAL2" para o Python
+        if (Array.isArray(v)) {
+            url.searchParams.set(k, v.join(" || "));
+        } else {
+            url.searchParams.set(k, v);
+        }
     });
+
     const res = await fetch(url.toString(), { cache: "no-store" });
     const data = await res.json().catch(() => ({}));
     if (!res.ok) throw new Error(data?.error || `Erro HTTP ${res.status}`);
@@ -64,7 +70,7 @@ async function apiGet(path, params = {}) {
 }
 
 /* ============================================================
-   Inicialização do TomSelect (COM RENDERER DE CHECKBOX)
+   Inicialização do TomSelect (Dropdown com Checkbox)
 ============================================================ */
 function initMultiSelects() {
     const config = {
@@ -72,10 +78,16 @@ function initMultiSelects() {
         create: false,
         allowEmptyOption: true,
         maxItems: null,
-        // ✅ O SEGREDO ESTÁ AQUI: Desenhar o checkbox manualmente
+        valueField: 'value',
+        labelField: 'text',
+        searchField: ['text'],
+        // ESTA PARTE GERA O HTML DO CHECKBOX
         render: {
             option: function(data, escape) {
-                return `<div><span class="checkbox"></span>${escape(data.text)}</div>`;
+                return `<div class="d-flex"><span class="checkbox"></span><span>${escape(data.text)}</span></div>`;
+            },
+            item: function(data, escape) {
+                return `<div>${escape(data.text)}</div>`;
             }
         },
         onChange: () => loadLeadsAndKpisDebounced()
@@ -91,8 +103,8 @@ function initMultiSelects() {
 function getFilters() {
     return {
         status: $("#fStatus")?.value || "",
-        curso: tsCurso ? tsCurso.getValue() : [],
-        polo: tsPolo ? tsPolo.getValue() : [],
+        curso: tsCurso ? tsCurso.getValue() : [], 
+        polo: tsPolo ? tsPolo.getValue() : [],   
         origem: $("#fOrigem")?.value || "",
         data_ini: $("#fIni")?.value || "",
         data_fim: $("#fFim")?.value || "",
@@ -141,10 +153,10 @@ async function loadLeadsAndKpis() {
             apiGet("/api/kpis", params),
         ]);
 
-        renderTable(leads?.rows || []);
+        renderTable(leads || []); // leads já deve vir como lista do seu backend
         renderKpis(kpis);
 
-        showToast(`${leads?.count || 0} registros encontrados.`, "ok");
+        showToast(`${Array.isArray(leads) ? leads.length : 0} registros carregados.`, "ok");
     } catch (e) {
         showToast(`Erro: ${e.message}`, "err");
     }
@@ -156,7 +168,7 @@ const loadLeadsAndKpisDebounced = (function(fn, delay) {
         clearTimeout(timeout);
         timeout = setTimeout(() => fn(...args), delay);
     };
-})(loadLeadsAndKpis, 300);
+})(loadLeadsAndKpis, 400);
 
 /* ============================================================
    Renderização
@@ -164,26 +176,32 @@ const loadLeadsAndKpisDebounced = (function(fn, delay) {
 function renderTable(rows) {
     const tbody = $("#tbl tbody");
     if (!tbody) return;
+    
+    if (!rows || rows.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="10" style="text-align:center; padding:40px;">Nenhum lead encontrado para estes filtros.</td></tr>';
+        return;
+    }
+
     tbody.innerHTML = rows.map(r => `
         <tr>
             <td>${escapeHtml(fmtDate(r.data_inscricao))}</td>
-            <td>${escapeHtml(r.nome)}</td>
+            <td style="font-weight:600">${escapeHtml(r.nome)}</td>
             <td>${escapeHtml(r.cpf)}</td>
             <td>${escapeHtml(r.celular)}</td>
             <td>${escapeHtml(r.email)}</td>
-            <td>${escapeHtml(r.origem)}</td>
+            <td><span class="muted">${escapeHtml(r.origem)}</span></td>
             <td>${escapeHtml(r.polo)}</td>
             <td>${escapeHtml(r.curso)}</td>
-            <td>${escapeHtml(r.status)}</td>
+            <td><strong>${escapeHtml(r.status)}</strong></td>
             <td>${escapeHtml(r.consultor)}</td>
         </tr>
-    `).join("") || '<tr><td colspan="10" class="muted">Nenhum dado encontrado.</td></tr>';
+    `).join("");
 }
 
 function renderKpis(k) {
-    if ($("#kpiCount")) $("#kpiCount").textContent = k?.total ?? 0;
+    if ($("#kpiCount")) $("#kpiCount").textContent = k?.total || 0;
     if ($("#kpiTopStatus")) {
-        const top = k?.top_status; // Agora o Python retorna um dict ou null
+        const top = k?.top_status;
         $("#kpiTopStatus").textContent = top ? `${top.status} (${top.cnt})` : "-";
     }
     if ($("#kpiLastDate")) $("#kpiLastDate").textContent = fmtDate(k?.last_date);
@@ -223,12 +241,12 @@ function bindActions() {
         formData.append("file", fileInput.files[0]);
         formData.append("source", $("#uploadSource")?.value || "");
 
-        setUploadStatus("Enviando para BigQuery...", "muted");
+        setUploadStatus("Processando no BigQuery...", "muted");
         try {
             const res = await fetch("/api/upload", { method: "POST", body: formData });
             const data = await res.json();
             if (!res.ok) throw new Error(data.error);
-            setUploadStatus(`Sucesso! ${data.rows_loaded} linhas processadas.`, "ok");
+            setUploadStatus(`Sucesso! ${data.rows_loaded || 0} linhas processadas.`, "ok");
             await loadOptions();
             await loadLeadsAndKpis();
         } catch (e) {
@@ -238,11 +256,16 @@ function bindActions() {
 }
 
 /* ============================================================
-   Init
+   Início da Aplicação
 ============================================================ */
 document.addEventListener("DOMContentLoaded", async () => {
+    // 1. Prepara a UI
     initMultiSelects();
     bindActions();
+    
+    // 2. Carrega as opções (Curso/Polo) para os selects
     await loadOptions();
+    
+    // 3. Busca os dados iniciais
     await loadLeadsAndKpis();
 });
