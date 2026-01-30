@@ -1,103 +1,70 @@
-/* ============================================================
-   TomSelect Customização Dark & Checkbox Visual
-   ============================================================ */
+:root {
+  --bg: #0b1020;
+  --card: rgba(17, 26, 51, 0.65);
+  --text: #e8ecff;
+  --border: rgba(255, 255, 255, 0.1);
+  --accent: #6ea8ff;
+}
 
-/* Container principal do input */
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: sans-serif;
+  margin: 0;
+}
+
+.container { max-width: 1200px; margin: 0 auto; padding: 20px; }
+
+/* TomSelect Customização */
 .ts-control {
-  display: flex !important;
-  align-items: center !important;
-  min-height: 44px;
-}
-
-/* Tags de itens selecionados (pílulas) */
-.ts-wrapper.multi .ts-control > div {
-  background: var(--accent) !important;
-  color: #0b1020 !important;
-  border-radius: 6px !important;
-  font-weight: 700;
-  margin: 2px 4px 2px 0 !important;
-  padding: 2px 8px !important;
-  display: flex;
-  align-items: center;
-}
-
-/* Botão de remover (X) na pílula */
-.ts-wrapper.multi .ts-control > div .remove {
-  border-left-color: rgba(11, 16, 32, 0.2) !important;
-  margin-left: 5px !important;
-}
-
-/* Menu Dropdown */
-.ts-dropdown {
-  background: #111a33 !important;
-  color: var(--text) !important;
+  background: rgba(0,0,0,0.3) !important;
   border: 1px solid var(--border) !important;
-  border-radius: 14px !important;
-  box-shadow: 0 15px 40px rgba(0,0,0,0.6) !important;
-  margin-top: 8px !important;
-  z-index: 1000 !important;
+  border-radius: 8px !important;
+  color: white !important;
 }
 
-/* Opções dentro do menu */
+.ts-dropdown {
+  background: #161f3a !important;
+  color: white !important;
+  border: 1px solid var(--border) !important;
+  border-radius: 8px !important;
+}
+
 .ts-dropdown .option {
-  padding: 12px 16px !important;
   display: flex !important;
   align-items: center !important;
-  transition: var(--transition);
+  padding: 10px !important;
 }
 
-.ts-dropdown .option.active {
-  background: rgba(110, 168, 255, 0.15) !important;
-  color: #fff !important;
-}
-
-/* --- O CHECKBOX VISUAL --- */
-
-/* O quadradinho */
+/* O Checkbox Visual */
 .ts-dropdown .option .checkbox {
-  width: 18px;
-  height: 18px;
-  border: 2px solid var(--border);
-  border-radius: 5px;
-  margin-right: 12px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  transition: all 0.2s ease;
+  width: 18px !important;
+  height: 18px !important;
+  border: 2px solid var(--border) !important;
+  border-radius: 4px !important;
+  margin-right: 12px !important;
+  display: inline-block !important;
+  position: relative !important;
   flex-shrink: 0;
-  background: rgba(0,0,0,0.2);
 }
 
-/* Estado selecionado */
 .ts-dropdown .selected .checkbox {
   background: var(--accent) !important;
   border-color: var(--accent) !important;
 }
 
-/* O ícone de "V" (check) */
 .ts-dropdown .selected .checkbox::after {
-  content: "";
-  width: 5px;
-  height: 9px;
+  content: '' !important;
+  position: absolute;
+  left: 5px; top: 2px;
+  width: 4px; height: 8px;
   border: solid #0b1020;
-  border-width: 0 2.5px 2.5px 0;
+  border-width: 0 2px 2px 0;
   transform: rotate(45deg);
-  margin-top: -2px;
 }
 
-/* Esconder checkbox real se houver */
-.ts-dropdown input[type="checkbox"] {
-  display: none;
-}
-
-/* Ajuste para não quebrar o layout em telas menores */
-.field-wide {
-  grid-column: span 1;
-}
-
-.field-actions {
-  grid-column: span 6;
-  display: flex;
-  align-items: flex-end;
-  gap: 10px;
+.ts-wrapper.multi .ts-control > div {
+  background: var(--accent) !important;
+  color: #0b1020 !important;
+  border-radius: 4px !important;
 }
