@@ -1,4 +1,4 @@
-/* Minimal premium UI - revisado */
+/* Minimal premium UI - Revisado com suporte a TomSelect (Multiselect) */
 :root {
   --bg: #0b1020;
   --card: rgba(17, 26, 51, 0.65);
@@ -24,7 +24,7 @@ body {
   min-height: 100vh;
 }
 
-/* Scrollbar Customizada (O detalhe que faz a diferença) */
+/* Scrollbar Customizada */
 ::-webkit-scrollbar { width: 8px; height: 8px; }
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 10px; }
@@ -65,9 +65,7 @@ body {
   padding: 20px;
   transition: var(--transition);
 }
-
 .kpi:hover { border-color: rgba(110, 168, 255, 0.3); }
-
 .kpi-value { font-size: 26px; font-weight: 900; margin-top: 8px; color: var(--accent); }
 
 /* Cards & Forms */
@@ -86,18 +84,37 @@ body {
   margin-top: 16px;
 }
 
-.field input {
+.field label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 8px; }
+
+.field input, .ts-control {
   width: 100%;
-  padding: 12px;
-  border-radius: 12px;
-  border: 1px solid var(--border);
-  background: rgba(0, 0, 0, 0.3);
-  color: var(--text);
-  font-size: 14px;
+  padding: 12px !important;
+  border-radius: 12px !important;
+  border: 1px solid var(--border) !important;
+  background: rgba(0, 0, 0, 0.3) !important;
+  color: var(--text) !important;
+  font-size: 14px !important;
   transition: var(--transition);
 }
 
-.field input:focus { border-color: var(--accent); outline: none; background: rgba(0, 0, 0, 0.4); }
+.field input:focus, .ts-control.focus { border-color: var(--accent) !important; outline: none; background: rgba(0, 0, 0, 0.4) !important; }
+
+/* TomSelect Customização Dark */
+.ts-wrapper.multi .ts-control > div {
+  background: var(--accent) !important;
+  color: #0b1020 !important;
+  border-radius: 6px !important;
+  font-weight: 600;
+}
+.ts-dropdown {
+  background: #111a33 !important;
+  color: var(--text) !important;
+  border: 1px solid var(--border) !important;
+  border-radius: 12px !important;
+  box-shadow: 0 10px 30px rgba(0,0,0,0.5) !important;
+}
+.ts-dropdown .option.active { background: rgba(110, 168, 255, 0.2) !important; }
+.ts-dropdown .option { padding: 10px 12px !important; }
 
 /* Buttons */
 .btn {
@@ -112,16 +129,11 @@ body {
   transition: var(--transition);
   display: inline-flex; align-items: center; justify-content: center;
 }
-
 .btn:hover { background: rgba(255, 255, 255, 0.1); transform: translateY(-1px); }
-.btn:active { transform: translateY(0); }
-
 .btn-primary {
   background: linear-gradient(135deg, rgba(110,168,255,0.4), rgba(110,168,255,0.2));
   border-color: rgba(110,168,255,0.4);
 }
-
-.btn-primary:hover { border-color: var(--accent); box-shadow: 0 4px 15px rgba(110,168,255,0.15); }
 
 /* Table Estilizada */
 .table-wrap {
@@ -129,39 +141,29 @@ body {
   border-radius: 16px;
   border: 1px solid var(--border);
 }
-
-table {
-  width: 100%; border-collapse: collapse; min-width: 1000px;
-}
-
+table { width: 100%; border-collapse: collapse; min-width: 1000px; }
 thead th {
   background: rgba(11, 16, 32, 0.8);
   padding: 14px;
-  font-size: 12px;
+  font-size: 11px;
   text-transform: uppercase;
-  letter-spacing: 0.5px;
   color: var(--muted);
   border-bottom: 1px solid var(--border);
+  text-align: left;
 }
-
 tbody td {
   padding: 14px;
-  font-size: 14px;
+  font-size: 13px;
   border-bottom: 1px solid rgba(255, 255, 255, 0.03);
-  white-space: nowrap; /* Evita quebra de linha em nomes/emails */
+  white-space: nowrap;
 }
-
 tbody tr:hover { background: rgba(110, 168, 255, 0.04); }
-
-/* Utilitários de erro */
-.error { color: var(--danger); }
 
 /* Responsividade */
 @media (max-width: 1100px) {
   .filters { grid-template-columns: repeat(3, 1fr); }
   .field-actions { grid-column: span 3; }
 }
-
 @media (max-width: 768px) {
   .filters { grid-template-columns: repeat(2, 1fr); }
   .field-actions { grid-column: span 2; }
