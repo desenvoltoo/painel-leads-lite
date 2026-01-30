@@ -4,6 +4,9 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <title>Painel Leads Lite</title>
+  
+  <link href="https://cdn.jsdelivr.net/npm/tom-select@2.2.2/dist/css/tom-select.css" rel="stylesheet">
+  
   <link rel="stylesheet" href="{{ url_for('static', filename='css/styles.css') }}">
 </head>
 
@@ -25,7 +28,6 @@
 
   <main class="container">
 
-    <!-- KPIs -->
     <section class="kpis">
       <div class="kpi">
         <div class="kpi-label">Total de leads</div>
@@ -41,7 +43,6 @@
       </div>
     </section>
 
-    <!-- Upload -->
     <section class="card">
       <div class="card-header">
         <h2>Importar planilha</h2>
@@ -66,7 +67,6 @@
       </div>
     </section>
 
-    <!-- Filtros -->
     <section class="card">
       <div class="card-header">
         <h2>Filtros</h2>
@@ -81,15 +81,13 @@
         </div>
 
         <div class="field">
-          <label>Curso</label>
-          <input id="fCurso" list="dlCurso" placeholder="Ex: Administração" />
-          <datalist id="dlCurso"></datalist>
+          <label>Cursos</label>
+          <select id="fCurso" multiple placeholder="Selecione os cursos..."></select>
         </div>
 
         <div class="field">
-          <label>Polo</label>
-          <input id="fPolo" list="dlPolo" placeholder="Ex: Tatuapé" />
-          <datalist id="dlPolo"></datalist>
+          <label>Polos</label>
+          <select id="fPolo" multiple placeholder="Selecione os polos..."></select>
         </div>
 
         <div class="field">
@@ -120,7 +118,6 @@
       </div>
     </section>
 
-    <!-- Resultados -->
     <section class="card">
       <div class="card-header">
         <h2>Resultados</h2>
@@ -152,9 +149,10 @@
       <span>© Painel Leads Lite</span>
       <span class="muted">Dados do BigQuery • Upload em staging</span>
     </footer>
-
   </main>
 
+  <script src="https://cdn.jsdelivr.net/npm/tom-select@2.2.2/dist/js/tom-select.complete.min.js"></script>
+  
   <script src="{{ url_for('static', filename='js/app.js') }}"></script>
 </body>
 </html>
