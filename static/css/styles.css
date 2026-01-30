@@ -1,172 +1,103 @@
-/* Minimal premium UI - Revisado com suporte a TomSelect (Multiselect) */
-:root {
-  --bg: #0b1020;
-  --card: rgba(17, 26, 51, 0.65);
-  --muted: #7f8bb3;
-  --text: #e8ecff;
-  --border: rgba(255, 255, 255, 0.08);
-  --accent: #6ea8ff;
-  --accent2: #86ffd6;
-  --danger: #ff6e6e;
-  --transition: all 0.2s ease;
+/* ============================================================
+   TomSelect Customização Dark & Checkbox Visual
+   ============================================================ */
+
+/* Container principal do input */
+.ts-control {
+  display: flex !important;
+  align-items: center !important;
+  min-height: 44px;
 }
 
-* { box-sizing: border-box; }
-
-body {
-  margin: 0;
-  font-family: ui-sans-serif, system-ui, -apple-system, sans-serif;
-  background: 
-    radial-gradient(1200px 600px at 20% -10%, rgba(110, 168, 255, 0.18), transparent 60%),
-    radial-gradient(900px 500px at 90% 10%, rgba(134, 255, 214, 0.1), transparent 55%),
-    var(--bg);
-  color: var(--text);
-  min-height: 100vh;
-}
-
-/* Scrollbar Customizada */
-::-webkit-scrollbar { width: 8px; height: 8px; }
-::-webkit-scrollbar-track { background: transparent; }
-::-webkit-scrollbar-thumb { background: var(--border); border-radius: 10px; }
-::-webkit-scrollbar-thumb:hover { background: var(--muted); }
-
-.topbar {
-  position: sticky; top: 0; z-index: 100;
-  display: flex; align-items: center; justify-content: space-between;
-  padding: 14px 18px;
-  border-bottom: 1px solid var(--border);
-  background: rgba(11, 16, 32, 0.75);
-  backdrop-filter: blur(12px);
-  -webkit-backdrop-filter: blur(12px);
-}
-
-.logo {
-  width: 40px; height: 40px; border-radius: 12px;
-  display: grid; place-items: center;
-  background: linear-gradient(135deg, rgba(110, 168, 255, 0.3), rgba(134, 255, 214, 0.15));
-  border: 1px solid var(--border);
-  font-weight: 800;
-}
-
-.container { max-width: 1300px; margin: 0 auto; padding: 20px; }
-
-/* KPIs Grid */
-.kpis {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
-  gap: 16px;
-  margin-bottom: 20px;
-}
-
-.kpi {
-  background: var(--card);
-  border: 1px solid var(--border);
-  border-radius: 20px;
-  padding: 20px;
-  transition: var(--transition);
-}
-.kpi:hover { border-color: rgba(110, 168, 255, 0.3); }
-.kpi-value { font-size: 26px; font-weight: 900; margin-top: 8px; color: var(--accent); }
-
-/* Cards & Forms */
-.card {
-  background: var(--card);
-  border: 1px solid var(--border);
-  border-radius: 22px;
-  padding: 20px;
-  margin-bottom: 16px;
-}
-
-.filters {
-  display: grid;
-  grid-template-columns: repeat(6, 1fr);
-  gap: 12px;
-  margin-top: 16px;
-}
-
-.field label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 8px; }
-
-.field input, .ts-control {
-  width: 100%;
-  padding: 12px !important;
-  border-radius: 12px !important;
-  border: 1px solid var(--border) !important;
-  background: rgba(0, 0, 0, 0.3) !important;
-  color: var(--text) !important;
-  font-size: 14px !important;
-  transition: var(--transition);
-}
-
-.field input:focus, .ts-control.focus { border-color: var(--accent) !important; outline: none; background: rgba(0, 0, 0, 0.4) !important; }
-
-/* TomSelect Customização Dark */
+/* Tags de itens selecionados (pílulas) */
 .ts-wrapper.multi .ts-control > div {
   background: var(--accent) !important;
   color: #0b1020 !important;
   border-radius: 6px !important;
-  font-weight: 600;
+  font-weight: 700;
+  margin: 2px 4px 2px 0 !important;
+  padding: 2px 8px !important;
+  display: flex;
+  align-items: center;
 }
+
+/* Botão de remover (X) na pílula */
+.ts-wrapper.multi .ts-control > div .remove {
+  border-left-color: rgba(11, 16, 32, 0.2) !important;
+  margin-left: 5px !important;
+}
+
+/* Menu Dropdown */
 .ts-dropdown {
   background: #111a33 !important;
   color: var(--text) !important;
   border: 1px solid var(--border) !important;
-  border-radius: 12px !important;
-  box-shadow: 0 10px 30px rgba(0,0,0,0.5) !important;
+  border-radius: 14px !important;
+  box-shadow: 0 15px 40px rgba(0,0,0,0.6) !important;
+  margin-top: 8px !important;
+  z-index: 1000 !important;
 }
-.ts-dropdown .option.active { background: rgba(110, 168, 255, 0.2) !important; }
-.ts-dropdown .option { padding: 10px 12px !important; }
 
-/* Buttons */
-.btn {
-  padding: 10px 18px;
-  border-radius: 12px;
-  border: 1px solid var(--border);
-  background: rgba(255, 255, 255, 0.05);
-  color: var(--text);
-  cursor: pointer;
-  font-weight: 600;
-  font-size: 14px;
+/* Opções dentro do menu */
+.ts-dropdown .option {
+  padding: 12px 16px !important;
+  display: flex !important;
+  align-items: center !important;
   transition: var(--transition);
-  display: inline-flex; align-items: center; justify-content: center;
-}
-.btn:hover { background: rgba(255, 255, 255, 0.1); transform: translateY(-1px); }
-.btn-primary {
-  background: linear-gradient(135deg, rgba(110,168,255,0.4), rgba(110,168,255,0.2));
-  border-color: rgba(110,168,255,0.4);
 }
 
-/* Table Estilizada */
-.table-wrap {
-  overflow-x: auto;
-  border-radius: 16px;
-  border: 1px solid var(--border);
+.ts-dropdown .option.active {
+  background: rgba(110, 168, 255, 0.15) !important;
+  color: #fff !important;
 }
-table { width: 100%; border-collapse: collapse; min-width: 1000px; }
-thead th {
-  background: rgba(11, 16, 32, 0.8);
-  padding: 14px;
-  font-size: 11px;
-  text-transform: uppercase;
-  color: var(--muted);
-  border-bottom: 1px solid var(--border);
-  text-align: left;
-}
-tbody td {
-  padding: 14px;
-  font-size: 13px;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.03);
-  white-space: nowrap;
-}
-tbody tr:hover { background: rgba(110, 168, 255, 0.04); }
 
-/* Responsividade */
-@media (max-width: 1100px) {
-  .filters { grid-template-columns: repeat(3, 1fr); }
-  .field-actions { grid-column: span 3; }
+/* --- O CHECKBOX VISUAL --- */
+
+/* O quadradinho */
+.ts-dropdown .option .checkbox {
+  width: 18px;
+  height: 18px;
+  border: 2px solid var(--border);
+  border-radius: 5px;
+  margin-right: 12px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.2s ease;
+  flex-shrink: 0;
+  background: rgba(0,0,0,0.2);
 }
-@media (max-width: 768px) {
-  .filters { grid-template-columns: repeat(2, 1fr); }
-  .field-actions { grid-column: span 2; }
-  .kpis { grid-template-columns: 1fr; }
-  .topbar { flex-direction: column; gap: 15px; text-align: center; }
+
+/* Estado selecionado */
+.ts-dropdown .selected .checkbox {
+  background: var(--accent) !important;
+  border-color: var(--accent) !important;
+}
+
+/* O ícone de "V" (check) */
+.ts-dropdown .selected .checkbox::after {
+  content: "";
+  width: 5px;
+  height: 9px;
+  border: solid #0b1020;
+  border-width: 0 2.5px 2.5px 0;
+  transform: rotate(45deg);
+  margin-top: -2px;
+}
+
+/* Esconder checkbox real se houver */
+.ts-dropdown input[type="checkbox"] {
+  display: none;
+}
+
+/* Ajuste para não quebrar o layout em telas menores */
+.field-wide {
+  grid-column: span 1;
+}
+
+.field-actions {
+  grid-column: span 6;
+  display: flex;
+  align-items: flex-end;
+  gap: 10px;
 }
