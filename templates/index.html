@@ -3,10 +3,9 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>Painel Leads Lite</title>
+  <title>Painel Leads Lite | Modelo Estrela V14</title>
   
   <link href="https://cdn.jsdelivr.net/npm/tom-select@2.2.2/dist/css/tom-select.css" rel="stylesheet">
-  
   <link rel="stylesheet" href="{{ url_for('static', filename='css/styles.css') }}">
 </head>
 
@@ -16,12 +15,12 @@
       <div class="logo">PL</div>
       <div>
         <div class="title">Painel Leads Lite</div>
-        <div class="subtitle">Leve • Intuitivo • BigQuery First</div>
+        <div class="subtitle">Gestão Consolidada • BigQuery V14</div>
       </div>
     </div>
 
     <div class="actions">
-      <button id="btnReload" class="btn">Recarregar</button>
+      <button id="btnReload" class="btn">Recarregar Dados</button>
       <button id="btnExport" class="btn btn-ghost">Exportar CSV</button>
     </div>
   </header>
@@ -30,38 +29,38 @@
 
     <section class="kpis">
       <div class="kpi">
-        <div class="kpi-label">Total de leads</div>
+        <div class="kpi-label">Total de Leads</div>
         <div class="kpi-value" id="kpiCount">—</div>
       </div>
       <div class="kpi">
-        <div class="kpi-label">Status predominante</div>
+        <div class="kpi-label">Status Predominante</div>
         <div class="kpi-value" id="kpiTopStatus">—</div>
       </div>
       <div class="kpi">
-        <div class="kpi-label">Última inscrição</div>
-        <div class="kpi-value" id="kpiLastDate">—</div>
+        <div class="kpi-label">Base de Dados</div>
+        <div class="kpi-value" style="font-size: 1.2rem;">BigQuery Pro</div>
       </div>
     </section>
 
     <section class="card">
       <div class="card-header">
-        <h2>Importar planilha</h2>
-        <p>Envie CSV ou XLSX. O arquivo será carregado no BigQuery (staging).</p>
+        <h2>Importar Planilha Oficial</h2>
+        <p>O arquivo será processado pela <strong>Procedure V14</strong> e distribuído para as dimensões.</p>
       </div>
 
       <div class="filters" style="grid-template-columns: repeat(6, minmax(0,1fr));">
         <div class="field" style="grid-column: span 4;">
-          <label>Arquivo (CSV/XLSX)</label>
+          <label>Arquivo (CSV ou XLSX)</label>
           <input id="uploadFile" type="file" accept=".csv,.xlsx,.xls" />
         </div>
 
         <div class="field" style="grid-column: span 2;">
-          <label>Origem do upload (opcional)</label>
-          <input id="uploadSource" placeholder="Ex: CAPTACAO_JANEIRO" />
+          <label>Tag de Lote (Opcional)</label>
+          <input id="uploadSource" placeholder="Ex: Lote_Fevereiro" />
         </div>
 
         <div class="field field-actions" style="grid-column: span 6;">
-          <button id="btnUpload" class="btn btn-primary">Importar</button>
+          <button id="btnUpload" class="btn btn-primary">Processar no BigQuery</button>
           <span id="uploadStatus" class="muted"></span>
         </div>
       </div>
@@ -69,59 +68,53 @@
 
     <section class="card">
       <div class="card-header">
-        <h2>Filtros</h2>
-        <p>Refine os dados diretamente no BigQuery.</p>
+        <h2>Filtros Dinâmicos</h2>
+        <p>Busca em tempo real nas tabelas de dimensão.</p>
       </div>
 
       <div class="filters">
         <div class="field">
           <label>Status</label>
-          <input id="fStatus" list="dlStatus" placeholder="Ex: NOVO" />
+          <input id="fStatus" list="dlStatus" placeholder="Filtrar status..." />
           <datalist id="dlStatus"></datalist>
         </div>
 
         <div class="field">
-          <label>Cursos</label>
-          <select id="fCurso" multiple placeholder="Selecione os cursos..."></select>
+          <label>Cursos (Multi)</label>
+          <select id="fCurso" multiple placeholder="Todos os cursos..."></select>
         </div>
 
         <div class="field">
-          <label>Polos</label>
-          <select id="fPolo" multiple placeholder="Selecione os polos..."></select>
+          <label>Polos (Multi)</label>
+          <select id="fPolo" multiple placeholder="Todos os polos..."></select>
         </div>
 
         <div class="field">
-          <label>Origem</label>
-          <input id="fOrigem" list="dlOrigem" placeholder="Ex: Meta Ads" />
-          <datalist id="dlOrigem"></datalist>
-        </div>
-
-        <div class="field">
-          <label>Data inicial</label>
+          <label>Data Inicial</label>
           <input id="fIni" type="date" />
         </div>
 
         <div class="field">
-          <label>Data final</label>
+          <label>Data Final</label>
           <input id="fFim" type="date" />
         </div>
 
-        <div class="field field-wide">
+        <div class="field">
           <label>Limite</label>
           <input id="fLimit" type="number" min="50" step="50" value="500" />
         </div>
 
-        <div class="field field-actions">
-          <button id="btnApply" class="btn btn-primary">Aplicar filtros</button>
-          <button id="btnClear" class="btn btn-ghost">Limpar</button>
+        <div class="field field-actions" style="grid-column: span 2;">
+          <button id="btnApply" class="btn btn-primary">Aplicar Filtros</button>
+          <button id="btnClear" class="btn btn-ghost">Limpar Tudo</button>
         </div>
       </div>
     </section>
 
     <section class="card">
       <div class="card-header">
-        <h2>Resultados</h2>
-        <p id="statusLine">—</p>
+        <h2>Leads Consolidados</h2>
+        <p id="statusLine">Aguardando consulta...</p>
       </div>
 
       <div class="table-wrap">
@@ -129,30 +122,30 @@
           <thead>
             <tr>
               <th>Data</th>
-              <th>Nome</th>
+              <th>Candidato</th>
               <th>CPF</th>
               <th>Celular</th>
-              <th>Email</th>
-              <th>Origem</th>
+              <th>Canal</th>
               <th>Polo</th>
               <th>Curso</th>
               <th>Status</th>
-              <th>Consultor</th>
+              <th>Responsável</th>
+              <th>Matriculado?</th>
             </tr>
           </thead>
-          <tbody></tbody>
+          <tbody>
+            </tbody>
         </table>
       </div>
     </section>
 
     <footer class="footer">
-      <span>© Painel Leads Lite</span>
-      <span class="muted">Dados do BigQuery • Upload em staging</span>
+      <span>© Painel Leads Lite - Engenharia de Dados</span>
+      <span class="muted">Infra: BigQuery + Modelo Estrela (Star Schema)</span>
     </footer>
   </main>
 
   <script src="https://cdn.jsdelivr.net/npm/tom-select@2.2.2/dist/js/tom-select.complete.min.js"></script>
-  
   <script src="{{ url_for('static', filename='js/app.js') }}"></script>
 </body>
 </html>
