@@ -19,8 +19,11 @@ function escapeHtml(str) {
 
 function fmtDate(d) {
     if (!d || d === "None") return "-";
-    const s = String(d);
-    return /^\d{4}-\d{2}-\d{2}/.test(s) ? s.slice(0, 10) : s.slice(0, 10);
+    // Tenta formatar ISO para DD/MM/YYYY ou apenas corta a data
+    try {
+        const s = String(d);
+        return s.slice(0, 10).split('-').reverse().join('/');
+    } catch (e) { return String(d); }
 }
 
 /* API */
@@ -28,6 +31,7 @@ async function apiGet(path, params = {}) {
     const url = new URL(path, window.location.origin);
     Object.entries(params).forEach(([k, v]) => {
         if (!v || (Array.isArray(v) && v.length === 0)) return;
+        // Envia listas separadas por || para o backend tratar
         url.searchParams.set(k, Array.isArray(v) ? v.join(" || ") : v);
     });
     const res = await fetch(url.toString(), { cache: "no-store" });
@@ -39,7 +43,7 @@ async function apiGet(path, params = {}) {
 /* Inicialização TomSelect */
 function initMultiSelects() {
     const config = {
-        plugins: ['remove_button', 'checkbox_options'],
+        plugins: ['remove_button'],
         maxItems: null,
         valueField: 'value',
         labelField: 'text',
@@ -52,73 +56,85 @@ function initMultiSelects() {
         onChange: () => loadLeadsAndKpisDebounced()
     };
 
-    tsCurso = new TomSelect("#fCurso", config);
-    tsPolo = new TomSelect("#fPolo", config);
+    // Inicializa selects inteligentes para Curso e Polo
+    if ($("#fCurso")) tsCurso = new TomSelect("#fCurso", config);
+    if ($("#fPolo")) tsPolo = new TomSelect("#fPolo", config);
 }
 
 async function loadOptions() {
     try {
         const data = await apiGet("/api/options");
-        if (tsCurso) {
+        
+        if (tsCurso && data.curso) {
             tsCurso.clearOptions();
             data.curso.forEach(c => tsCurso.addOption({ value: c, text: c }));
         }
-        if (tsPolo) {
+        if (tsPolo && data.polo) {
             tsPolo.clearOptions();
             data.polo.forEach(p => tsPolo.addOption({ value: p, text: p }));
         }
-        // Preencher datalists simples
-        const fillDL = (id, vals) => {
-            const el = document.getElementById(id);
-            if (el) el.innerHTML = vals.map(v => `<option value="${v}">`).join("");
-        };
-        fillDL("dlStatus", data.status);
-        fillDL("dlOrigem", data.origem);
-    } catch (e) { console.error(e); }
+
+        // Datalist simples para Status
+        const dlStatus = $("#dlStatus");
+        if (dlStatus && data.status) {
+            dlStatus.innerHTML = data.status.map(v => `<option value="${v}">`).join("");
+        }
+    } catch (e) { console.error("Erro ao carregar opções:", e); }
 }
 
 async function loadLeadsAndKpis() {
-    showToast("A consultar BigQuery...", "ok");
+    showToast("Consultando BigQuery...", "ok");
+    
     const params = {
         status: $("#fStatus")?.value,
         curso: tsCurso?.getValue(),
         polo: tsPolo?.getValue(),
-        origem: $("#fOrigem")?.value,
         data_ini: $("#fIni")?.value,
         data_fim: $("#fFim")?.value,
-        limit: $("#fLimit")?.value
+        limit: $("#fLimit")?.value || 500
     };
 
     try {
+        // Busca Leads e KPIs simultaneamente
         const [leads, kpis] = await Promise.all([
             apiGet("/api/leads", params),
             apiGet("/api/kpis", params)
         ]);
+
         renderTable(leads);
         renderKpis(kpis);
-        showToast(`${leads.length} registos encontrados.`, "ok");
-    } catch (e) { showToast(e.message, "err"); }
+        showToast(`${leads.length} registros encontrados.`, "ok");
+    } catch (e) { 
+        showToast(e.message, "err"); 
+        console.error(e);
+    }
 }
 
 const loadLeadsAndKpisDebounced = (() => {
-    let t; return () => { clearTimeout(t); t = setTimeout(loadLeadsAndKpis, 400); };
+    let t; return () => { clearTimeout(t); t = setTimeout(loadLeadsAndKpis, 500); };
 })();
 
 function renderTable(rows) {
     const tbody = $("#tbl tbody");
     if (!tbody) return;
+
+    if (rows.length === 0) {
+        tbody.innerHTML = `<tr><td colspan="10" style="text-align:center">Nenhum dado encontrado</td></tr>`;
+        return;
+    }
+
     tbody.innerHTML = rows.map(r => `
         <tr>
-            <td>${escapeHtml(fmtDate(r.data_inscricao))}</td>
+            <td>${escapeHtml(fmtDate(r.data))}</td>
             <td>${escapeHtml(r.nome)}</td>
             <td>${escapeHtml(r.cpf)}</td>
             <td>${escapeHtml(r.celular)}</td>
-            <td>${escapeHtml(r.email)}</td>
-            <td>${escapeHtml(r.origem)}</td>
-            <td>${escapeHtml(r.polo)}</td>
-            <td>${escapeHtml(r.curso)}</td>
-            <td>${escapeHtml(r.status)}</td>
-            <td>${escapeHtml(r.consultor)}</td>
+            <td>${escapeHtml(r.canal || '-')}</td>
+            <td>${escapeHtml(r.polo || '-')}</td>
+            <td>${escapeHtml(r.curso || '-')}</td>
+            <td><span class="badge">${escapeHtml(r.status || 'Lead')}</span></td>
+            <td>${escapeHtml(r.consultor || '-')}</td>
+            <td>${r.matriculado ? '✅' : '❌'}</td>
         </tr>`).join("");
 }
 
@@ -127,12 +143,22 @@ function renderKpis(k) {
     if ($("#kpiTopStatus")) $("#kpiTopStatus").textContent = k?.top_status ? `${k.top_status.status} (${k.top_status.cnt})` : "-";
 }
 
+/* Eventos */
 document.addEventListener("DOMContentLoaded", async () => {
     initMultiSelects();
+    
     $("#btnApply")?.addEventListener("click", loadLeadsAndKpis);
+    $("#btnReload")?.addEventListener("click", loadLeadsAndKpis);
+    
     $("#btnClear")?.addEventListener("click", () => {
-        window.location.reload(); // Forma mais segura de limpar tudo
+        if(tsCurso) tsCurso.clear();
+        if(tsPolo) tsPolo.clear();
+        $("#fStatus").value = "";
+        $("#fIni").value = "";
+        $("#fFim").value = "";
+        loadLeadsAndKpis();
     });
+
     await loadOptions();
     await loadLeadsAndKpis();
 });
