@@ -13,7 +13,7 @@ from services.bigquery import (
     query_leads,
     query_leads_count,
     query_options,
-    process_upload_dataframe,
+    process_upload_dataframe_batched,
     process_upload_csv_stream
 )
 
@@ -194,9 +194,13 @@ def create_app() -> Flask:
                         }
                     ), 500
 
-                # XLSX ainda é processado em lote único; CSV já usa streaming/lotes.
-                process_upload_dataframe(df)
-                return jsonify({"ok": True, "message": "Processado com sucesso! (staging + procedure V14)"}), 200
+                total_rows = process_upload_dataframe_batched(df)
+                return jsonify(
+                    {
+                        "ok": True,
+                        "message": f"Processado com sucesso! (staging + procedure V14) - {total_rows} linhas em lotes.",
+                    }
+                ), 200
             else:
                 return jsonify({"ok": False, "error": "Formato inválido. Envie CSV ou XLSX."}), 400
         except Exception as e:

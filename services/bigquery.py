@@ -44,6 +44,7 @@ MAX_LIMIT = int(os.getenv("BQ_MAX_LIMIT", "2000"))
 EXPORT_MAX_ROWS = int(os.getenv("BQ_EXPORT_MAX_ROWS", "50000"))  # trava de segurança
 EXPORT_PAGE_SIZE = int(os.getenv("BQ_EXPORT_PAGE_SIZE", "5000"))
 CSV_UPLOAD_CHUNK_SIZE = int(os.getenv("CSV_UPLOAD_CHUNK_SIZE", "5000"))
+DATAFRAME_UPLOAD_BATCH_SIZE = int(os.getenv("DATAFRAME_UPLOAD_BATCH_SIZE", "5000"))
 
 EXPECTED_STAGING_COLUMNS = [
     "status_inscricao",
@@ -222,6 +223,15 @@ def load_to_staging_in_batches(frames: Iterable[pd.DataFrame]) -> int:
     return total_rows
 
 
+def iter_dataframe_batches(df: pd.DataFrame, batch_size: int = DATAFRAME_UPLOAD_BATCH_SIZE) -> Iterable[pd.DataFrame]:
+    """Divide DataFrame em lotes para reduzir memória durante carga."""
+    batch_size = max(1000, int(batch_size or DATAFRAME_UPLOAD_BATCH_SIZE))
+    total = len(df)
+    for start in range(0, total, batch_size):
+        end = start + batch_size
+        yield df.iloc[start:end].copy()
+
+
 def process_upload_csv_stream(file_obj, chunksize: int = CSV_UPLOAD_CHUNK_SIZE) -> int:
     """
     Processa CSV em streaming/lotes e retorna quantidade de linhas carregadas.
@@ -229,6 +239,13 @@ def process_upload_csv_stream(file_obj, chunksize: int = CSV_UPLOAD_CHUNK_SIZE) 
     chunksize = max(1000, int(chunksize or CSV_UPLOAD_CHUNK_SIZE))
     chunks = pd.read_csv(file_obj, chunksize=chunksize)
     total_rows = load_to_staging_in_batches(chunks)
+    run_procedure()
+    return total_rows
+
+
+def process_upload_dataframe_batched(df: pd.DataFrame, batch_size: int = DATAFRAME_UPLOAD_BATCH_SIZE) -> int:
+    """Processa DataFrame em lotes e retorna quantidade total de linhas carregadas."""
+    total_rows = load_to_staging_in_batches(iter_dataframe_batches(df, batch_size=batch_size))
     run_procedure()
     return total_rows
 
@@ -494,6 +511,5 @@ def export_leads_rows(
 # 6) PIPELINE UPLOAD
 # =========================
 def process_upload_dataframe(df) -> None:
-    normalized_df = normalize_upload_dataframe(df)
-    load_to_staging(normalized_df, write_disposition=bigquery.WriteDisposition.WRITE_TRUNCATE)
-    run_procedure()
+    """Mantido por compatibilidade; usa caminho batched para evitar estouro."""
+    process_upload_dataframe_batched(df)
