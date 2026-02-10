@@ -3,7 +3,7 @@
 # V14 — Staging (WRITE_TRUNCATE) -> CALL SP -> Query f_lead + LEFT JOIN dims
 # + query_options() direto nas dimensões
 # + FILTROS MULTI (IN UNNEST) para: status/curso/polo/consultor
-# + EXPORT CSV (server-side)
+# + EXPORT ROWS (server-side) para endpoint /api/export
 # =========================
 
 import os
@@ -34,6 +34,7 @@ _bq_client: Optional[bigquery.Client] = None
 
 
 def get_bq_client() -> bigquery.Client:
+    """Client singleton (bom pra Cloud Run)."""
     global _bq_client
     if _bq_client is None:
         _bq_client = bigquery.Client(project=GCP_PROJECT_ID, location=BQ_LOCATION)
@@ -41,10 +42,19 @@ def get_bq_client() -> bigquery.Client:
 
 
 def _tbl(table_name: str) -> str:
+    """Fully qualified table name com crases."""
     return f"`{GCP_PROJECT_ID}.{BQ_DATASET}.{table_name}`"
 
 
 def _as_list(v: Any) -> List[str]:
+    """
+    Aceita:
+      - lista/tupla
+      - string "A || B || C"
+      - string "A,B,C"
+      - string única
+    Retorna lista de strings não vazias.
+    """
     if v is None:
         return []
     if isinstance(v, (list, tuple)):
@@ -65,6 +75,9 @@ def _as_list(v: Any) -> List[str]:
 # 1) LOAD -> STAGING (WRITE_TRUNCATE)
 # =========================
 def load_to_staging(df) -> None:
+    """
+    Carrega DataFrame para a staging (limpa a cada upload).
+    """
     client = get_bq_client()
     table_id = f"{GCP_PROJECT_ID}.{BQ_DATASET}.{BQ_STAGING_TABLE}"
 
@@ -79,6 +92,9 @@ def load_to_staging(df) -> None:
 # 2) CALL STORED PROCEDURE (V14)
 # =========================
 def run_procedure() -> None:
+    """
+    Dispara a procedure V14.
+    """
     client = get_bq_client()
     sql = f"CALL `{GCP_PROJECT_ID}.{BQ_DATASET}.{BQ_PROCEDURE}`();"
     client.query(sql).result()
@@ -100,7 +116,11 @@ def _base_select_sql() -> str:
 
 
 def _apply_filters(sql: str, filters: Dict[str, Any], params: List[bigquery.QueryParameter]) -> str:
-    # MULTI
+    """
+    Aplica filtros no SQL + adiciona QueryParameters.
+    Multi-select: status/curso/polo/consultor via IN UNNEST(@array)
+    """
+    # MULTI (arrays)
     cursos = _as_list(filters.get("curso"))
     polos = _as_list(filters.get("polo"))
     status_list = _as_list(filters.get("status"))
@@ -109,12 +129,15 @@ def _apply_filters(sql: str, filters: Dict[str, Any], params: List[bigquery.Quer
     if cursos:
         sql += " AND dc.curso IN UNNEST(@cursos)"
         params.append(bigquery.ArrayQueryParameter("cursos", "STRING", cursos))
+
     if polos:
         sql += " AND dp.polo IN UNNEST(@polos)"
         params.append(bigquery.ArrayQueryParameter("polos", "STRING", polos))
+
     if status_list:
         sql += " AND ds.status IN UNNEST(@status_list)"
         params.append(bigquery.ArrayQueryParameter("status_list", "STRING", status_list))
+
     if consultores:
         sql += " AND dco.consultor IN UNNEST(@consultores)"
         params.append(bigquery.ArrayQueryParameter("consultores", "STRING", consultores))
@@ -136,10 +159,11 @@ def _apply_filters(sql: str, filters: Dict[str, Any], params: List[bigquery.Quer
         sql += " AND LOWER(dpe.nome) LIKE LOWER(@nome_like)"
         params.append(bigquery.ScalarQueryParameter("nome_like", "STRING", f"%{str(filters['nome']).strip()}%"))
 
-    # DATE RANGE
+    # DATE RANGE (data_inscricao_dt)
     if filters.get("data_ini"):
         sql += " AND f.data_inscricao_dt >= @data_ini"
         params.append(bigquery.ScalarQueryParameter("data_ini", "DATE", filters["data_ini"]))
+
     if filters.get("data_fim"):
         sql += " AND f.data_inscricao_dt <= @data_fim"
         params.append(bigquery.ScalarQueryParameter("data_fim", "DATE", filters["data_fim"]))
@@ -157,6 +181,9 @@ def query_leads(
     order_by: str = "data_inscricao_dt",
     order_dir: str = "DESC",
 ) -> List[Dict[str, Any]]:
+    """
+    Retorna leads com NOMES (via LEFT JOIN dims).
+    """
     client = get_bq_client()
     filters = filters or {}
 
@@ -182,10 +209,12 @@ def query_leads(
       dpe.cpf             AS cpf,
       dpe.celular         AS celular,
       dpe.email           AS email,
+
       dc.curso            AS curso,
       dp.polo             AS polo,
       dco.consultor       AS consultor,
       ds.status           AS status,
+
       f.data_inscricao_dt AS data_inscricao_dt,
       f.modalidade        AS modalidade,
       f.campanha          AS campanha,
@@ -213,6 +242,9 @@ def query_leads(
 
 
 def query_leads_count(filters: Optional[Dict[str, Any]] = None) -> int:
+    """
+    Retorna total de registros para paginação (mesmos filtros do query_leads).
+    """
     client = get_bq_client()
     filters = filters or {}
 
@@ -226,7 +258,7 @@ def query_leads_count(filters: Optional[Dict[str, Any]] = None) -> int:
 
 
 # =========================
-# 4) OPTIONS
+# 4) OPTIONS (DIMs direto)
 # =========================
 def _distinct_dim_values(table: str, col: str, alias: str) -> List[str]:
     client = get_bq_client()
@@ -241,6 +273,9 @@ def _distinct_dim_values(table: str, col: str, alias: str) -> List[str]:
 
 
 def query_options() -> Dict[str, List[str]]:
+    """
+    Opções para filtros diretamente das dimensões.
+    """
     return {
         "status": _distinct_dim_values("dim_status", "status", "status"),
         "cursos": _distinct_dim_values("dim_curso", "curso", "curso"),
@@ -250,7 +285,7 @@ def query_options() -> Dict[str, List[str]]:
 
 
 # =========================
-# 5) EXPORT CSV (server-side)
+# 5) EXPORT (server-side)
 # =========================
 EXPORT_COLUMNS = [
     ("data_inscricao_dt", "Data Inscrição"),
@@ -275,19 +310,19 @@ EXPORT_COLUMNS = [
 ]
 
 
-def export_leads_rows(filters: Optional[Dict[str, Any]] = None, max_rows: int = EXPORT_MAX_ROWS) -> Iterable[Dict[str, Any]]:
+def export_leads_rows(
+    filters: Optional[Dict[str, Any]] = None,
+    max_rows: int = EXPORT_MAX_ROWS
+) -> Iterable[Dict[str, Any]]:
     """
     Itera linhas para export com mesma lógica de filtros.
-    Tem trava de segurança max_rows pra não estourar memória/custo.
+    Trava max_rows pra não estourar custo/memória.
     """
     client = get_bq_client()
     filters = filters or {}
 
     max_rows = max(1, min(int(max_rows), EXPORT_MAX_ROWS))
 
-    select_list = ",\n      ".join([f"{'f.' if c in ('origem','campanha','modalidade','tipo_negocio','peca_disparo','texto_disparo','tipo_disparo','obs','data_inscricao_dt','data_envio_dt','data_disparo_dt') else ''}{''}" for c, _ in []])  # dummy
-
-    # Monta SELECT explicitamente (evita SELECT *)
     sql = """
     SELECT
       f.data_inscricao_dt AS data_inscricao_dt,
@@ -314,7 +349,6 @@ def export_leads_rows(filters: Optional[Dict[str, Any]] = None, max_rows: int = 
     params: List[bigquery.QueryParameter] = []
     sql = _apply_filters(sql, filters, params)
 
-    # ordenação fixa pro export (estável)
     sql += " ORDER BY f.data_inscricao_dt DESC LIMIT @max_rows"
     params.append(bigquery.ScalarQueryParameter("max_rows", "INT64", max_rows))
 
@@ -325,6 +359,14 @@ def export_leads_rows(filters: Optional[Dict[str, Any]] = None, max_rows: int = 
         yield dict(r.items())
 
 
+# =========================
+# HELPER: upload end-to-end
+# =========================
 def process_upload_dataframe(df) -> None:
+    """
+    Pipeline completo do V14:
+      1) load_to_staging(df) com TRUNCATE
+      2) run_procedure() para consolidar em dims + fato
+    """
     load_to_staging(df)
     run_procedure()
