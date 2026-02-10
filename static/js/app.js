@@ -424,7 +424,7 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   $("#btnUpload")?.addEventListener("click", doUpload);
 
-  $("#btnExport")?.addEventListener("click", exportCsvFromTable);
+  $("#btnExport")?.addEventListener("click", (e) => { e.preventDefault(); exportCsvFromTable(); });
 
   // carregamento inicial
   await loadOptions();

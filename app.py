@@ -113,7 +113,7 @@ def create_app() -> Flask:
     app = Flask(__name__)
     app.config["MAX_CONTENT_LENGTH"] = 30 * 1024 * 1024  # Limite de 30MB para uploads
 
-    asset_version = _env("ASSET_VERSION", "20260210-visual8")
+    asset_version = _env("ASSET_VERSION", "20260210-visual9")
     ui_version = _env("UI_VERSION", f"v{asset_version}")
 
 
@@ -209,8 +209,10 @@ def create_app() -> Flask:
             return jsonify(_error_payload(e, "Erro ao carregar opções dos filtros.")), 500
 
     @app.get("/api/export/variaveis")
+    @app.get("/api/export")
     def api_export_variaveis():
         try:
+            logger.info("Iniciando exportação de variáveis da staging")
             def _iter_csv_lines():
                 sio = io.StringIO()
                 writer = csv.writer(sio, delimiter=';', quoting=csv.QUOTE_ALL)
