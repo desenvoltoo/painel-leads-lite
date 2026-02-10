@@ -63,6 +63,7 @@ jobs:
               'class="table-feedback"',
               'status-line',
               'ts-opt-check',
+              'fModalidade',
           ]
 
           missing_css = [n for n in css_needles if n not in css]

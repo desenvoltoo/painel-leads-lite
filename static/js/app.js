@@ -129,6 +129,28 @@ function makeTomSelect(selector) {
   });
 }
 
+function ensureModalidadeField() {
+  if (document.querySelector('#fModalidade')) return;
+
+  const filtersCard = document.querySelector('.card .filters.filters-6');
+  if (!filtersCard) return;
+
+  const field = document.createElement('div');
+  field.className = 'field col-2';
+  field.innerHTML = `
+    <label>Modalidade (Multi)</label>
+    <select id="fModalidade" multiple placeholder="Todas as modalidades..."></select>
+  `;
+
+  const cursoField = document.querySelector('#fCurso')?.closest('.field');
+  if (cursoField && cursoField.parentElement === filtersCard) {
+    cursoField.insertAdjacentElement('afterend', field);
+    return;
+  }
+
+  filtersCard.prepend(field);
+}
+
 function initMultiSelects() {
   tsStatus = makeTomSelect("#fStatus");
   tsCurso = makeTomSelect("#fCurso");
@@ -394,6 +416,7 @@ function clearFilters() {
    Eventos
 ========================= */
 document.addEventListener("DOMContentLoaded", async () => {
+  ensureModalidadeField();
   initMultiSelects();
 
   $("#btnApply")?.addEventListener("click", loadLeadsAndKpis);

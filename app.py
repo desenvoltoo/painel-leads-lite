@@ -5,6 +5,7 @@ Versão: 3.0 - Modelo Estrela Consolidado V14
 """
 
 import os
+import io
 import traceback
 import pandas as pd
 from flask import Flask, render_template, request, jsonify
@@ -13,8 +14,7 @@ from services.bigquery import (
     query_leads,
     query_leads_count,
     query_options,
-    process_upload_dataframe_batched,
-    process_upload_csv_stream
+    process_upload_dataframe_batched
 )
 
 # ============================================================
@@ -69,6 +69,34 @@ def _error_payload(e: Exception, public_msg: str):
         "details": str(e),
         "trace": traceback.format_exc(limit=3)
     }
+
+def _read_csv_flexible(file_storage):
+    """Lê CSV com tolerância a encoding/separador para evitar falhas de import."""
+    raw = file_storage.read()
+    if hasattr(file_storage, "stream"):
+        file_storage.stream.seek(0)
+
+    attempts = [
+        {"sep": ",", "encoding": "utf-8"},
+        {"sep": ";", "encoding": "utf-8"},
+        {"sep": ",", "encoding": "latin1"},
+        {"sep": ";", "encoding": "latin1"},
+    ]
+
+    last_error = None
+    for cfg in attempts:
+        try:
+            df = pd.read_csv(io.BytesIO(raw), sep=cfg["sep"], encoding=cfg["encoding"])
+            if df.shape[1] == 1 and cfg["sep"] == ",":
+                # Evita falso-positivo quando arquivo na prática é separado por ';'
+                last_error = ValueError("CSV parece usar ';' como separador")
+                continue
+            return df
+        except Exception as e:
+            last_error = e
+
+    raise ValueError(f"Falha ao ler CSV. Verifique encoding/separador. Erro: {last_error}")
+
 
 # ============================================================
 # APP FACTORY
@@ -185,7 +213,9 @@ def create_app() -> Flask:
             filename = (f.filename or "").lower()
 
             if filename.endswith(".csv"):
-                total_rows = process_upload_csv_stream(f)
+                # lê CSV com fallback de encoding/separador e processa em lotes
+                csv_df = _read_csv_flexible(f)
+                total_rows = process_upload_dataframe_batched(csv_df)
                 return jsonify(
                     {
                         "ok": True,
