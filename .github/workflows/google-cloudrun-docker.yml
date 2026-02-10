@@ -1,69 +1,59 @@
-# cloudbuild.yaml
-# ======================================================
-# Build + Push + Deploy Cloud Run
-# PROMOVE AUTOMATICAMENTE O TRÁFEGO PARA A REVISÃO NOVA
-# ======================================================
+name: Deploy to Cloud Run
 
-substitutions:
-  _SERVICE_NAME: painel-leads-lite
-  _REGION: us-central1
-  _IMAGE: us-central1-docker.pkg.dev/$PROJECT_ID/cloud-run-source-deploy/painel-leads-lite/painel-leads-lite
+on:
+  push:
+    branches: ["main"]
 
-steps:
-  # ----------------------------------------------------
-  # 1) BUILD da imagem Docker
-  # ----------------------------------------------------
-  - name: 'gcr.io/cloud-builders/docker'
-    id: Build
-    args:
-      [
-        'build',
-        '-t', '${_IMAGE}:$COMMIT_SHA',
-        '.'
-      ]
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
 
-  # ----------------------------------------------------
-  # 2) PUSH da imagem para o Artifact Registry
-  # ----------------------------------------------------
-  - name: 'gcr.io/cloud-builders/docker'
-    id: Push
-    args:
-      [
-        'push',
-        '${_IMAGE}:$COMMIT_SHA'
-      ]
+    env:
+      PROJECT_ID: painel-universidade
+      REGION: us-central1
+      SERVICE: painel-leads-lite
+      AR_REPO: cloud-run-source-deploy
+      IMAGE: us-central1-docker.pkg.dev/painel-universidade/cloud-run-source-deploy/painel-leads-lite/painel-leads-lite
 
-  # ----------------------------------------------------
-  # 3) DEPLOY no Cloud Run (cria nova revisão)
-  # ----------------------------------------------------
-  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk:slim'
-    id: Deploy
-    entrypoint: gcloud
-    args:
-      [
-        'run', 'deploy', '${_SERVICE_NAME}',
-        '--image', '${_IMAGE}:$COMMIT_SHA',
-        '--region', '${_REGION}',
-        '--platform', 'managed',
-        '--allow-unauthenticated',
-        '--quiet'
-      ]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
 
-  # ----------------------------------------------------
-  # 4) PROMOVER TRÁFEGO AUTOMATICAMENTE (100%)
-  # ----------------------------------------------------
-  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk:slim'
-    id: PromoteTraffic
-    entrypoint: gcloud
-    args:
-      [
-        'run', 'services', 'update-traffic', '${_SERVICE_NAME}',
-        '--region', '${_REGION}',
-        '--to-latest'
-      ]
+      # Autenticação via Workload Identity Federation
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WIF_PROVIDER }}
+          service_account: ${{ secrets.GCP_SA_EMAIL }}
 
-images:
-  - '${_IMAGE}:$COMMIT_SHA'
+      - name: Setup gcloud
+        uses: google-github-actions/setup-gcloud@v2
+        with:
+          project_id: ${{ env.PROJECT_ID }}
 
-options:
-  logging: CLOUD_LOGGING_ONLY
+      - name: Configure Docker auth for Artifact Registry
+        run: |
+          gcloud auth configure-docker ${{ env.REGION }}-docker.pkg.dev --quiet
+
+      - name: Build & Push image
+        run: |
+          docker build -t "${{ env.IMAGE }}:${{ github.sha }}" .
+          docker push "${{ env.IMAGE }}:${{ github.sha }}"
+
+      - name: Deploy to Cloud Run
+        run: |
+          gcloud run deploy "${{ env.SERVICE }}" \
+            --image "${{ env.IMAGE }}:${{ github.sha }}" \
+            --region "${{ env.REGION }}" \
+            --platform managed \
+            --allow-unauthenticated \
+            --quiet
+
+      - name: Promote traffic to latest (100%)
+        run: |
+          gcloud run services update-traffic "${{ env.SERVICE }}" \
+            --region "${{ env.REGION }}" \
+            --to-latest
