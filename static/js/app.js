@@ -132,8 +132,9 @@ function makeTomSelect(selector) {
 function ensureModalidadeField() {
   if (document.querySelector('#fModalidade')) return;
 
-  const filtersCard = document.querySelector('.card .filters.filters-6');
-  if (!filtersCard) return;
+  const cursoField = document.querySelector('#fCurso')?.closest('.field');
+  const targetFilters = cursoField?.parentElement || document.querySelector('#fConsultor')?.closest('.filters') || document.querySelector('.filters.filters-6');
+  if (!targetFilters) return;
 
   const field = document.createElement('div');
   field.className = 'field col-2';
@@ -142,13 +143,12 @@ function ensureModalidadeField() {
     <select id="fModalidade" multiple placeholder="Todas as modalidades..."></select>
   `;
 
-  const cursoField = document.querySelector('#fCurso')?.closest('.field');
-  if (cursoField && cursoField.parentElement === filtersCard) {
+  if (cursoField && cursoField.parentElement === targetFilters) {
     cursoField.insertAdjacentElement('afterend', field);
     return;
   }
 
-  filtersCard.prepend(field);
+  targetFilters.prepend(field);
 }
 
 function initMultiSelects() {
