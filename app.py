@@ -13,7 +13,8 @@ from services.bigquery import (
     query_leads,
     query_leads_count,
     query_options,
-    process_upload_dataframe
+    process_upload_dataframe,
+    process_upload_csv_stream
 )
 
 # ============================================================
@@ -174,7 +175,13 @@ def create_app() -> Flask:
             filename = (f.filename or "").lower()
 
             if filename.endswith(".csv"):
-                df = pd.read_csv(f)
+                total_rows = process_upload_csv_stream(f)
+                return jsonify(
+                    {
+                        "ok": True,
+                        "message": f"Processado com sucesso! (staging + procedure V14) - {total_rows} linhas em lotes.",
+                    }
+                ), 200
             elif filename.endswith(".xlsx") or filename.endswith(".xls"):
                 try:
                     df = pd.read_excel(f)
@@ -186,13 +193,12 @@ def create_app() -> Flask:
                             "details": str(e),
                         }
                     ), 500
+
+                # XLSX ainda é processado em lote único; CSV já usa streaming/lotes.
+                process_upload_dataframe(df)
+                return jsonify({"ok": True, "message": "Processado com sucesso! (staging + procedure V14)"}), 200
             else:
                 return jsonify({"ok": False, "error": "Formato inválido. Envie CSV ou XLSX."}), 400
-
-            # V14: staging TRUNCATE + CALL procedure
-            process_upload_dataframe(df)
-
-            return jsonify({"ok": True, "message": "Processado com sucesso! (staging + procedure V14)"}), 200
         except Exception as e:
             return jsonify(_error_payload(e, "Falha na ingestão V14.")), 500
 

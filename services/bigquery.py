@@ -43,6 +43,7 @@ MAX_LIMIT = int(os.getenv("BQ_MAX_LIMIT", "2000"))
 # Export safety
 EXPORT_MAX_ROWS = int(os.getenv("BQ_EXPORT_MAX_ROWS", "50000"))  # trava de segurança
 EXPORT_PAGE_SIZE = int(os.getenv("BQ_EXPORT_PAGE_SIZE", "5000"))
+CSV_UPLOAD_CHUNK_SIZE = int(os.getenv("CSV_UPLOAD_CHUNK_SIZE", "5000"))
 
 EXPECTED_STAGING_COLUMNS = [
     "status_inscricao",
@@ -179,18 +180,57 @@ def normalize_upload_dataframe(df):
     return out
 
 
-def load_to_staging(df) -> None:
+def load_to_staging(df, write_disposition: str = bigquery.WriteDisposition.WRITE_TRUNCATE) -> None:
     """
-    Carrega DataFrame para a staging (limpa a cada upload).
+    Carrega DataFrame para a staging.
     """
     client = get_bq_client()
     table_id = f"{GCP_PROJECT_ID}.{BQ_DATASET}.{BQ_STAGING_TABLE}"
 
-    job_config = bigquery.LoadJobConfig(
-        write_disposition=bigquery.WriteDisposition.WRITE_TRUNCATE
-    )
+    job_config = bigquery.LoadJobConfig(write_disposition=write_disposition)
     job = client.load_table_from_dataframe(df, table_id, job_config=job_config)
     job.result()
+
+
+def load_to_staging_in_batches(frames: Iterable[pd.DataFrame]) -> int:
+    """
+    Carrega em lotes para reduzir pico de memória no upload CSV.
+    Primeiro lote faz TRUNCATE, demais fazem APPEND.
+    Retorna total de linhas carregadas.
+    """
+    total_rows = 0
+    batch_idx = 0
+
+    for frame in frames:
+        if frame is None or frame.empty:
+            continue
+
+        normalized = normalize_upload_dataframe(frame)
+        write_mode = (
+            bigquery.WriteDisposition.WRITE_TRUNCATE
+            if batch_idx == 0
+            else bigquery.WriteDisposition.WRITE_APPEND
+        )
+        load_to_staging(normalized, write_disposition=write_mode)
+
+        total_rows += len(normalized)
+        batch_idx += 1
+
+    if batch_idx == 0:
+        raise ValueError("Arquivo CSV sem linhas válidas para processamento.")
+
+    return total_rows
+
+
+def process_upload_csv_stream(file_obj, chunksize: int = CSV_UPLOAD_CHUNK_SIZE) -> int:
+    """
+    Processa CSV em streaming/lotes e retorna quantidade de linhas carregadas.
+    """
+    chunksize = max(1000, int(chunksize or CSV_UPLOAD_CHUNK_SIZE))
+    chunks = pd.read_csv(file_obj, chunksize=chunksize)
+    total_rows = load_to_staging_in_batches(chunks)
+    run_procedure()
+    return total_rows
 
 
 # =========================
@@ -455,5 +495,5 @@ def export_leads_rows(
 # =========================
 def process_upload_dataframe(df) -> None:
     normalized_df = normalize_upload_dataframe(df)
-    load_to_staging(normalized_df)
+    load_to_staging(normalized_df, write_disposition=bigquery.WriteDisposition.WRITE_TRUNCATE)
     run_procedure()
