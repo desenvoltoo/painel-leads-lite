@@ -1,366 +1,181 @@
-// static/js/app.js
-// V14 — compatível com:
-//   GET  /api/options  -> { ok:true, data:{ status:[], cursos:[], polos:[], consultores:[] } }
-//   GET  /api/leads    -> { ok:true, total:N, data:[...] }
-//   GET  /api/kpis     -> { ok:true, total:N, top_status:{status,cnt} }
-//   POST /api/upload   -> { ok:true, message:"..." }
-//   GET  /api/export   -> CSV (download)
-//
-// HTML base (ids):
-// upload: #uploadFile #uploadSource #btnUpload #uploadStatus
-// filtros: #fStatus #fCurso #fPolo #fConsultor #fIni #fFim #fLimit #fBusca
-// ações: #btnApply #btnClear #btnReload #btnExport
-// kpis: #kpiCount #kpiTopStatus
-// tabela: #tbl tbody
-// labels: #statusLine #lblTotal
+# -*- coding: utf-8 -*-
+"""
+Painel Leads Lite (Flask + BigQuery)
+Versão: 3.0 - Modelo Estrela Consolidado V14
+"""
 
-const $ = (sel) => document.querySelector(sel);
+import os
+import traceback
+import pandas as pd
+from flask import Flask, render_template, request, jsonify
 
-let tsStatus, tsCurso, tsPolo, tsConsultor;
+from services.bigquery import (
+    query_leads,
+    query_leads_count,
+    query_options,
+    process_upload_dataframe
+)
 
-/* =========================
-   Helpers UI
-========================= */
-function setStatus(msg, type = "ok") {
-  const el = $("#statusLine");
-  if (!el) return;
-  el.textContent = msg;
-  el.className = type === "err" ? "error" : "";
-}
+# ============================================================
+# HELPERS
+# ============================================================
+def _env(name: str, default: str = "") -> str:
+    v = os.getenv(name)
+    return v.strip() if isinstance(v, str) else v if v else default
 
-function setUploadStatus(msg, type = "ok") {
-  const el = $("#uploadStatus");
-  if (!el) return;
-  el.textContent = msg;
-  el.className = type === "err" ? "error" : "muted";
-}
+def _required_envs_ok():
+    # Verificação mínima para o app rodar com segurança
+    missing = []
+    for k in ("GCP_PROJECT_ID", "BQ_DATASET"):
+        if not _env(k):
+            missing.append(k)
+    return (len(missing) == 0, missing)
 
-function escapeHtml(str) {
-  if (str === null || str === undefined) return "";
-  return String(str).replace(/[&<>"']/g, (m) => ({
-    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
-  }[m]));
-}
+def _get_filters_from_request():
+    def n(v):
+        v = (v or "").strip()
+        return v if v else None
 
-function fmtDate(d) {
-  if (!d || d === "None") return "-";
-  const s = String(d);
-  const datePart = s.slice(0, 10);
-  if (/^\d{4}-\d{2}-\d{2}$/.test(datePart)) {
-    return datePart.split("-").reverse().join("/");
-  }
-  return s;
-}
+    # filtros
+    filters = {
+        "status": n(request.args.get("status")),
+        "curso": n(request.args.get("curso")),
+        "polo": n(request.args.get("polo")),
+        "consultor": n(request.args.get("consultor")),
+        "cpf": n(request.args.get("cpf")),
+        "celular": n(request.args.get("celular")),
+        "email": n(request.args.get("email")),
+        "nome": n(request.args.get("nome")),
+        "data_ini": n(request.args.get("data_ini")),
+        "data_fim": n(request.args.get("data_fim")),
+    }
+    filters = {k: v for k, v in filters.items() if v}
 
-/* =========================
-   API
-========================= */
-async function apiGet(path, params = {}) {
-  const url = new URL(path, window.location.origin);
+    # meta (paginação/ordenação)
+    meta = {
+        "limit": int(request.args.get("limit") or 500),
+        "offset": int(request.args.get("offset") or 0),
+        "order_by": n(request.args.get("order_by")) or "data_inscricao_dt",
+        "order_dir": n(request.args.get("order_dir")) or "DESC",
+    }
+    return filters, meta
 
-  Object.entries(params).forEach(([k, v]) => {
-    if (v === null || v === undefined) return;
-
-    if (Array.isArray(v)) {
-      if (v.length === 0) return;
-      url.searchParams.set(k, v.join(" || "));
-      return;
+def _error_payload(e: Exception, public_msg: str):
+    return {
+        "ok": False,
+        "error": public_msg,
+        "details": str(e),
+        "trace": traceback.format_exc(limit=3)
     }
 
-    const s = String(v).trim();
-    if (!s) return;
-    url.searchParams.set(k, s);
-  });
+# ============================================================
+# APP FACTORY
+# ============================================================
+def create_app() -> Flask:
+    app = Flask(__name__)
+    app.config["MAX_CONTENT_LENGTH"] = 30 * 1024 * 1024  # Limite de 30MB para uploads
 
-  const res = await fetch(url.toString(), { cache: "no-store" });
-  const data = await res.json().catch(() => ({}));
+    @app.get("/")
+    def index():
+        return render_template("index.html")
 
-  if (!res.ok) throw new Error(data?.error || data?.message || "Erro na API");
-  return data;
-}
+    @app.get("/health")
+    def health():
+        ok, missing = _required_envs_ok()
+        return jsonify({"status": "ok" if ok else "unhealthy", "missing": missing})
 
-async function apiPostForm(path, formData) {
-  const url = new URL(path, window.location.origin);
-  const res = await fetch(url.toString(), { method: "POST", body: formData });
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data?.error || data?.message || "Erro na API");
-  return data;
-}
+    @app.get("/api/leads")
+    def api_leads():
+        try:
+            filters, meta = _get_filters_from_request()
 
-/* =========================
-   TomSelect (multi + checkbox)
-========================= */
-function makeTomSelect(selector) {
-  const el = $(selector);
-  if (!el) return null;
+            rows = query_leads(
+                filters=filters,
+                limit=meta["limit"],
+                offset=meta["offset"],
+                order_by=meta["order_by"],
+                order_dir=meta["order_dir"],
+            )
+            total = query_leads_count(filters=filters)
 
-  const pluginCheckbox = window.__TOMSELECT_PLUGINS__?.checkbox || "checkbox_options";
-  const pluginRemove = window.__TOMSELECT_PLUGINS__?.remove_button || "remove_button";
+            return jsonify({"ok": True, "total": total, "data": rows})
+        except Exception as e:
+            return jsonify(_error_payload(e, "Erro ao buscar leads no BigQuery.")), 500
 
-  return new TomSelect(selector, {
-    plugins: [pluginCheckbox, pluginRemove],
-    maxItems: null,
-    hideSelected: false,
-    closeAfterSelect: false,
-    persist: false,
-    create: false,
-    valueField: "value",
-    labelField: "text",
-    searchField: ["text"],
-    onChange: () => loadLeadsAndKpisDebounced()
-  });
-}
+    @app.get("/api/kpis")
+    def api_kpis():
+        """
+        OBS: Esta rota faz uma query completa de leads para calcular KPI.
+        Em produção, o ideal é ter uma query agregada dedicada no BigQuery.
+        """
+        try:
+            filters, meta = _get_filters_from_request()
+            # Usa o mesmo limit da requisição, mas pra KPI você pode querer ignorar limit.
+            rows = query_leads(
+                filters=filters,
+                limit=meta["limit"],
+                offset=meta["offset"],
+                order_by=meta["order_by"],
+                order_dir=meta["order_dir"],
+            )
 
-function initMultiSelects() {
-  tsStatus = makeTomSelect("#fStatus");
-  tsCurso = makeTomSelect("#fCurso");
-  tsPolo = makeTomSelect("#fPolo");
-  tsConsultor = makeTomSelect("#fConsultor");
-}
+            total = len(rows)
+            status_counts = {}
+            for r in rows:
+                st = r.get("status") or "Lead"
+                status_counts[st] = status_counts.get(st, 0) + 1
 
-/* =========================
-   Options (dims)
-========================= */
-function fillSelect(ts, values) {
-  if (!ts) return;
-  ts.clearOptions();
-  ts.clear(true);
+            top_status = None
+            if status_counts:
+                best = max(status_counts, key=status_counts.get)
+                top_status = {"status": best, "cnt": status_counts[best]}
 
-  (values || []).forEach((v) => {
-    const s = String(v);
-    ts.addOption({ value: s, text: s });
-  });
+            return jsonify({
+                "ok": True,
+                "total": total,
+                "top_status": top_status
+            })
+        except Exception as e:
+            return jsonify(_error_payload(e, "Erro ao calcular KPIs.")), 500
 
-  ts.refreshOptions(false);
-}
+    @app.get("/api/options")
+    def api_options():
+        try:
+            data = query_options()
+            return jsonify({"ok": True, "data": data})
+        except Exception as e:
+            return jsonify(_error_payload(e, "Erro ao carregar opções dos filtros.")), 500
 
-async function loadOptions() {
-  try {
-    const resp = await apiGet("/api/options");
-    const data = resp?.data || resp;
+    @app.post("/api/upload")
+    def api_upload():
+        if "file" not in request.files:
+            return jsonify({"ok": False, "error": "Arquivo não encontrado."}), 400
 
-    fillSelect(tsStatus, data?.status || []);
-    fillSelect(tsCurso, data?.cursos || []);
-    fillSelect(tsPolo, data?.polos || []);
-    fillSelect(tsConsultor, data?.consultores || []);
-  } catch (e) {
-    console.error("Erro ao carregar opções:", e);
-    setStatus("Falha ao carregar filtros (options).", "err");
-  }
-}
+        f = request.files["file"]
+        if not f.filename:
+            return jsonify({"ok": False, "error": "Nome de arquivo vazio."}), 400
 
-/* =========================
-   Leads + KPIs
-========================= */
-function getMulti(ts) {
-  if (!ts) return [];
-  const v = ts.getValue();
-  if (Array.isArray(v)) return v;
-  if (!v) return [];
-  return String(v).split(",").map(s => s.trim()).filter(Boolean);
-}
+        try:
+            filename = (f.filename or "").lower()
 
-function parseBuscaRapida(txt) {
-  const t = (txt || "").trim();
-  if (!t) return {};
-  if (t.includes("@")) return { email: t };
+            if filename.endswith(".csv"):
+                df = pd.read_csv(f)
+            elif filename.endswith(".xlsx") or filename.endswith(".xls"):
+                df = pd.read_excel(f)
+            else:
+                return jsonify({"ok": False, "error": "Formato inválido. Envie CSV ou XLSX."}), 400
 
-  const onlyDigits = t.replace(/\D/g, "");
-  if (onlyDigits.length === 11) return { cpf: onlyDigits };
-  if (onlyDigits.length >= 10) return { celular: onlyDigits };
+            # V14: staging TRUNCATE + CALL procedure
+            process_upload_dataframe(df)
 
-  return { nome: t };
-}
+            return jsonify({"ok": True, "message": "Processado com sucesso! (staging + procedure V14)"}), 200
+        except Exception as e:
+            return jsonify(_error_payload(e, "Falha na ingestão V14.")), 500
 
-function buildLeadsParams() {
-  const status = getMulti(tsStatus);
-  const cursos = getMulti(tsCurso);
-  const polos = getMulti(tsPolo);
-  const consultores = getMulti(tsConsultor);
+    return app
 
-  const data_ini = $("#fIni")?.value || "";
-  const data_fim = $("#fFim")?.value || "";
-  const limit = $("#fLimit")?.value || 500;
 
-  const busca = parseBuscaRapida($("#fBusca")?.value);
-
-  return {
-    status,
-    curso: cursos,
-    polo: polos,
-    consultor: consultores,
-    data_ini,
-    data_fim,
-    limit,
-    ...busca
-  };
-}
-
-async function loadLeadsAndKpis() {
-  setStatus("Consultando BigQuery...", "ok");
-
-  const params = buildLeadsParams();
-
-  try {
-    const [leadsResp, kpisResp] = await Promise.all([
-      apiGet("/api/leads", params),
-      apiGet("/api/kpis", params),
-    ]);
-
-    const rows = leadsResp?.data || [];
-    const total = leadsResp?.total ?? rows.length;
-
-    renderTable(rows);
-    renderTotals(total, rows.length);
-    renderKpis(kpisResp);
-
-    setStatus(`${rows.length} registros carregados.`, "ok");
-  } catch (e) {
-    console.error(e);
-    setStatus(e.message || "Erro ao consultar leads.", "err");
-    renderTable([]);
-    renderTotals(0, 0);
-    renderKpis(null);
-  }
-}
-
-const loadLeadsAndKpisDebounced = (() => {
-  let t;
-  return () => {
-    clearTimeout(t);
-    t = setTimeout(loadLeadsAndKpis, 450);
-  };
-})();
-
-function renderTotals(total, shown) {
-  if ($("#lblTotal")) $("#lblTotal").textContent = `${shown} / ${total ?? shown}`;
-  if ($("#kpiCount")) $("#kpiCount").textContent = total ?? 0;
-}
-
-function renderTable(rows) {
-  const tbody = $("#tbl tbody");
-  if (!tbody) return;
-
-  if (!rows || rows.length === 0) {
-    tbody.innerHTML = `<tr><td colspan="10" style="text-align:center">Nenhum dado encontrado</td></tr>`;
-    return;
-  }
-
-  tbody.innerHTML = rows.map((r) => `
-    <tr>
-      <td>${escapeHtml(fmtDate(r.data_inscricao_dt))}</td>
-      <td>${escapeHtml(r.nome)}</td>
-      <td>${escapeHtml(r.cpf)}</td>
-      <td>${escapeHtml(r.celular)}</td>
-      <td>${escapeHtml(r.origem || "-")}</td>
-      <td>${escapeHtml(r.polo || "-")}</td>
-      <td>${escapeHtml(r.curso || "-")}</td>
-      <td><span class="badge">${escapeHtml(r.status || "Lead")}</span></td>
-      <td>${escapeHtml(r.consultor || "-")}</td>
-      <td>${escapeHtml(r.campanha || "-")}</td>
-    </tr>
-  `).join("");
-}
-
-function renderKpis(k) {
-  if (!k) {
-    if ($("#kpiTopStatus")) $("#kpiTopStatus").textContent = "-";
-    return;
-  }
-  const top = k?.top_status;
-  if ($("#kpiTopStatus")) $("#kpiTopStatus").textContent = top ? `${top.status} (${top.cnt})` : "-";
-}
-
-/* =========================
-   Upload
-========================= */
-async function doUpload() {
-  const fileInput = $("#uploadFile");
-  if (!fileInput || !fileInput.files || fileInput.files.length === 0) {
-    setUploadStatus("Selecione um arquivo primeiro.", "err");
-    return;
-  }
-
-  const file = fileInput.files[0];
-  setUploadStatus("Enviando e processando... (staging + procedure)", "ok");
-
-  try {
-    const fd = new FormData();
-    fd.append("file", file);
-
-    const src = ($("#uploadSource")?.value || "").trim();
-    if (src) fd.append("source", src);
-
-    const resp = await apiPostForm("/api/upload", fd);
-    setUploadStatus(resp?.message || "Processado com sucesso!", "ok");
-
-    await loadOptions();
-    await loadLeadsAndKpis();
-  } catch (e) {
-    console.error(e);
-    setUploadStatus(e.message || "Erro no upload.", "err");
-  }
-}
-
-/* =========================
-   Export CSV (server-side)
-========================= */
-function doExport() {
-  const params = buildLeadsParams();
-  const url = new URL("/api/export", window.location.origin);
-
-  Object.entries(params).forEach(([k, v]) => {
-    if (v === null || v === undefined) return;
-
-    if (Array.isArray(v)) {
-      if (v.length === 0) return;
-      url.searchParams.set(k, v.join(" || "));
-      return;
-    }
-
-    const s = String(v).trim();
-    if (!s) return;
-    url.searchParams.set(k, s);
-  });
-
-  window.location.href = url.toString();
-}
-
-/* =========================
-   Limpar
-========================= */
-function clearFilters() {
-  tsStatus?.clear(true);
-  tsCurso?.clear(true);
-  tsPolo?.clear(true);
-  tsConsultor?.clear(true);
-
-  if ($("#fIni")) $("#fIni").value = "";
-  if ($("#fFim")) $("#fFim").value = "";
-  if ($("#fLimit")) $("#fLimit").value = "500";
-  if ($("#fBusca")) $("#fBusca").value = "";
-
-  loadLeadsAndKpis();
-}
-
-/* =========================
-   Eventos
-========================= */
-document.addEventListener("DOMContentLoaded", async () => {
-  initMultiSelects();
-
-  $("#btnApply")?.addEventListener("click", loadLeadsAndKpis);
-  $("#btnReload")?.addEventListener("click", async () => {
-    await loadOptions();
-    await loadLeadsAndKpis();
-  });
-  $("#btnClear")?.addEventListener("click", clearFilters);
-
-  $("#btnUpload")?.addEventListener("click", doUpload);
-
-  $("#btnExport")?.addEventListener("click", doExport);
-
-  // Carregamento inicial
-  await loadOptions();
-  await loadLeadsAndKpis();
-});
+if __name__ == "__main__":
+    app = create_app()
+    port = int(_env("PORT", "8080"))
+    app.run(host="0.0.0.0", port=port, debug=True)
