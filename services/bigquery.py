@@ -17,7 +17,11 @@ from google.cloud import bigquery
 # =========================
 GCP_PROJECT_ID = os.getenv("GCP_PROJECT_ID", "painel-universidade")
 BQ_DATASET = os.getenv("BQ_DATASET", "modelo_estrela")
-BQ_LOCATION = os.getenv("BQ_LOCATION", "us-central1")
+
+# IMPORTANTE:
+# - BigQuery usa location do DATASET (normalmente "US" ou "EU").
+# - "us-central1" é região do Cloud Run, NÃO do BigQuery.
+BQ_LOCATION = os.getenv("BQ_LOCATION", "US")
 
 BQ_STAGING_TABLE = os.getenv("BQ_STAGING_TABLE", "stg_leads_site")
 BQ_FACT_TABLE = os.getenv("BQ_FACT_TABLE", "f_lead")
@@ -118,7 +122,13 @@ def _base_select_sql() -> str:
 def _apply_filters(sql: str, filters: Dict[str, Any], params: List[bigquery.QueryParameter]) -> str:
     """
     Aplica filtros no SQL + adiciona QueryParameters.
+
     Multi-select: status/curso/polo/consultor via IN UNNEST(@array)
+    Dimensões reais (modelo_estrela):
+      - dim_curso.nome_curso
+      - dim_polo.polo_original
+      - dim_consultor.consultor_original
+      - dim_status.status_original
     """
     # MULTI (arrays)
     cursos = _as_list(filters.get("curso"))
@@ -127,19 +137,19 @@ def _apply_filters(sql: str, filters: Dict[str, Any], params: List[bigquery.Quer
     consultores = _as_list(filters.get("consultor"))
 
     if cursos:
-        sql += " AND dc.curso IN UNNEST(@cursos)"
+        sql += " AND dc.nome_curso IN UNNEST(@cursos)"
         params.append(bigquery.ArrayQueryParameter("cursos", "STRING", cursos))
 
     if polos:
-        sql += " AND dp.polo IN UNNEST(@polos)"
+        sql += " AND dp.polo_original IN UNNEST(@polos)"
         params.append(bigquery.ArrayQueryParameter("polos", "STRING", polos))
 
     if status_list:
-        sql += " AND ds.status IN UNNEST(@status_list)"
+        sql += " AND ds.status_original IN UNNEST(@status_list)"
         params.append(bigquery.ArrayQueryParameter("status_list", "STRING", status_list))
 
     if consultores:
-        sql += " AND dco.consultor IN UNNEST(@consultores)"
+        sql += " AND dco.consultor_original IN UNNEST(@consultores)"
         params.append(bigquery.ArrayQueryParameter("consultores", "STRING", consultores))
 
     # SINGLE
@@ -159,13 +169,14 @@ def _apply_filters(sql: str, filters: Dict[str, Any], params: List[bigquery.Quer
         sql += " AND LOWER(dpe.nome) LIKE LOWER(@nome_like)"
         params.append(bigquery.ScalarQueryParameter("nome_like", "STRING", f"%{str(filters['nome']).strip()}%"))
 
-    # DATE RANGE (data_inscricao_dt)
+    # DATE RANGE (data_inscricao_dt é DATETIME no f_lead)
+    # Front-end manda YYYY-MM-DD; aqui usamos DATE(f.data_inscricao_dt) pra comparar com DATE.
     if filters.get("data_ini"):
-        sql += " AND f.data_inscricao_dt >= @data_ini"
+        sql += " AND DATE(f.data_inscricao_dt) >= @data_ini"
         params.append(bigquery.ScalarQueryParameter("data_ini", "DATE", filters["data_ini"]))
 
     if filters.get("data_fim"):
-        sql += " AND f.data_inscricao_dt <= @data_fim"
+        sql += " AND DATE(f.data_inscricao_dt) <= @data_fim"
         params.append(bigquery.ScalarQueryParameter("data_fim", "DATE", filters["data_fim"]))
 
     return sql
@@ -183,6 +194,8 @@ def query_leads(
 ) -> List[Dict[str, Any]]:
     """
     Retorna leads com NOMES (via LEFT JOIN dims).
+    Campos retornados são os que o front espera:
+      data_inscricao_dt, nome, cpf, celular, email, origem, polo, curso, status, consultor, campanha
     """
     client = get_bq_client()
     filters = filters or {}
@@ -193,52 +206,49 @@ def query_leads(
 
     allowed_order = {
         "data_inscricao_dt": "f.data_inscricao_dt",
-        "data_envio_dt": "f.data_envio_dt",
-        "data_disparo_dt": "f.data_disparo_dt",
-        "status": "ds.status",
-        "curso": "dc.curso",
-        "polo": "dp.polo",
-        "consultor": "dco.consultor",
+        "status": "ds.status_original",
+        "curso": "dc.nome_curso",
+        "polo": "dp.polo_original",
+        "consultor": "dco.consultor_original",
         "nome": "dpe.nome",
+        "cpf": "dpe.cpf",
     }
     order_expr = allowed_order.get(order_by, "f.data_inscricao_dt")
 
     sql = """
     SELECT
-      dpe.nome            AS nome,
-      dpe.cpf             AS cpf,
-      dpe.celular         AS celular,
-      dpe.email           AS email,
+      f.data_inscricao_dt        AS data_inscricao_dt,
+      dpe.nome                  AS nome,
+      dpe.cpf                   AS cpf,
+      dpe.celular               AS celular,
+      dpe.email                 AS email,
 
-      dc.curso            AS curso,
-      dp.polo             AS polo,
-      dco.consultor       AS consultor,
-      ds.status           AS status,
+      -- compat com o front: "origem"
+      f.canal                   AS origem,
 
-      f.data_inscricao_dt AS data_inscricao_dt,
-      f.modalidade        AS modalidade,
-      f.campanha          AS campanha,
-      f.tipo_negocio      AS tipo_negocio,
-      f.origem            AS origem,
-      f.peca_disparo      AS peca_disparo,
-      f.texto_disparo     AS texto_disparo,
-      f.tipo_disparo      AS tipo_disparo,
-      f.data_disparo_dt   AS data_disparo_dt,
-      f.data_envio_dt     AS data_envio_dt,
-      f.obs               AS obs
+      dp.polo_original          AS polo,
+      dc.nome_curso             AS curso,
+      dco.consultor_original    AS consultor,
+      ds.status_original        AS status,
+
+      -- extras (não atrapalham; podem ser usados depois)
+      f.campanha                AS campanha
     """ + _base_select_sql()
 
     params: List[bigquery.QueryParameter] = []
     sql = _apply_filters(sql, filters, params)
 
-    sql += f" ORDER BY {order_expr} {order_dir} LIMIT @limit OFFSET @offset"
+    sql += f"\n ORDER BY {order_expr} {order_dir} \n LIMIT @limit OFFSET @offset"
     params.append(bigquery.ScalarQueryParameter("limit", "INT64", limit))
     params.append(bigquery.ScalarQueryParameter("offset", "INT64", offset))
 
     job_config = bigquery.QueryJobConfig(query_parameters=params)
     rows = client.query(sql, job_config=job_config).result()
 
-    return [dict(r.items()) for r in rows]
+    out: List[Dict[str, Any]] = []
+    for r in rows:
+        out.append(dict(r))
+    return out
 
 
 def query_leads_count(filters: Optional[Dict[str, Any]] = None) -> int:
@@ -254,11 +264,13 @@ def query_leads_count(filters: Optional[Dict[str, Any]] = None) -> int:
 
     job_config = bigquery.QueryJobConfig(query_parameters=params)
     rows = list(client.query(sql, job_config=job_config).result())
-    return int(rows[0]["total"]) if rows else 0
+    if not rows:
+        return 0
+    return int(rows[0]["total"])
 
 
 # =========================
-# 4) OPTIONS (DIMs direto)
+# 4) OPTIONS (FILTROS)
 # =========================
 def _distinct_dim_values(table: str, col: str, alias: str) -> List[str]:
     client = get_bq_client()
@@ -274,13 +286,13 @@ def _distinct_dim_values(table: str, col: str, alias: str) -> List[str]:
 
 def query_options() -> Dict[str, List[str]]:
     """
-    Opções para filtros diretamente das dimensões.
+    Opções para filtros diretamente das dimensões (nomes reais do modelo_estrela).
     """
     return {
-        "status": _distinct_dim_values("dim_status", "status", "status"),
-        "cursos": _distinct_dim_values("dim_curso", "curso", "curso"),
-        "polos": _distinct_dim_values("dim_polo", "polo", "polo"),
-        "consultores": _distinct_dim_values("dim_consultor", "consultor", "consultor"),
+        "status": _distinct_dim_values("dim_status", "status_original", "status"),
+        "cursos": _distinct_dim_values("dim_curso", "nome_curso", "curso"),
+        "polos": _distinct_dim_values("dim_polo", "polo_original", "polo"),
+        "consultores": _distinct_dim_values("dim_consultor", "consultor_original", "consultor"),
     }
 
 
@@ -299,14 +311,6 @@ EXPORT_COLUMNS = [
     ("status", "Status"),
     ("consultor", "Consultor"),
     ("campanha", "Campanha"),
-    ("modalidade", "Modalidade"),
-    ("tipo_negocio", "Tipo Negócio"),
-    ("data_envio_dt", "Data Envio"),
-    ("data_disparo_dt", "Data Disparo"),
-    ("tipo_disparo", "Tipo Disparo"),
-    ("peca_disparo", "Peça Disparo"),
-    ("texto_disparo", "Texto Disparo"),
-    ("obs", "Obs"),
 ]
 
 
@@ -325,42 +329,38 @@ def export_leads_rows(
 
     sql = """
     SELECT
-      f.data_inscricao_dt AS data_inscricao_dt,
-      dpe.nome            AS nome,
-      dpe.cpf             AS cpf,
-      dpe.celular         AS celular,
-      dpe.email           AS email,
-      f.origem            AS origem,
-      dp.polo             AS polo,
-      dc.curso            AS curso,
-      ds.status           AS status,
-      dco.consultor       AS consultor,
-      f.campanha          AS campanha,
-      f.modalidade        AS modalidade,
-      f.tipo_negocio      AS tipo_negocio,
-      f.data_envio_dt     AS data_envio_dt,
-      f.data_disparo_dt   AS data_disparo_dt,
-      f.tipo_disparo      AS tipo_disparo,
-      f.peca_disparo      AS peca_disparo,
-      f.texto_disparo     AS texto_disparo,
-      f.obs               AS obs
+      f.data_inscricao_dt        AS data_inscricao_dt,
+      dpe.nome                  AS nome,
+      dpe.cpf                   AS cpf,
+      dpe.celular               AS celular,
+      dpe.email                 AS email,
+      f.canal                   AS origem,
+      dp.polo_original          AS polo,
+      dc.nome_curso             AS curso,
+      ds.status_original        AS status,
+      dco.consultor_original    AS consultor,
+      f.campanha                AS campanha
     """ + _base_select_sql()
 
     params: List[bigquery.QueryParameter] = []
     sql = _apply_filters(sql, filters, params)
 
-    sql += " ORDER BY f.data_inscricao_dt DESC LIMIT @max_rows"
-    params.append(bigquery.ScalarQueryParameter("max_rows", "INT64", max_rows))
+    sql += "\n ORDER BY f.data_inscricao_dt DESC"
 
     job_config = bigquery.QueryJobConfig(query_parameters=params)
-    rows = client.query(sql, job_config=job_config).result(page_size=EXPORT_PAGE_SIZE)
+    job = client.query(sql, job_config=job_config)
 
-    for r in rows:
-        yield dict(r.items())
+    yielded = 0
+    for page in job.result(page_size=EXPORT_PAGE_SIZE).pages:
+        for row in page:
+            yield dict(row)
+            yielded += 1
+            if yielded >= max_rows:
+                return
 
 
 # =========================
-# HELPER: upload end-to-end
+# 6) PIPELINE UPLOAD
 # =========================
 def process_upload_dataframe(df) -> None:
     """
