@@ -1,215 +1,366 @@
-# -*- coding: utf-8 -*-
-"""
-Painel Leads Lite (Flask + BigQuery)
-Versão: 3.0 - Modelo Estrela Consolidado V14 (MULTI + EXPORT)
-"""
+// static/js/app.js
+// V14 — compatível com:
+//   GET  /api/options  -> { ok:true, data:{ status:[], cursos:[], polos:[], consultores:[] } }
+//   GET  /api/leads    -> { ok:true, total:N, data:[...] }
+//   GET  /api/kpis     -> { ok:true, total:N, top_status:{status,cnt} }
+//   POST /api/upload   -> { ok:true, message:"..." }
+//   GET  /api/export   -> CSV (download)
+//
+// HTML base (ids):
+// upload: #uploadFile #uploadSource #btnUpload #uploadStatus
+// filtros: #fStatus #fCurso #fPolo #fConsultor #fIni #fFim #fLimit #fBusca
+// ações: #btnApply #btnClear #btnReload #btnExport
+// kpis: #kpiCount #kpiTopStatus
+// tabela: #tbl tbody
+// labels: #statusLine #lblTotal
 
-import os
-import traceback
-import pandas as pd
-from flask import Flask, render_template, request, jsonify, Response
+const $ = (sel) => document.querySelector(sel);
 
-from services.bigquery import (
-    query_leads,
-    query_leads_count,
-    query_options,
-    process_upload_dataframe,
-    export_leads_rows,
-    EXPORT_COLUMNS,
-)
+let tsStatus, tsCurso, tsPolo, tsConsultor;
 
-# ============================================================
-# HELPERS
-# ============================================================
-def _env(name: str, default: str = "") -> str:
-    v = os.getenv(name)
-    return v.strip() if isinstance(v, str) else v if v else default
+/* =========================
+   Helpers UI
+========================= */
+function setStatus(msg, type = "ok") {
+  const el = $("#statusLine");
+  if (!el) return;
+  el.textContent = msg;
+  el.className = type === "err" ? "error" : "";
+}
 
-def _required_envs_ok():
-    missing = []
-    for k in ("GCP_PROJECT_ID", "BQ_DATASET"):
-        if not _env(k):
-            missing.append(k)
-    return (len(missing) == 0, missing)
+function setUploadStatus(msg, type = "ok") {
+  const el = $("#uploadStatus");
+  if (!el) return;
+  el.textContent = msg;
+  el.className = type === "err" ? "error" : "muted";
+}
 
-def _n(v):
-    v = (v or "").strip()
-    return v if v else None
+function escapeHtml(str) {
+  if (str === null || str === undefined) return "";
+  return String(str).replace(/[&<>"']/g, (m) => ({
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
+  }[m]));
+}
 
-def _split_multi(v):
-    s = _n(v)
-    if not s:
-        return None
-    if "||" in s:
-        parts = [p.strip() for p in s.split("||")]
-        parts = [p for p in parts if p]
-        return parts if parts else None
-    return [s]
+function fmtDate(d) {
+  if (!d || d === "None") return "-";
+  const s = String(d);
+  const datePart = s.slice(0, 10);
+  if (/^\d{4}-\d{2}-\d{2}$/.test(datePart)) {
+    return datePart.split("-").reverse().join("/");
+  }
+  return s;
+}
 
-def _get_filters_from_request():
-    filters = {
-        "status": _split_multi(request.args.get("status")),
-        "curso": _split_multi(request.args.get("curso")),
-        "polo": _split_multi(request.args.get("polo")),
-        "consultor": _split_multi(request.args.get("consultor")),
+/* =========================
+   API
+========================= */
+async function apiGet(path, params = {}) {
+  const url = new URL(path, window.location.origin);
 
-        "cpf": _n(request.args.get("cpf")),
-        "celular": _n(request.args.get("celular")),
-        "email": _n(request.args.get("email")),
-        "nome": _n(request.args.get("nome")),
+  Object.entries(params).forEach(([k, v]) => {
+    if (v === null || v === undefined) return;
 
-        "data_ini": _n(request.args.get("data_ini")),
-        "data_fim": _n(request.args.get("data_fim")),
-    }
-    filters = {k: v for k, v in filters.items() if v}
-
-    meta = {
-        "limit": int(request.args.get("limit") or 500),
-        "offset": int(request.args.get("offset") or 0),
-        "order_by": _n(request.args.get("order_by")) or "data_inscricao_dt",
-        "order_dir": _n(request.args.get("order_dir")) or "DESC",
-    }
-    return filters, meta
-
-def _error_payload(e: Exception, public_msg: str):
-    return {
-        "ok": False,
-        "error": public_msg,
-        "details": str(e),
-        "trace": traceback.format_exc(limit=3)
+    if (Array.isArray(v)) {
+      if (v.length === 0) return;
+      url.searchParams.set(k, v.join(" || "));
+      return;
     }
 
-def _to_csv_value(v):
-    s = "" if v is None else str(v)
-    if any(ch in s for ch in ['"', ';', '\n', '\r']):
-        s = '"' + s.replace('"', '""') + '"'
-    return s
+    const s = String(v).trim();
+    if (!s) return;
+    url.searchParams.set(k, s);
+  });
 
-# ============================================================
-# APP FACTORY
-# ============================================================
-def create_app() -> Flask:
-    app = Flask(__name__)
-    app.config["MAX_CONTENT_LENGTH"] = 30 * 1024 * 1024  # 30MB
+  const res = await fetch(url.toString(), { cache: "no-store" });
+  const data = await res.json().catch(() => ({}));
 
-    @app.get("/")
-    def index():
-        return render_template("index.html")
+  if (!res.ok) throw new Error(data?.error || data?.message || "Erro na API");
+  return data;
+}
 
-    @app.get("/health")
-    def health():
-        ok, missing = _required_envs_ok()
-        return jsonify({"status": "ok" if ok else "unhealthy", "missing": missing})
+async function apiPostForm(path, formData) {
+  const url = new URL(path, window.location.origin);
+  const res = await fetch(url.toString(), { method: "POST", body: formData });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data?.error || data?.message || "Erro na API");
+  return data;
+}
 
-    @app.get("/api/options")
-    def api_options():
-        try:
-            data = query_options()
-            return jsonify({"ok": True, "data": data})
-        except Exception as e:
-            return jsonify(_error_payload(e, "Erro ao carregar opções dos filtros.")), 500
+/* =========================
+   TomSelect (multi + checkbox)
+========================= */
+function makeTomSelect(selector) {
+  const el = $(selector);
+  if (!el) return null;
 
-    @app.get("/api/leads")
-    def api_leads():
-        try:
-            filters, meta = _get_filters_from_request()
-            rows = query_leads(
-                filters=filters,
-                limit=meta["limit"],
-                offset=meta["offset"],
-                order_by=meta["order_by"],
-                order_dir=meta["order_dir"],
-            )
-            total = query_leads_count(filters=filters)
-            return jsonify({"ok": True, "total": total, "data": rows})
-        except Exception as e:
-            return jsonify(_error_payload(e, "Erro ao buscar leads no BigQuery.")), 500
+  const pluginCheckbox = window.__TOMSELECT_PLUGINS__?.checkbox || "checkbox_options";
+  const pluginRemove = window.__TOMSELECT_PLUGINS__?.remove_button || "remove_button";
 
-    @app.get("/api/kpis")
-    def api_kpis():
-        try:
-            filters, meta = _get_filters_from_request()
-            rows = query_leads(
-                filters=filters,
-                limit=meta["limit"],
-                offset=meta["offset"],
-                order_by=meta["order_by"],
-                order_dir=meta["order_dir"],
-            )
+  return new TomSelect(selector, {
+    plugins: [pluginCheckbox, pluginRemove],
+    maxItems: null,
+    hideSelected: false,
+    closeAfterSelect: false,
+    persist: false,
+    create: false,
+    valueField: "value",
+    labelField: "text",
+    searchField: ["text"],
+    onChange: () => loadLeadsAndKpisDebounced()
+  });
+}
 
-            total = len(rows)
-            status_counts = {}
-            for r in rows:
-                st = r.get("status") or "Lead"
-                status_counts[st] = status_counts.get(st, 0) + 1
+function initMultiSelects() {
+  tsStatus = makeTomSelect("#fStatus");
+  tsCurso = makeTomSelect("#fCurso");
+  tsPolo = makeTomSelect("#fPolo");
+  tsConsultor = makeTomSelect("#fConsultor");
+}
 
-            top_status = None
-            if status_counts:
-                best = max(status_counts, key=status_counts.get)
-                top_status = {"status": best, "cnt": status_counts[best]}
+/* =========================
+   Options (dims)
+========================= */
+function fillSelect(ts, values) {
+  if (!ts) return;
+  ts.clearOptions();
+  ts.clear(true);
 
-            return jsonify({"ok": True, "total": total, "top_status": top_status})
-        except Exception as e:
-            return jsonify(_error_payload(e, "Erro ao calcular KPIs.")), 500
+  (values || []).forEach((v) => {
+    const s = String(v);
+    ts.addOption({ value: s, text: s });
+  });
 
-    @app.post("/api/upload")
-    def api_upload():
-        if "file" not in request.files:
-            return jsonify({"ok": False, "error": "Arquivo não encontrado."}), 400
+  ts.refreshOptions(false);
+}
 
-        f = request.files["file"]
-        if not f.filename:
-            return jsonify({"ok": False, "error": "Nome de arquivo vazio."}), 400
+async function loadOptions() {
+  try {
+    const resp = await apiGet("/api/options");
+    const data = resp?.data || resp;
 
-        try:
-            filename = (f.filename or "").lower()
+    fillSelect(tsStatus, data?.status || []);
+    fillSelect(tsCurso, data?.cursos || []);
+    fillSelect(tsPolo, data?.polos || []);
+    fillSelect(tsConsultor, data?.consultores || []);
+  } catch (e) {
+    console.error("Erro ao carregar opções:", e);
+    setStatus("Falha ao carregar filtros (options).", "err");
+  }
+}
 
-            if filename.endswith(".csv"):
-                df = pd.read_csv(f)
-            elif filename.endswith(".xlsx") or filename.endswith(".xls"):
-                df = pd.read_excel(f)
-            else:
-                return jsonify({"ok": False, "error": "Formato inválido. Envie CSV ou XLSX."}), 400
+/* =========================
+   Leads + KPIs
+========================= */
+function getMulti(ts) {
+  if (!ts) return [];
+  const v = ts.getValue();
+  if (Array.isArray(v)) return v;
+  if (!v) return [];
+  return String(v).split(",").map(s => s.trim()).filter(Boolean);
+}
 
-            process_upload_dataframe(df)
-            return jsonify({"ok": True, "message": "Processado com sucesso! (staging + procedure V14)"}), 200
-        except Exception as e:
-            return jsonify(_error_payload(e, "Falha na ingestão V14.")), 500
+function parseBuscaRapida(txt) {
+  const t = (txt || "").trim();
+  if (!t) return {};
+  if (t.includes("@")) return { email: t };
 
-    # =========================
-    # EXPORT (server-side)
-    # =========================
-    @app.get("/api/export")
-    def api_export():
-        try:
-            filters, _meta = _get_filters_from_request()
+  const onlyDigits = t.replace(/\D/g, "");
+  if (onlyDigits.length === 11) return { cpf: onlyDigits };
+  if (onlyDigits.length >= 10) return { celular: onlyDigits };
 
-            # Nome do arquivo
-            ts = pd.Timestamp.utcnow().strftime("%Y-%m-%d_%H-%M-%S")
-            filename = f"leads_v14_export_{ts}.csv"
+  return { nome: t };
+}
 
-            cols = EXPORT_COLUMNS  # lista (key,label)
+function buildLeadsParams() {
+  const status = getMulti(tsStatus);
+  const cursos = getMulti(tsCurso);
+  const polos = getMulti(tsPolo);
+  const consultores = getMulti(tsConsultor);
 
-            def generate():
-                # header
-                yield ";".join([c[1] for c in cols]) + "\n"
-                # linhas
-                for row in export_leads_rows(filters=filters):
-                    line = ";".join(_to_csv_value(row.get(key)) for key, _label in cols)
-                    yield line + "\n"
+  const data_ini = $("#fIni")?.value || "";
+  const data_fim = $("#fFim")?.value || "";
+  const limit = $("#fLimit")?.value || 500;
 
-            headers = {
-                "Content-Type": "text/csv; charset=utf-8",
-                "Content-Disposition": f'attachment; filename="{filename}"'
-            }
-            return Response(generate(), headers=headers)
-        except Exception as e:
-            return jsonify(_error_payload(e, "Erro ao exportar CSV.")), 500
+  const busca = parseBuscaRapida($("#fBusca")?.value);
 
-    return app
+  return {
+    status,
+    curso: cursos,
+    polo: polos,
+    consultor: consultores,
+    data_ini,
+    data_fim,
+    limit,
+    ...busca
+  };
+}
 
+async function loadLeadsAndKpis() {
+  setStatus("Consultando BigQuery...", "ok");
 
-if __name__ == "__main__":
-    app = create_app()
-    port = int(_env("PORT", "8080"))
-    app.run(host="0.0.0.0", port=port, debug=True)
+  const params = buildLeadsParams();
+
+  try {
+    const [leadsResp, kpisResp] = await Promise.all([
+      apiGet("/api/leads", params),
+      apiGet("/api/kpis", params),
+    ]);
+
+    const rows = leadsResp?.data || [];
+    const total = leadsResp?.total ?? rows.length;
+
+    renderTable(rows);
+    renderTotals(total, rows.length);
+    renderKpis(kpisResp);
+
+    setStatus(`${rows.length} registros carregados.`, "ok");
+  } catch (e) {
+    console.error(e);
+    setStatus(e.message || "Erro ao consultar leads.", "err");
+    renderTable([]);
+    renderTotals(0, 0);
+    renderKpis(null);
+  }
+}
+
+const loadLeadsAndKpisDebounced = (() => {
+  let t;
+  return () => {
+    clearTimeout(t);
+    t = setTimeout(loadLeadsAndKpis, 450);
+  };
+})();
+
+function renderTotals(total, shown) {
+  if ($("#lblTotal")) $("#lblTotal").textContent = `${shown} / ${total ?? shown}`;
+  if ($("#kpiCount")) $("#kpiCount").textContent = total ?? 0;
+}
+
+function renderTable(rows) {
+  const tbody = $("#tbl tbody");
+  if (!tbody) return;
+
+  if (!rows || rows.length === 0) {
+    tbody.innerHTML = `<tr><td colspan="10" style="text-align:center">Nenhum dado encontrado</td></tr>`;
+    return;
+  }
+
+  tbody.innerHTML = rows.map((r) => `
+    <tr>
+      <td>${escapeHtml(fmtDate(r.data_inscricao_dt))}</td>
+      <td>${escapeHtml(r.nome)}</td>
+      <td>${escapeHtml(r.cpf)}</td>
+      <td>${escapeHtml(r.celular)}</td>
+      <td>${escapeHtml(r.origem || "-")}</td>
+      <td>${escapeHtml(r.polo || "-")}</td>
+      <td>${escapeHtml(r.curso || "-")}</td>
+      <td><span class="badge">${escapeHtml(r.status || "Lead")}</span></td>
+      <td>${escapeHtml(r.consultor || "-")}</td>
+      <td>${escapeHtml(r.campanha || "-")}</td>
+    </tr>
+  `).join("");
+}
+
+function renderKpis(k) {
+  if (!k) {
+    if ($("#kpiTopStatus")) $("#kpiTopStatus").textContent = "-";
+    return;
+  }
+  const top = k?.top_status;
+  if ($("#kpiTopStatus")) $("#kpiTopStatus").textContent = top ? `${top.status} (${top.cnt})` : "-";
+}
+
+/* =========================
+   Upload
+========================= */
+async function doUpload() {
+  const fileInput = $("#uploadFile");
+  if (!fileInput || !fileInput.files || fileInput.files.length === 0) {
+    setUploadStatus("Selecione um arquivo primeiro.", "err");
+    return;
+  }
+
+  const file = fileInput.files[0];
+  setUploadStatus("Enviando e processando... (staging + procedure)", "ok");
+
+  try {
+    const fd = new FormData();
+    fd.append("file", file);
+
+    const src = ($("#uploadSource")?.value || "").trim();
+    if (src) fd.append("source", src);
+
+    const resp = await apiPostForm("/api/upload", fd);
+    setUploadStatus(resp?.message || "Processado com sucesso!", "ok");
+
+    await loadOptions();
+    await loadLeadsAndKpis();
+  } catch (e) {
+    console.error(e);
+    setUploadStatus(e.message || "Erro no upload.", "err");
+  }
+}
+
+/* =========================
+   Export CSV (server-side)
+========================= */
+function doExport() {
+  const params = buildLeadsParams();
+  const url = new URL("/api/export", window.location.origin);
+
+  Object.entries(params).forEach(([k, v]) => {
+    if (v === null || v === undefined) return;
+
+    if (Array.isArray(v)) {
+      if (v.length === 0) return;
+      url.searchParams.set(k, v.join(" || "));
+      return;
+    }
+
+    const s = String(v).trim();
+    if (!s) return;
+    url.searchParams.set(k, s);
+  });
+
+  window.location.href = url.toString();
+}
+
+/* =========================
+   Limpar
+========================= */
+function clearFilters() {
+  tsStatus?.clear(true);
+  tsCurso?.clear(true);
+  tsPolo?.clear(true);
+  tsConsultor?.clear(true);
+
+  if ($("#fIni")) $("#fIni").value = "";
+  if ($("#fFim")) $("#fFim").value = "";
+  if ($("#fLimit")) $("#fLimit").value = "500";
+  if ($("#fBusca")) $("#fBusca").value = "";
+
+  loadLeadsAndKpis();
+}
+
+/* =========================
+   Eventos
+========================= */
+document.addEventListener("DOMContentLoaded", async () => {
+  initMultiSelects();
+
+  $("#btnApply")?.addEventListener("click", loadLeadsAndKpis);
+  $("#btnReload")?.addEventListener("click", async () => {
+    await loadOptions();
+    await loadLeadsAndKpis();
+  });
+  $("#btnClear")?.addEventListener("click", clearFilters);
+
+  $("#btnUpload")?.addEventListener("click", doUpload);
+
+  $("#btnExport")?.addEventListener("click", doExport);
+
+  // Carregamento inicial
+  await loadOptions();
+  await loadLeadsAndKpis();
+});
