@@ -6,12 +6,14 @@ Versão: 3.0 - Modelo Estrela Consolidado V14
 
 import os
 import traceback
+import pandas as pd
 from flask import Flask, render_template, request, jsonify
 
 from services.bigquery import (
     query_leads,
+    query_leads_count,
     query_options,
-    ingest_upload_file
+    process_upload_dataframe
 )
 
 # ============================================================
@@ -34,15 +36,29 @@ def _get_filters_from_request():
         v = (v or "").strip()
         return v if v else None
 
-    # Captura os filtros enviados pelo app.js (AJAX)
-    return {
+    # filtros
+    filters = {
         "status": n(request.args.get("status")),
-        "curso": n(request.args.get("curso")), # Pode vir como string separada por ||
+        "curso": n(request.args.get("curso")),
         "polo": n(request.args.get("polo")),
+        "consultor": n(request.args.get("consultor")),
+        "cpf": n(request.args.get("cpf")),
+        "celular": n(request.args.get("celular")),
+        "email": n(request.args.get("email")),
+        "nome": n(request.args.get("nome")),
         "data_ini": n(request.args.get("data_ini")),
         "data_fim": n(request.args.get("data_fim")),
-        "limit": int(request.args.get("limit") or 500),
     }
+    filters = {k: v for k, v in filters.items() if v}
+
+    # meta (paginação/ordenação)
+    meta = {
+        "limit": int(request.args.get("limit") or 500),
+        "offset": int(request.args.get("offset") or 0),
+        "order_by": n(request.args.get("order_by")) or "data_inscricao_dt",
+        "order_dir": n(request.args.get("order_dir")) or "DESC",
+    }
+    return filters, meta
 
 def _error_payload(e: Exception, public_msg: str):
     return {
@@ -57,7 +73,7 @@ def _error_payload(e: Exception, public_msg: str):
 # ============================================================
 def create_app() -> Flask:
     app = Flask(__name__)
-    app.config["MAX_CONTENT_LENGTH"] = 30 * 1024 * 1024 # Limite de 30MB para uploads
+    app.config["MAX_CONTENT_LENGTH"] = 30 * 1024 * 1024  # Limite de 30MB para uploads
 
     @app.get("/")
     def index():
@@ -71,33 +87,51 @@ def create_app() -> Flask:
     @app.get("/api/leads")
     def api_leads():
         try:
-            filters = _get_filters_from_request()
-            rows = query_leads(filters)
-            # Retorna diretamente a lista para facilitar o .map() no JS
-            return jsonify(rows)
+            filters, meta = _get_filters_from_request()
+
+            rows = query_leads(
+                filters=filters,
+                limit=meta["limit"],
+                offset=meta["offset"],
+                order_by=meta["order_by"],
+                order_dir=meta["order_dir"],
+            )
+            total = query_leads_count(filters=filters)
+
+            return jsonify({"ok": True, "total": total, "data": rows})
         except Exception as e:
             return jsonify(_error_payload(e, "Erro ao buscar leads no BigQuery.")), 500
 
     @app.get("/api/kpis")
     def api_kpis():
+        """
+        OBS: Esta rota faz uma query completa de leads para calcular KPI.
+        Em produção, o ideal é ter uma query agregada dedicada no BigQuery.
+        """
         try:
-            filters = _get_filters_from_request()
-            # Calculamos KPIs básicos a partir da query de leads para evitar 2 chamadas pesadas
-            rows = query_leads(filters)
-            
+            filters, meta = _get_filters_from_request()
+            # Usa o mesmo limit da requisição, mas pra KPI você pode querer ignorar limit.
+            rows = query_leads(
+                filters=filters,
+                limit=meta["limit"],
+                offset=meta["offset"],
+                order_by=meta["order_by"],
+                order_dir=meta["order_dir"],
+            )
+
             total = len(rows)
-            # Exemplo simples de KPI de status predominante
             status_counts = {}
             for r in rows:
-                st = r.get('status', 'Lead')
+                st = r.get("status") or "Lead"
                 status_counts[st] = status_counts.get(st, 0) + 1
-            
+
             top_status = None
             if status_counts:
                 best = max(status_counts, key=status_counts.get)
                 top_status = {"status": best, "cnt": status_counts[best]}
 
             return jsonify({
+                "ok": True,
                 "total": total,
                 "top_status": top_status
             })
@@ -108,7 +142,7 @@ def create_app() -> Flask:
     def api_options():
         try:
             data = query_options()
-            return jsonify(data)
+            return jsonify({"ok": True, "data": data})
         except Exception as e:
             return jsonify(_error_payload(e, "Erro ao carregar opções dos filtros.")), 500
 
@@ -122,13 +156,24 @@ def create_app() -> Flask:
             return jsonify({"ok": False, "error": "Nome de arquivo vazio."}), 400
 
         try:
-            source = request.form.get("source", "PAINEL_V14")
-            result = ingest_upload_file(f, source=source)
-            return jsonify({"ok": True, "message": "Processado com sucesso!", "details": result})
+            filename = (f.filename or "").lower()
+
+            if filename.endswith(".csv"):
+                df = pd.read_csv(f)
+            elif filename.endswith(".xlsx") or filename.endswith(".xls"):
+                df = pd.read_excel(f)
+            else:
+                return jsonify({"ok": False, "error": "Formato inválido. Envie CSV ou XLSX."}), 400
+
+            # V14: staging TRUNCATE + CALL procedure
+            process_upload_dataframe(df)
+
+            return jsonify({"ok": True, "message": "Processado com sucesso! (staging + procedure V14)"}), 200
         except Exception as e:
             return jsonify(_error_payload(e, "Falha na ingestão V14.")), 500
 
     return app
+
 
 if __name__ == "__main__":
     app = create_app()
