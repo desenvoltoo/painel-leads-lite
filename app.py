@@ -42,6 +42,7 @@ def _get_filters_from_request():
         "curso": n(request.args.get("curso")),
         "polo": n(request.args.get("polo")),
         "consultor": n(request.args.get("consultor")),
+        "modalidade": n(request.args.get("modalidade")),
         "cpf": n(request.args.get("cpf")),
         "celular": n(request.args.get("celular")),
         "email": n(request.args.get("email")),

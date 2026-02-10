@@ -11,6 +11,7 @@ from __future__ import annotations  # ✅ evita avaliar type hints no import (Py
 import os
 from typing import Any, Dict, List, Optional, Iterable
 
+import pandas as pd
 from google.cloud import bigquery
 
 
@@ -23,7 +24,14 @@ BQ_DATASET = os.getenv("BQ_DATASET", "modelo_estrela")
 # IMPORTANTE:
 # - BigQuery usa location do DATASET (normalmente "US" ou "EU").
 # - "us-central1" é região do Cloud Run, NÃO do BigQuery.
-BQ_LOCATION = os.getenv("BQ_LOCATION", "US")  # multi-região padrão de datasets BigQuery
+_RAW_BQ_LOCATION = os.getenv("BQ_LOCATION", "uscentral-1")
+
+# Normaliza valores comuns de configuração para evitar erro de mapping.
+_LOCATION_MAP = {
+    "uscentral-1": "us-central1",
+    "USCENTRAL-1": "us-central1",
+}
+BQ_LOCATION = _LOCATION_MAP.get(_RAW_BQ_LOCATION, _RAW_BQ_LOCATION)
 
 BQ_STAGING_TABLE = os.getenv("BQ_STAGING_TABLE", "stg_leads_site")
 BQ_FACT_TABLE = os.getenv("BQ_FACT_TABLE", "f_lead")
@@ -36,7 +44,43 @@ MAX_LIMIT = int(os.getenv("BQ_MAX_LIMIT", "2000"))
 EXPORT_MAX_ROWS = int(os.getenv("BQ_EXPORT_MAX_ROWS", "50000"))  # trava de segurança
 EXPORT_PAGE_SIZE = int(os.getenv("BQ_EXPORT_PAGE_SIZE", "5000"))
 
+EXPECTED_STAGING_COLUMNS = [
+    "status_inscricao",
+    "data_inscricao",
+    "nome",
+    "cpf",
+    "celular",
+    "curso",
+    "unidade",
+    "modalidade",
+    "turno",
+    "situacao_negociacao",
+    "proprietario",
+    "acao_comercial",
+    "canal",
+    "status_matriculado",
+    "peca_disparo",
+    "texto_disparo",
+    "consultor_disparo",
+    "data_envio",
+    "campanha",
+    "observacao",
+    "data_contato",
+    "data_matricula",
+]
+
+FLOAT_STAGING_COLUMNS = {
+    "texto_disparo",
+    "consultor_disparo",
+    "data_envio",
+    "campanha",
+    "observacao",
+    "data_contato",
+    "data_matricula",
+}
+
 _bq_client: Optional[bigquery.Client] = None
+_column_exists_cache: Dict[tuple[str, str], bool] = {}
 
 
 def get_bq_client() -> bigquery.Client:
@@ -50,6 +94,29 @@ def get_bq_client() -> bigquery.Client:
 def _tbl(table_name: str) -> str:
     """Fully qualified table name com crases."""
     return f"`{GCP_PROJECT_ID}.{BQ_DATASET}.{table_name}`"
+
+
+def _column_exists(table_name: str, column_name: str) -> bool:
+    """Verifica existência de coluna no dataset para evitar SQL inválida."""
+    key = (table_name, column_name)
+    if key in _column_exists_cache:
+        return _column_exists_cache[key]
+
+    client = get_bq_client()
+    sql = f"""
+    SELECT COUNT(1) AS cnt
+    FROM `{GCP_PROJECT_ID}.{BQ_DATASET}.INFORMATION_SCHEMA.COLUMNS`
+    WHERE table_name = @table_name
+      AND column_name = @column_name
+    """
+    params = [
+        bigquery.ScalarQueryParameter("table_name", "STRING", table_name),
+        bigquery.ScalarQueryParameter("column_name", "STRING", column_name),
+    ]
+    rows = list(client.query(sql, job_config=bigquery.QueryJobConfig(query_parameters=params)).result())
+    exists = bool(rows and int(rows[0]["cnt"]) > 0)
+    _column_exists_cache[key] = exists
+    return exists
 
 
 def _as_list(v: Any) -> List[str]:
@@ -80,6 +147,38 @@ def _as_list(v: Any) -> List[str]:
 # =========================
 # 1) LOAD -> STAGING (WRITE_TRUNCATE)
 # =========================
+def normalize_upload_dataframe(df):
+    """
+    Normaliza o dataframe de upload para o schema esperado da staging.
+    - renomeia colunas para snake_case simples
+    - garante presença de todas as colunas esperadas
+    - converte colunas não numéricas para STRING e colunas mapeadas para FLOAT
+    - mantém apenas as colunas esperadas na ordem correta
+    """
+    norm_cols = {
+        str(c).strip().lower().replace(" ", "_").replace("-", "_"): c
+        for c in df.columns
+    }
+
+    out = df.copy()
+    rename_map = {orig: norm for norm, orig in norm_cols.items()}
+    out = out.rename(columns=rename_map)
+
+    for col in EXPECTED_STAGING_COLUMNS:
+        if col not in out.columns:
+            out[col] = None
+
+    out = out[EXPECTED_STAGING_COLUMNS]
+
+    for col in EXPECTED_STAGING_COLUMNS:
+        if col in FLOAT_STAGING_COLUMNS:
+            out[col] = pd.to_numeric(out[col], errors="coerce")
+        else:
+            out[col] = out[col].apply(lambda v: None if v is None else str(v).strip() or None)
+
+    return out
+
+
 def load_to_staging(df) -> None:
     """
     Carrega DataFrame para a staging (limpa a cada upload).
@@ -137,6 +236,7 @@ def _apply_filters(sql: str, filters: Dict[str, Any], params: List[Any]) -> str:
     polos = _as_list(filters.get("polo"))
     status_list = _as_list(filters.get("status"))
     consultores = _as_list(filters.get("consultor"))
+    modalidades = _as_list(filters.get("modalidade"))
 
     if cursos:
         sql += " AND dc.nome_curso IN UNNEST(@cursos)"
@@ -153,6 +253,16 @@ def _apply_filters(sql: str, filters: Dict[str, Any], params: List[Any]) -> str:
     if consultores:
         sql += " AND dco.consultor_original IN UNNEST(@consultores)"
         params.append(bigquery.ArrayQueryParameter("consultores", "STRING", consultores))
+
+    modalidade_expr = None
+    if _column_exists("dim_curso", "modalidade"):
+        modalidade_expr = "dc.modalidade"
+    elif _column_exists(BQ_FACT_TABLE, "modalidade"):
+        modalidade_expr = "f.modalidade"
+
+    if modalidades and modalidade_expr:
+        sql += f" AND {modalidade_expr} IN UNNEST(@modalidades)"
+        params.append(bigquery.ArrayQueryParameter("modalidades", "STRING", modalidades))
 
     # SINGLE
     if filters.get("cpf"):
@@ -267,11 +377,18 @@ def _distinct_dim_values(table: str, col: str, alias: str) -> List[str]:
 
 
 def query_options() -> Dict[str, List[str]]:
+    modalidades: List[str] = []
+    if _column_exists("dim_curso", "modalidade"):
+        modalidades = _distinct_dim_values("dim_curso", "modalidade", "modalidade")
+    elif _column_exists(BQ_FACT_TABLE, "modalidade"):
+        modalidades = _distinct_dim_values(BQ_FACT_TABLE, "modalidade", "modalidade")
+
     return {
         "status": _distinct_dim_values("dim_status", "status_original", "status"),
         "cursos": _distinct_dim_values("dim_curso", "nome_curso", "curso"),
         "polos": _distinct_dim_values("dim_polo", "polo_original", "polo"),
         "consultores": _distinct_dim_values("dim_consultor", "consultor_original", "consultor"),
+        "modalidades": modalidades,
     }
 
 
@@ -337,5 +454,6 @@ def export_leads_rows(
 # 6) PIPELINE UPLOAD
 # =========================
 def process_upload_dataframe(df) -> None:
-    load_to_staging(df)
+    normalized_df = normalize_upload_dataframe(df)
+    load_to_staging(normalized_df)
     run_procedure()

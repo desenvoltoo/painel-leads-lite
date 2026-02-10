@@ -7,7 +7,7 @@
 //
 // HTML base (ids):
 // upload: #uploadFile #btnUpload #uploadStatus
-// filtros: #fStatus #fCurso #fPolo #fConsultor #fIni #fFim #fLimit #fBusca
+// filtros: #fStatus #fCurso #fModalidade #fPolo #fConsultor #fIni #fFim #fLimit #fBusca
 // ações: #btnApply #btnClear #btnReload #btnExport
 // kpis: #kpiCount #kpiTopStatus
 // tabela: #tbl tbody
@@ -15,7 +15,7 @@
 
 const $ = (sel) => document.querySelector(sel);
 
-let tsStatus, tsCurso, tsPolo, tsConsultor;
+let tsStatus, tsCurso, tsModalidade, tsPolo, tsConsultor;
 
 /* =========================
    Helpers UI
@@ -132,6 +132,7 @@ function makeTomSelect(selector) {
 function initMultiSelects() {
   tsStatus = makeTomSelect("#fStatus");
   tsCurso = makeTomSelect("#fCurso");
+  tsModalidade = makeTomSelect("#fModalidade");
   tsPolo = makeTomSelect("#fPolo");
   tsConsultor = makeTomSelect("#fConsultor");
 }
@@ -157,6 +158,7 @@ async function loadOptions() {
 
     fillSelect(tsStatus, data?.status || []);
     fillSelect(tsCurso, data?.cursos || []);
+    fillSelect(tsModalidade, data?.modalidades || []);
     fillSelect(tsPolo, data?.polos || []);
     fillSelect(tsConsultor, data?.consultores || []);
 
@@ -197,6 +199,7 @@ function parseBuscaRapida(txt) {
 function buildLeadsParams() {
   const status = getMulti(tsStatus);
   const cursos = getMulti(tsCurso);
+  const modalidades = getMulti(tsModalidade);
   const polos = getMulti(tsPolo);
   const consultores = getMulti(tsConsultor);
 
@@ -212,6 +215,7 @@ function buildLeadsParams() {
     // enquanto isso, o filtro exato funciona quando 1 selecionado.
     status: status,
     curso: cursos,
+    modalidade: modalidades,
     polo: polos,
     consultor: consultores,
     data_ini,
@@ -374,6 +378,7 @@ function exportCsvFromTable() {
 function clearFilters() {
   tsStatus?.clear(true);
   tsCurso?.clear(true);
+  tsModalidade?.clear(true);
   tsPolo?.clear(true);
   tsConsultor?.clear(true);
 
