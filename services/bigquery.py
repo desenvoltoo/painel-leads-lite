@@ -2,10 +2,11 @@
 # =========================
 # V14 — Staging (WRITE_TRUNCATE) -> CALL SP -> Query f_lead + LEFT JOIN dims
 # + query_options() direto nas dimensões (sem NotFound)
+# + FILTROS MULTI (IN UNNEST) para: status/curso/polo/consultor
 # =========================
 
 import os
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 from google.cloud import bigquery
 
@@ -38,6 +39,29 @@ def get_bq_client() -> bigquery.Client:
 def _tbl(table_name: str) -> str:
     """Fully qualified table name com crases."""
     return f"`{GCP_PROJECT_ID}.{BQ_DATASET}.{table_name}`"
+
+
+def _as_list(v: Any) -> List[str]:
+    """
+    Normaliza filtros multi vindos do app:
+    - None -> []
+    - str -> tenta split por '||' (o JS manda "A || B"), e também aceita ','.
+    - list/tuple -> lista de strings
+    """
+    if v is None:
+        return []
+    if isinstance(v, (list, tuple)):
+        return [str(x).strip() for x in v if str(x).strip()]
+    s = str(v).strip()
+    if not s:
+        return []
+    if "||" in s:
+        parts = [p.strip() for p in s.split("||")]
+        return [p for p in parts if p]
+    if "," in s:
+        parts = [p.strip() for p in s.split(",")]
+        return [p for p in parts if p]
+    return [s]
 
 
 # =========================
@@ -75,7 +99,7 @@ def run_procedure() -> None:
 
 
 # =========================
-# 3) QUERY PRINCIPAL (PAINEL)
+# 3) QUERY PRINCIPAL (PAINEL) — MULTI FILTERS
 # =========================
 def query_leads(
     filters: Optional[Dict[str, Any]] = None,
@@ -86,8 +110,9 @@ def query_leads(
 ) -> List[Dict[str, Any]]:
     """
     Retorna leads com NOMES (via LEFT JOIN dims), sem exibir IDs numéricos.
+
     filters (opcionais):
-      - curso, polo, status, consultor
+      - status, curso, polo, consultor  -> aceita string "A || B" ou lista ["A","B"]
       - cpf, celular, email, nome (busca parcial)
       - data_ini, data_fim (filtra por data_inscricao_dt)
     """
@@ -147,44 +172,48 @@ def query_leads(
     WHERE 1=1
     """
 
-    params: List[bigquery.ScalarQueryParameter] = []
+    params: List[bigquery.QueryParameter] = []
 
-    # Filtros por nomes das dimensões (match exato)
-    if filters.get("curso"):
-        sql += " AND dc.curso = @curso"
-        params.append(bigquery.ScalarQueryParameter("curso", "STRING", filters["curso"]))
+    # ---- MULTI FILTERS (ARRAY<STRING>) ----
+    cursos = _as_list(filters.get("curso"))
+    polos = _as_list(filters.get("polo"))
+    status_list = _as_list(filters.get("status"))
+    consultores = _as_list(filters.get("consultor"))
 
-    if filters.get("polo"):
-        sql += " AND dp.polo = @polo"
-        params.append(bigquery.ScalarQueryParameter("polo", "STRING", filters["polo"]))
+    if cursos:
+        sql += " AND dc.curso IN UNNEST(@cursos)"
+        params.append(bigquery.ArrayQueryParameter("cursos", "STRING", cursos))
 
-    if filters.get("status"):
-        sql += " AND ds.status = @status"
-        params.append(bigquery.ScalarQueryParameter("status", "STRING", filters["status"]))
+    if polos:
+        sql += " AND dp.polo IN UNNEST(@polos)"
+        params.append(bigquery.ArrayQueryParameter("polos", "STRING", polos))
 
-    if filters.get("consultor"):
-        sql += " AND dco.consultor = @consultor"
-        params.append(bigquery.ScalarQueryParameter("consultor", "STRING", filters["consultor"]))
+    if status_list:
+        sql += " AND ds.status IN UNNEST(@status_list)"
+        params.append(bigquery.ArrayQueryParameter("status_list", "STRING", status_list))
 
-    # Filtros por pessoa (match parcial / normalizado)
-    # Obs: se cpf/celular tiverem máscara, você pode normalizar no front antes de mandar
+    if consultores:
+        sql += " AND dco.consultor IN UNNEST(@consultores)"
+        params.append(bigquery.ArrayQueryParameter("consultores", "STRING", consultores))
+
+    # ---- SINGLE filters ----
     if filters.get("cpf"):
         sql += " AND dpe.cpf = @cpf"
-        params.append(bigquery.ScalarQueryParameter("cpf", "STRING", filters["cpf"]))
+        params.append(bigquery.ScalarQueryParameter("cpf", "STRING", str(filters["cpf"]).strip()))
 
     if filters.get("celular"):
         sql += " AND dpe.celular = @celular"
-        params.append(bigquery.ScalarQueryParameter("celular", "STRING", filters["celular"]))
+        params.append(bigquery.ScalarQueryParameter("celular", "STRING", str(filters["celular"]).strip()))
 
     if filters.get("email"):
         sql += " AND LOWER(dpe.email) = LOWER(@email)"
-        params.append(bigquery.ScalarQueryParameter("email", "STRING", filters["email"]))
+        params.append(bigquery.ScalarQueryParameter("email", "STRING", str(filters["email"]).strip()))
 
     if filters.get("nome"):
         sql += " AND LOWER(dpe.nome) LIKE LOWER(@nome_like)"
-        params.append(bigquery.ScalarQueryParameter("nome_like", "STRING", f"%{filters['nome']}%"))
+        params.append(bigquery.ScalarQueryParameter("nome_like", "STRING", f"%{str(filters['nome']).strip()}%"))
 
-    # Filtro por data de inscrição (intervalo)
+    # ---- date range ----
     if filters.get("data_ini"):
         sql += " AND f.data_inscricao_dt >= @data_ini"
         params.append(bigquery.ScalarQueryParameter("data_ini", "DATE", filters["data_ini"]))
@@ -210,6 +239,7 @@ def query_leads(
 def query_leads_count(filters: Optional[Dict[str, Any]] = None) -> int:
     """
     Retorna total de registros para paginação (mesmos filtros do query_leads).
+    Respeita filtros MULTI via IN UNNEST.
     """
     client = get_bq_client()
     filters = filters or {}
@@ -225,39 +255,44 @@ def query_leads_count(filters: Optional[Dict[str, Any]] = None) -> int:
     WHERE 1=1
     """
 
-    params: List[bigquery.ScalarQueryParameter] = []
+    params: List[bigquery.QueryParameter] = []
 
-    if filters.get("curso"):
-        sql += " AND dc.curso = @curso"
-        params.append(bigquery.ScalarQueryParameter("curso", "STRING", filters["curso"]))
+    cursos = _as_list(filters.get("curso"))
+    polos = _as_list(filters.get("polo"))
+    status_list = _as_list(filters.get("status"))
+    consultores = _as_list(filters.get("consultor"))
 
-    if filters.get("polo"):
-        sql += " AND dp.polo = @polo"
-        params.append(bigquery.ScalarQueryParameter("polo", "STRING", filters["polo"]))
+    if cursos:
+        sql += " AND dc.curso IN UNNEST(@cursos)"
+        params.append(bigquery.ArrayQueryParameter("cursos", "STRING", cursos))
 
-    if filters.get("status"):
-        sql += " AND ds.status = @status"
-        params.append(bigquery.ScalarQueryParameter("status", "STRING", filters["status"]))
+    if polos:
+        sql += " AND dp.polo IN UNNEST(@polos)"
+        params.append(bigquery.ArrayQueryParameter("polos", "STRING", polos))
 
-    if filters.get("consultor"):
-        sql += " AND dco.consultor = @consultor"
-        params.append(bigquery.ScalarQueryParameter("consultor", "STRING", filters["consultor"]))
+    if status_list:
+        sql += " AND ds.status IN UNNEST(@status_list)"
+        params.append(bigquery.ArrayQueryParameter("status_list", "STRING", status_list))
+
+    if consultores:
+        sql += " AND dco.consultor IN UNNEST(@consultores)"
+        params.append(bigquery.ArrayQueryParameter("consultores", "STRING", consultores))
 
     if filters.get("cpf"):
         sql += " AND dpe.cpf = @cpf"
-        params.append(bigquery.ScalarQueryParameter("cpf", "STRING", filters["cpf"]))
+        params.append(bigquery.ScalarQueryParameter("cpf", "STRING", str(filters["cpf"]).strip()))
 
     if filters.get("celular"):
         sql += " AND dpe.celular = @celular"
-        params.append(bigquery.ScalarQueryParameter("celular", "STRING", filters["celular"]))
+        params.append(bigquery.ScalarQueryParameter("celular", "STRING", str(filters["celular"]).strip()))
 
     if filters.get("email"):
         sql += " AND LOWER(dpe.email) = LOWER(@email)"
-        params.append(bigquery.ScalarQueryParameter("email", "STRING", filters["email"]))
+        params.append(bigquery.ScalarQueryParameter("email", "STRING", str(filters["email"]).strip()))
 
     if filters.get("nome"):
         sql += " AND LOWER(dpe.nome) LIKE LOWER(@nome_like)"
-        params.append(bigquery.ScalarQueryParameter("nome_like", "STRING", f"%{filters['nome']}%"))
+        params.append(bigquery.ScalarQueryParameter("nome_like", "STRING", f"%{str(filters['nome']).strip()}%"))
 
     if filters.get("data_ini"):
         sql += " AND f.data_inscricao_dt >= @data_ini"
@@ -276,9 +311,7 @@ def query_leads_count(filters: Optional[Dict[str, Any]] = None) -> int:
 # 4) OPTIONS (FILTROS) DIRETO NAS DIMs
 # =========================
 def _distinct_dim_values(table: str, col: str, alias: str) -> List[str]:
-    """
-    Pega SELECT DISTINCT de uma coluna de uma dimensão.
-    """
+    """Pega SELECT DISTINCT de uma coluna de uma dimensão."""
     client = get_bq_client()
     sql = f"""
     SELECT DISTINCT {col} AS {alias}
@@ -296,16 +329,14 @@ def query_options() -> Dict[str, List[str]]:
     - status: dim_status.status
     - cursos: dim_curso.curso
     - polos: dim_polo.polo
-    - consultores: dim_consultor.consultor (opcional, mas útil)
+    - consultores: dim_consultor.consultor
     """
-    # Se em algum ambiente a coluna tiver nome diferente, ajuste aqui (um único ponto).
-    options = {
+    return {
         "status": _distinct_dim_values("dim_status", "status", "status"),
         "cursos": _distinct_dim_values("dim_curso", "curso", "curso"),
         "polos": _distinct_dim_values("dim_polo", "polo", "polo"),
         "consultores": _distinct_dim_values("dim_consultor", "consultor", "consultor"),
     }
-    return options
 
 
 # =========================
