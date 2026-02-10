@@ -104,7 +104,6 @@ def _column_exists(table_name: str, column_name: str) -> bool:
     if key in _column_exists_cache:
         return _column_exists_cache[key]
 
-    client = get_bq_client()
     sql = f"""
     SELECT COUNT(1) AS cnt
     FROM `{GCP_PROJECT_ID}.{BQ_DATASET}.INFORMATION_SCHEMA.COLUMNS`
@@ -115,10 +114,27 @@ def _column_exists(table_name: str, column_name: str) -> bool:
         bigquery.ScalarQueryParameter("table_name", "STRING", table_name),
         bigquery.ScalarQueryParameter("column_name", "STRING", column_name),
     ]
-    rows = list(client.query(sql, job_config=bigquery.QueryJobConfig(query_parameters=params)).result())
-    exists = bool(rows and int(rows[0]["cnt"]) > 0)
+    try:
+        client = get_bq_client()
+        rows = list(client.query(sql, job_config=bigquery.QueryJobConfig(query_parameters=params)).result())
+        exists = bool(rows and int(rows[0]["cnt"]) > 0)
+    except Exception:
+        # Evita quebrar API caso INFORMATION_SCHEMA não esteja acessível no ambiente.
+        exists = False
+
     _column_exists_cache[key] = exists
     return exists
+
+
+def _get_modalidade_expr() -> Optional[str]:
+    """Resolve a coluna de modalidade priorizando dim_curso."""
+    for col in ("modalidade", "modalidade_curso", "tp_modalidade"):
+        if _column_exists("dim_curso", col):
+            return f"dc.{col}"
+    for col in ("modalidade", "modalidade_curso", "tp_modalidade"):
+        if _column_exists(BQ_FACT_TABLE, col):
+            return f"f.{col}"
+    return None
 
 
 def _as_list(v: Any) -> List[str]:
@@ -311,12 +327,7 @@ def _apply_filters(sql: str, filters: Dict[str, Any], params: List[Any]) -> str:
         sql += " AND dco.consultor_original IN UNNEST(@consultores)"
         params.append(bigquery.ArrayQueryParameter("consultores", "STRING", consultores))
 
-    modalidade_expr = None
-    if _column_exists("dim_curso", "modalidade"):
-        modalidade_expr = "dc.modalidade"
-    elif _column_exists(BQ_FACT_TABLE, "modalidade"):
-        modalidade_expr = "f.modalidade"
-
+    modalidade_expr = _get_modalidade_expr()
     if modalidades and modalidade_expr:
         sql += f" AND {modalidade_expr} IN UNNEST(@modalidades)"
         params.append(bigquery.ArrayQueryParameter("modalidades", "STRING", modalidades))
@@ -435,10 +446,16 @@ def _distinct_dim_values(table: str, col: str, alias: str) -> List[str]:
 
 def query_options() -> Dict[str, List[str]]:
     modalidades: List[str] = []
-    if _column_exists("dim_curso", "modalidade"):
-        modalidades = _distinct_dim_values("dim_curso", "modalidade", "modalidade")
-    elif _column_exists(BQ_FACT_TABLE, "modalidade"):
-        modalidades = _distinct_dim_values(BQ_FACT_TABLE, "modalidade", "modalidade")
+    modalidade_expr = _get_modalidade_expr()
+    try:
+        if modalidade_expr and modalidade_expr.startswith("dc."):
+            col = modalidade_expr.replace("dc.", "")
+            modalidades = _distinct_dim_values("dim_curso", col, "modalidade")
+        elif modalidade_expr and modalidade_expr.startswith("f."):
+            col = modalidade_expr.replace("f.", "")
+            modalidades = _distinct_dim_values(BQ_FACT_TABLE, col, "modalidade")
+    except Exception:
+        modalidades = []
 
     return {
         "status": _distinct_dim_values("dim_status", "status_original", "status"),
