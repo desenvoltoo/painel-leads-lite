@@ -1,19 +1,21 @@
 # -*- coding: utf-8 -*-
 """
 Painel Leads Lite (Flask + BigQuery)
-Versão: 3.0 - Modelo Estrela Consolidado V14 (MULTI filtros)
+Versão: 3.0 - Modelo Estrela Consolidado V14 (MULTI + EXPORT)
 """
 
 import os
 import traceback
 import pandas as pd
-from flask import Flask, render_template, request, jsonify
+from flask import Flask, render_template, request, jsonify, Response
 
 from services.bigquery import (
     query_leads,
     query_leads_count,
     query_options,
-    process_upload_dataframe
+    process_upload_dataframe,
+    export_leads_rows,
+    EXPORT_COLUMNS,
 )
 
 # ============================================================
@@ -35,12 +37,6 @@ def _n(v):
     return v if v else None
 
 def _split_multi(v):
-    """
-    Recebe:
-      - "A || B" -> ["A","B"]
-      - "A" -> ["A"]
-      - ""/None -> None
-    """
     s = _n(v)
     if not s:
         return None
@@ -51,30 +47,20 @@ def _split_multi(v):
     return [s]
 
 def _get_filters_from_request():
-    # MULTI
-    status = _split_multi(request.args.get("status"))
-    curso = _split_multi(request.args.get("curso"))
-    polo = _split_multi(request.args.get("polo"))
-    consultor = _split_multi(request.args.get("consultor"))
-
     filters = {
-        "status": status,
-        "curso": curso,
-        "polo": polo,
-        "consultor": consultor,
+        "status": _split_multi(request.args.get("status")),
+        "curso": _split_multi(request.args.get("curso")),
+        "polo": _split_multi(request.args.get("polo")),
+        "consultor": _split_multi(request.args.get("consultor")),
 
-        # SINGLE
         "cpf": _n(request.args.get("cpf")),
         "celular": _n(request.args.get("celular")),
         "email": _n(request.args.get("email")),
         "nome": _n(request.args.get("nome")),
 
-        # date range
         "data_ini": _n(request.args.get("data_ini")),
         "data_fim": _n(request.args.get("data_fim")),
     }
-
-    # remove None / vazios
     filters = {k: v for k, v in filters.items() if v}
 
     meta = {
@@ -92,6 +78,12 @@ def _error_payload(e: Exception, public_msg: str):
         "details": str(e),
         "trace": traceback.format_exc(limit=3)
     }
+
+def _to_csv_value(v):
+    s = "" if v is None else str(v)
+    if any(ch in s for ch in ['"', ';', '\n', '\r']):
+        s = '"' + s.replace('"', '""') + '"'
+    return s
 
 # ============================================================
 # APP FACTORY
@@ -135,13 +127,8 @@ def create_app() -> Flask:
 
     @app.get("/api/kpis")
     def api_kpis():
-        """
-        KPI simples (para produção, recomendo query agregada dedicada).
-        """
         try:
             filters, meta = _get_filters_from_request()
-
-            # para KPI, evitar paginação (pode pesar). Mantive o limit atual.
             rows = query_leads(
                 filters=filters,
                 limit=meta["limit"],
@@ -185,10 +172,39 @@ def create_app() -> Flask:
                 return jsonify({"ok": False, "error": "Formato inválido. Envie CSV ou XLSX."}), 400
 
             process_upload_dataframe(df)
-
             return jsonify({"ok": True, "message": "Processado com sucesso! (staging + procedure V14)"}), 200
         except Exception as e:
             return jsonify(_error_payload(e, "Falha na ingestão V14.")), 500
+
+    # =========================
+    # EXPORT (server-side)
+    # =========================
+    @app.get("/api/export")
+    def api_export():
+        try:
+            filters, _meta = _get_filters_from_request()
+
+            # Nome do arquivo
+            ts = pd.Timestamp.utcnow().strftime("%Y-%m-%d_%H-%M-%S")
+            filename = f"leads_v14_export_{ts}.csv"
+
+            cols = EXPORT_COLUMNS  # lista (key,label)
+
+            def generate():
+                # header
+                yield ";".join([c[1] for c in cols]) + "\n"
+                # linhas
+                for row in export_leads_rows(filters=filters):
+                    line = ";".join(_to_csv_value(row.get(key)) for key, _label in cols)
+                    yield line + "\n"
+
+            headers = {
+                "Content-Type": "text/csv; charset=utf-8",
+                "Content-Disposition": f'attachment; filename="{filename}"'
+            }
+            return Response(generate(), headers=headers)
+        except Exception as e:
+            return jsonify(_error_payload(e, "Erro ao exportar CSV.")), 500
 
     return app
 
