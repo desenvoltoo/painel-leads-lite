@@ -75,14 +75,28 @@ def create_app() -> Flask:
     app = Flask(__name__)
     app.config["MAX_CONTENT_LENGTH"] = 30 * 1024 * 1024  # Limite de 30MB para uploads
 
+    asset_version = _env("ASSET_VERSION", "20260210-visual4")
+    ui_version = _env("UI_VERSION", f"v{asset_version}")
+
     @app.get("/")
     def index():
-        return render_template("index.html")
+        return render_template(
+            "index.html",
+            asset_version=asset_version,
+            ui_version=ui_version,
+        )
 
     @app.get("/health")
     def health():
         ok, missing = _required_envs_ok()
-        return jsonify({"status": "ok" if ok else "unhealthy", "missing": missing})
+        return jsonify(
+            {
+                "status": "ok" if ok else "unhealthy",
+                "missing": missing,
+                "ui_version": ui_version,
+                "asset_version": asset_version,
+            }
+        )
 
     @app.get("/api/leads")
     def api_leads():

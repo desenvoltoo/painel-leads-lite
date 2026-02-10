@@ -24,7 +24,7 @@ function setStatus(msg, type = "ok") {
   const el = $("#statusLine");
   if (!el) return;
   el.textContent = msg;
-  el.className = type === "err" ? "error" : "";
+  el.className = `status-line ${type === "err" ? "error" : "status-ok"}`;
 }
 
 function setUploadStatus(msg, type = "ok") {
@@ -119,6 +119,7 @@ function makeTomSelect(selector) {
     render: {
       option: (data, escape) => `
         <div class="ts-opt">
+          <span class="ts-opt-check" aria-hidden="true"></span>
           <span class="ts-opt-text">${escape(data.text)}</span>
         </div>
       `,
@@ -222,6 +223,7 @@ function buildLeadsParams() {
 
 async function loadLeadsAndKpis() {
   setStatus("Consultando BigQuery...", "ok");
+  renderTable([], { loading: true });
 
   const params = buildLeadsParams();
 
@@ -260,12 +262,17 @@ function renderTotals(total, shown) {
   if ($("#lblTotal")) $("#lblTotal").textContent = `${shown} / ${total ?? shown}`;
 }
 
-function renderTable(rows) {
+function renderTable(rows, { loading = false } = {}) {
   const tbody = $("#tbl tbody");
   if (!tbody) return;
 
+  if (loading) {
+    tbody.innerHTML = `<tr><td colspan="10" class="table-feedback">Carregando dados...</td></tr>`;
+    return;
+  }
+
   if (!rows || rows.length === 0) {
-    tbody.innerHTML = `<tr><td colspan="10" style="text-align:center">Nenhum dado encontrado</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="10" class="table-feedback">Nenhum dado encontrado</td></tr>`;
     return;
   }
 
