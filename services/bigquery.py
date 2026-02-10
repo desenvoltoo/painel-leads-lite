@@ -12,7 +12,6 @@ import os
 from typing import Any, Dict, List, Optional, Iterable
 
 from google.cloud import bigquery
-from google.cloud.bigquery.query import QueryParameter  # ✅ tipo correto (se quiser tipar)
 
 
 # =========================
@@ -24,7 +23,7 @@ BQ_DATASET = os.getenv("BQ_DATASET", "modelo_estrela")
 # IMPORTANTE:
 # - BigQuery usa location do DATASET (normalmente "US" ou "EU").
 # - "us-central1" é região do Cloud Run, NÃO do BigQuery.
-BQ_LOCATION = os.getenv("BQ_LOCATION", "US")  # ✅ default correto
+BQ_LOCATION = os.getenv("BQ_LOCATION", "uscentral-1")  # ✅ default correto
 
 BQ_STAGING_TABLE = os.getenv("BQ_STAGING_TABLE", "stg_leads_site")
 BQ_FACT_TABLE = os.getenv("BQ_FACT_TABLE", "f_lead")
@@ -122,7 +121,7 @@ def _base_select_sql() -> str:
     """
 
 
-def _apply_filters(sql: str, filters: Dict[str, Any], params: List[QueryParameter]) -> str:
+def _apply_filters(sql: str, filters: Dict[str, Any], params: List[Any]) -> str:
     """
     Aplica filtros no SQL + adiciona QueryParameters.
 
@@ -227,7 +226,7 @@ def query_leads(
       f.campanha                AS campanha
     """ + _base_select_sql()
 
-    params: List[QueryParameter] = []
+    params: List[Any] = []
     sql = _apply_filters(sql, filters, params)
 
     sql += f"\n ORDER BY {order_expr} {order_dir} \n LIMIT @limit OFFSET @offset"
@@ -244,7 +243,7 @@ def query_leads_count(filters: Optional[Dict[str, Any]] = None) -> int:
     filters = filters or {}
 
     sql = "SELECT COUNT(1) AS total " + _base_select_sql()
-    params: List[QueryParameter] = []
+    params: List[Any] = []
     sql = _apply_filters(sql, filters, params)
 
     job_config = bigquery.QueryJobConfig(query_parameters=params)
@@ -318,7 +317,7 @@ def export_leads_rows(
       f.campanha                AS campanha
     """ + _base_select_sql()
 
-    params: List[QueryParameter] = []
+    params: List[Any] = []
     sql = _apply_filters(sql, filters, params)
     sql += "\n ORDER BY f.data_inscricao_dt DESC"
 
