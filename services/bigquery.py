@@ -6,10 +6,13 @@
 # + EXPORT ROWS (server-side) para endpoint /api/export
 # =========================
 
+from __future__ import annotations  # ✅ evita avaliar type hints no import (Python 3.11)
+
 import os
 from typing import Any, Dict, List, Optional, Iterable
 
 from google.cloud import bigquery
+from google.cloud.bigquery.query import QueryParameter  # ✅ tipo correto (se quiser tipar)
 
 
 # =========================
@@ -21,7 +24,7 @@ BQ_DATASET = os.getenv("BQ_DATASET", "modelo_estrela")
 # IMPORTANTE:
 # - BigQuery usa location do DATASET (normalmente "US" ou "EU").
 # - "us-central1" é região do Cloud Run, NÃO do BigQuery.
-BQ_LOCATION = os.getenv("BQ_LOCATION", "US")
+BQ_LOCATION = os.getenv("BQ_LOCATION", "US")  # ✅ default correto
 
 BQ_STAGING_TABLE = os.getenv("BQ_STAGING_TABLE", "stg_leads_site")
 BQ_FACT_TABLE = os.getenv("BQ_FACT_TABLE", "f_lead")
@@ -119,7 +122,7 @@ def _base_select_sql() -> str:
     """
 
 
-def _apply_filters(sql: str, filters: Dict[str, Any], params: List[bigquery.QueryParameter]) -> str:
+def _apply_filters(sql: str, filters: Dict[str, Any], params: List[QueryParameter]) -> str:
     """
     Aplica filtros no SQL + adiciona QueryParameters.
 
@@ -170,7 +173,6 @@ def _apply_filters(sql: str, filters: Dict[str, Any], params: List[bigquery.Quer
         params.append(bigquery.ScalarQueryParameter("nome_like", "STRING", f"%{str(filters['nome']).strip()}%"))
 
     # DATE RANGE (data_inscricao_dt é DATETIME no f_lead)
-    # Front-end manda YYYY-MM-DD; aqui usamos DATE(f.data_inscricao_dt) pra comparar com DATE.
     if filters.get("data_ini"):
         sql += " AND DATE(f.data_inscricao_dt) >= @data_ini"
         params.append(bigquery.ScalarQueryParameter("data_ini", "DATE", filters["data_ini"]))
@@ -192,11 +194,6 @@ def query_leads(
     order_by: str = "data_inscricao_dt",
     order_dir: str = "DESC",
 ) -> List[Dict[str, Any]]:
-    """
-    Retorna leads com NOMES (via LEFT JOIN dims).
-    Campos retornados são os que o front espera:
-      data_inscricao_dt, nome, cpf, celular, email, origem, polo, curso, status, consultor, campanha
-    """
     client = get_bq_client()
     filters = filters or {}
 
@@ -222,20 +219,15 @@ def query_leads(
       dpe.cpf                   AS cpf,
       dpe.celular               AS celular,
       dpe.email                 AS email,
-
-      -- compat com o front: "origem"
       f.canal                   AS origem,
-
       dp.polo_original          AS polo,
       dc.nome_curso             AS curso,
       dco.consultor_original    AS consultor,
       ds.status_original        AS status,
-
-      -- extras (não atrapalham; podem ser usados depois)
       f.campanha                AS campanha
     """ + _base_select_sql()
 
-    params: List[bigquery.QueryParameter] = []
+    params: List[QueryParameter] = []
     sql = _apply_filters(sql, filters, params)
 
     sql += f"\n ORDER BY {order_expr} {order_dir} \n LIMIT @limit OFFSET @offset"
@@ -244,29 +236,20 @@ def query_leads(
 
     job_config = bigquery.QueryJobConfig(query_parameters=params)
     rows = client.query(sql, job_config=job_config).result()
-
-    out: List[Dict[str, Any]] = []
-    for r in rows:
-        out.append(dict(r))
-    return out
+    return [dict(r) for r in rows]
 
 
 def query_leads_count(filters: Optional[Dict[str, Any]] = None) -> int:
-    """
-    Retorna total de registros para paginação (mesmos filtros do query_leads).
-    """
     client = get_bq_client()
     filters = filters or {}
 
     sql = "SELECT COUNT(1) AS total " + _base_select_sql()
-    params: List[bigquery.QueryParameter] = []
+    params: List[QueryParameter] = []
     sql = _apply_filters(sql, filters, params)
 
     job_config = bigquery.QueryJobConfig(query_parameters=params)
     rows = list(client.query(sql, job_config=job_config).result())
-    if not rows:
-        return 0
-    return int(rows[0]["total"])
+    return int(rows[0]["total"]) if rows else 0
 
 
 # =========================
@@ -285,9 +268,6 @@ def _distinct_dim_values(table: str, col: str, alias: str) -> List[str]:
 
 
 def query_options() -> Dict[str, List[str]]:
-    """
-    Opções para filtros diretamente das dimensões (nomes reais do modelo_estrela).
-    """
     return {
         "status": _distinct_dim_values("dim_status", "status_original", "status"),
         "cursos": _distinct_dim_values("dim_curso", "nome_curso", "curso"),
@@ -318,10 +298,6 @@ def export_leads_rows(
     filters: Optional[Dict[str, Any]] = None,
     max_rows: int = EXPORT_MAX_ROWS
 ) -> Iterable[Dict[str, Any]]:
-    """
-    Itera linhas para export com mesma lógica de filtros.
-    Trava max_rows pra não estourar custo/memória.
-    """
     client = get_bq_client()
     filters = filters or {}
 
@@ -342,9 +318,8 @@ def export_leads_rows(
       f.campanha                AS campanha
     """ + _base_select_sql()
 
-    params: List[bigquery.QueryParameter] = []
+    params: List[QueryParameter] = []
     sql = _apply_filters(sql, filters, params)
-
     sql += "\n ORDER BY f.data_inscricao_dt DESC"
 
     job_config = bigquery.QueryJobConfig(query_parameters=params)
@@ -363,10 +338,5 @@ def export_leads_rows(
 # 6) PIPELINE UPLOAD
 # =========================
 def process_upload_dataframe(df) -> None:
-    """
-    Pipeline completo do V14:
-      1) load_to_staging(df) com TRUNCATE
-      2) run_procedure() para consolidar em dims + fato
-    """
     load_to_staging(df)
     run_procedure()
