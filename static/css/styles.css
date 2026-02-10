@@ -134,6 +134,17 @@ body {
 .card-header h2 { margin: 0; font-size: 1.15rem; }
 .card-header p { margin: 8px 0 0; color: var(--text-soft); }
 
+.novo-filtro-alerta {
+  margin-top: 10px;
+  display: inline-block;
+  padding: 5px 10px;
+  border-radius: 999px;
+  font-size: 0.78rem;
+  font-weight: 700;
+  color: #031228;
+  background: linear-gradient(135deg, #8fd2ff, #8aa2ff);
+}
+
 .status-line { min-height: 20px; }
 .status-ok { color: var(--text-soft); }
 .error { color: var(--danger); }
