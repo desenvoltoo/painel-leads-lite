@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 Painel Leads Lite (Flask + BigQuery)
-Versão: 3.0 - Modelo Estrela Consolidado V14
+Versão: 3.0 - Modelo Estrela Consolidado V14 (MULTI filtros)
 """
 
 import os
@@ -24,39 +24,64 @@ def _env(name: str, default: str = "") -> str:
     return v.strip() if isinstance(v, str) else v if v else default
 
 def _required_envs_ok():
-    # Verificação mínima para o app rodar com segurança
     missing = []
     for k in ("GCP_PROJECT_ID", "BQ_DATASET"):
         if not _env(k):
             missing.append(k)
     return (len(missing) == 0, missing)
 
-def _get_filters_from_request():
-    def n(v):
-        v = (v or "").strip()
-        return v if v else None
+def _n(v):
+    v = (v or "").strip()
+    return v if v else None
 
-    # filtros
+def _split_multi(v):
+    """
+    Recebe:
+      - "A || B" -> ["A","B"]
+      - "A" -> ["A"]
+      - ""/None -> None
+    """
+    s = _n(v)
+    if not s:
+        return None
+    if "||" in s:
+        parts = [p.strip() for p in s.split("||")]
+        parts = [p for p in parts if p]
+        return parts if parts else None
+    return [s]
+
+def _get_filters_from_request():
+    # MULTI
+    status = _split_multi(request.args.get("status"))
+    curso = _split_multi(request.args.get("curso"))
+    polo = _split_multi(request.args.get("polo"))
+    consultor = _split_multi(request.args.get("consultor"))
+
     filters = {
-        "status": n(request.args.get("status")),
-        "curso": n(request.args.get("curso")),
-        "polo": n(request.args.get("polo")),
-        "consultor": n(request.args.get("consultor")),
-        "cpf": n(request.args.get("cpf")),
-        "celular": n(request.args.get("celular")),
-        "email": n(request.args.get("email")),
-        "nome": n(request.args.get("nome")),
-        "data_ini": n(request.args.get("data_ini")),
-        "data_fim": n(request.args.get("data_fim")),
+        "status": status,
+        "curso": curso,
+        "polo": polo,
+        "consultor": consultor,
+
+        # SINGLE
+        "cpf": _n(request.args.get("cpf")),
+        "celular": _n(request.args.get("celular")),
+        "email": _n(request.args.get("email")),
+        "nome": _n(request.args.get("nome")),
+
+        # date range
+        "data_ini": _n(request.args.get("data_ini")),
+        "data_fim": _n(request.args.get("data_fim")),
     }
+
+    # remove None / vazios
     filters = {k: v for k, v in filters.items() if v}
 
-    # meta (paginação/ordenação)
     meta = {
         "limit": int(request.args.get("limit") or 500),
         "offset": int(request.args.get("offset") or 0),
-        "order_by": n(request.args.get("order_by")) or "data_inscricao_dt",
-        "order_dir": n(request.args.get("order_dir")) or "DESC",
+        "order_by": _n(request.args.get("order_by")) or "data_inscricao_dt",
+        "order_dir": _n(request.args.get("order_dir")) or "DESC",
     }
     return filters, meta
 
@@ -73,7 +98,7 @@ def _error_payload(e: Exception, public_msg: str):
 # ============================================================
 def create_app() -> Flask:
     app = Flask(__name__)
-    app.config["MAX_CONTENT_LENGTH"] = 30 * 1024 * 1024  # Limite de 30MB para uploads
+    app.config["MAX_CONTENT_LENGTH"] = 30 * 1024 * 1024  # 30MB
 
     @app.get("/")
     def index():
@@ -84,11 +109,18 @@ def create_app() -> Flask:
         ok, missing = _required_envs_ok()
         return jsonify({"status": "ok" if ok else "unhealthy", "missing": missing})
 
+    @app.get("/api/options")
+    def api_options():
+        try:
+            data = query_options()
+            return jsonify({"ok": True, "data": data})
+        except Exception as e:
+            return jsonify(_error_payload(e, "Erro ao carregar opções dos filtros.")), 500
+
     @app.get("/api/leads")
     def api_leads():
         try:
             filters, meta = _get_filters_from_request()
-
             rows = query_leads(
                 filters=filters,
                 limit=meta["limit"],
@@ -97,7 +129,6 @@ def create_app() -> Flask:
                 order_dir=meta["order_dir"],
             )
             total = query_leads_count(filters=filters)
-
             return jsonify({"ok": True, "total": total, "data": rows})
         except Exception as e:
             return jsonify(_error_payload(e, "Erro ao buscar leads no BigQuery.")), 500
@@ -105,12 +136,12 @@ def create_app() -> Flask:
     @app.get("/api/kpis")
     def api_kpis():
         """
-        OBS: Esta rota faz uma query completa de leads para calcular KPI.
-        Em produção, o ideal é ter uma query agregada dedicada no BigQuery.
+        KPI simples (para produção, recomendo query agregada dedicada).
         """
         try:
             filters, meta = _get_filters_from_request()
-            # Usa o mesmo limit da requisição, mas pra KPI você pode querer ignorar limit.
+
+            # para KPI, evitar paginação (pode pesar). Mantive o limit atual.
             rows = query_leads(
                 filters=filters,
                 limit=meta["limit"],
@@ -130,21 +161,9 @@ def create_app() -> Flask:
                 best = max(status_counts, key=status_counts.get)
                 top_status = {"status": best, "cnt": status_counts[best]}
 
-            return jsonify({
-                "ok": True,
-                "total": total,
-                "top_status": top_status
-            })
+            return jsonify({"ok": True, "total": total, "top_status": top_status})
         except Exception as e:
             return jsonify(_error_payload(e, "Erro ao calcular KPIs.")), 500
-
-    @app.get("/api/options")
-    def api_options():
-        try:
-            data = query_options()
-            return jsonify({"ok": True, "data": data})
-        except Exception as e:
-            return jsonify(_error_payload(e, "Erro ao carregar opções dos filtros.")), 500
 
     @app.post("/api/upload")
     def api_upload():
@@ -165,7 +184,6 @@ def create_app() -> Flask:
             else:
                 return jsonify({"ok": False, "error": "Formato inválido. Envie CSV ou XLSX."}), 400
 
-            # V14: staging TRUNCATE + CALL procedure
             process_upload_dataframe(df)
 
             return jsonify({"ok": True, "message": "Processado com sucesso! (staging + procedure V14)"}), 200
