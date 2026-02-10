@@ -23,7 +23,7 @@ BQ_DATASET = os.getenv("BQ_DATASET", "modelo_estrela")
 # IMPORTANTE:
 # - BigQuery usa location do DATASET (normalmente "US" ou "EU").
 # - "us-central1" é região do Cloud Run, NÃO do BigQuery.
-BQ_LOCATION = os.getenv("BQ_LOCATION", "uscentral-1")  # ✅ default correto
+BQ_LOCATION = os.getenv("BQ_LOCATION", "US")  # multi-região padrão de datasets BigQuery
 
 BQ_STAGING_TABLE = os.getenv("BQ_STAGING_TABLE", "stg_leads_site")
 BQ_FACT_TABLE = os.getenv("BQ_FACT_TABLE", "f_lead")

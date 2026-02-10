@@ -75,14 +75,28 @@ def create_app() -> Flask:
     app = Flask(__name__)
     app.config["MAX_CONTENT_LENGTH"] = 30 * 1024 * 1024  # Limite de 30MB para uploads
 
+    asset_version = _env("ASSET_VERSION", "20260210-visual4")
+    ui_version = _env("UI_VERSION", f"v{asset_version}")
+
     @app.get("/")
     def index():
-        return render_template("index.html")
+        return render_template(
+            "index.html",
+            asset_version=asset_version,
+            ui_version=ui_version,
+        )
 
     @app.get("/health")
     def health():
         ok, missing = _required_envs_ok()
-        return jsonify({"status": "ok" if ok else "unhealthy", "missing": missing})
+        return jsonify(
+            {
+                "status": "ok" if ok else "unhealthy",
+                "missing": missing,
+                "ui_version": ui_version,
+                "asset_version": asset_version,
+            }
+        )
 
     @app.get("/api/leads")
     def api_leads():
@@ -161,7 +175,16 @@ def create_app() -> Flask:
             if filename.endswith(".csv"):
                 df = pd.read_csv(f)
             elif filename.endswith(".xlsx") or filename.endswith(".xls"):
-                df = pd.read_excel(f)
+                try:
+                    df = pd.read_excel(f)
+                except ImportError as e:
+                    return jsonify(
+                        {
+                            "ok": False,
+                            "error": "Leitura de Excel indisponível no ambiente. Instale 'openpyxl' para processar XLSX.",
+                            "details": str(e),
+                        }
+                    ), 500
             else:
                 return jsonify({"ok": False, "error": "Formato inválido. Envie CSV ou XLSX."}), 400
 
