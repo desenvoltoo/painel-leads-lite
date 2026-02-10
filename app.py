@@ -6,15 +6,19 @@ Versão: 3.0 - Modelo Estrela Consolidado V14
 
 import os
 import io
+import csv
+import logging
 import traceback
 import pandas as pd
-from flask import Flask, render_template, request, jsonify
+from flask import Flask, render_template, request, jsonify, Response, stream_with_context
 
 from services.bigquery import (
     query_leads,
     query_leads_count,
     query_options,
-    process_upload_dataframe_batched
+    process_upload_dataframe_batched,
+    export_staging_variable_rows,
+    EXPORT_VARIABLE_COLUMNS,
 )
 
 # ============================================================
@@ -23,6 +27,9 @@ from services.bigquery import (
 def _env(name: str, default: str = "") -> str:
     v = os.getenv(name)
     return v.strip() if isinstance(v, str) else v if v else default
+
+logging.basicConfig(level=_env("LOG_LEVEL", "INFO"))
+logger = logging.getLogger(__name__)
 
 def _required_envs_ok():
     # Verificação mínima para o app rodar com segurança
@@ -94,6 +101,7 @@ def _read_csv_flexible(file_storage):
             return df
         except Exception as e:
             last_error = e
+            logger.warning("Falha ao ler CSV com sep=%s encoding=%s: %s", cfg["sep"], cfg["encoding"], e)
 
     raise ValueError(f"Falha ao ler CSV. Verifique encoding/separador. Erro: {last_error}")
 
@@ -200,6 +208,41 @@ def create_app() -> Flask:
         except Exception as e:
             return jsonify(_error_payload(e, "Erro ao carregar opções dos filtros.")), 500
 
+    @app.get("/api/export/variaveis")
+    def api_export_variaveis():
+        try:
+            def _iter_csv_lines():
+                sio = io.StringIO()
+                writer = csv.writer(sio, delimiter=';', quoting=csv.QUOTE_ALL)
+
+                writer.writerow(EXPORT_VARIABLE_COLUMNS)
+                yield sio.getvalue()
+                sio.seek(0)
+                sio.truncate(0)
+
+                for row in export_staging_variable_rows():
+                    writer.writerow([row.get(col) for col in EXPORT_VARIABLE_COLUMNS])
+                    yield sio.getvalue()
+                    sio.seek(0)
+                    sio.truncate(0)
+
+            ts = pd.Timestamp.utcnow().strftime('%Y%m%d-%H%M%S')
+            filename = f"variaveis_staging_{ts}.csv"
+            bom = "﻿"
+            headers = {
+                "Content-Disposition": f'attachment; filename="{filename}"',
+                "Content-Type": "text/csv; charset=utf-8",
+            }
+            def _stream_with_bom():
+                yield bom
+                for line in _iter_csv_lines():
+                    yield line
+
+            return Response(stream_with_context(_stream_with_bom()), headers=headers)
+        except Exception as e:
+            logger.exception("Falha na exportação de variáveis")
+            return jsonify(_error_payload(e, "Falha ao exportar variáveis da staging.")), 500
+
     @app.post("/api/upload")
     def api_upload():
         if "file" not in request.files:
@@ -244,6 +287,7 @@ def create_app() -> Flask:
             else:
                 return jsonify({"ok": False, "error": "Formato inválido. Envie CSV ou XLSX."}), 400
         except Exception as e:
+            logger.exception("Falha na ingestão V14 durante upload")
             return jsonify(_error_payload(e, "Falha na ingestão V14.")), 500
 
     return app

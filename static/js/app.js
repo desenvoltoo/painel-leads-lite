@@ -363,35 +363,31 @@ async function doUpload() {
 }
 
 /* =========================
-   Export CSV (client-side)
+   Export CSV (server-side)
 ========================= */
-function exportCsvFromTable() {
-  const tbody = $("#tbl tbody");
-  if (!tbody) return;
+async function exportCsvFromTable() {
+  try {
+    setStatus("Gerando exportação completa de variáveis...", "ok");
+    const res = await fetch('/api/export/variaveis', { cache: 'no-store' });
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      throw new Error(body?.error || 'Falha ao exportar variáveis.');
+    }
 
-  const rows = Array.from(tbody.querySelectorAll("tr"));
-  if (rows.length === 0) {
-    setStatus("Nada para exportar.", "err");
-    return;
+    const blob = await res.blob();
+    const a = document.createElement("a");
+    const ts = new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-");
+    a.href = URL.createObjectURL(blob);
+    a.download = `variaveis_staging_${ts}.csv`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+
+    setStatus("Exportação concluída com sucesso.", "ok");
+  } catch (e) {
+    console.error(e);
+    setStatus(e.message || "Erro ao exportar variáveis.", "err");
   }
-
-  const headers = Array.from($("#tbl thead tr").children).map(th => th.textContent.trim());
-  const lines = [];
-  lines.push(headers.map(toCsvValue).join(";"));
-
-  rows.forEach(tr => {
-    const cols = Array.from(tr.children).map(td => td.textContent.trim());
-    lines.push(cols.map(toCsvValue).join(";"));
-  });
-
-  const blob = new Blob([lines.join("\n")], { type: "text/csv;charset=utf-8" });
-  const a = document.createElement("a");
-  const ts = new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-");
-  a.href = URL.createObjectURL(blob);
-  a.download = `leads_v14_${ts}.csv`;
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
 }
 
 /* =========================

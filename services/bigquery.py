@@ -469,6 +469,31 @@ def query_options() -> Dict[str, List[str]]:
 # =========================
 # 5) EXPORT (server-side)
 # =========================
+EXPORT_VARIABLE_COLUMNS = [
+    "status_inscricao",
+    "data_inscricao",
+    "nome",
+    "cpf",
+    "celular",
+    "curso",
+    "unidade",
+    "modalidade",
+    "turno",
+    "situacao_negociacao",
+    "proprietario",
+    "acao_comercial",
+    "canal",
+    "status_matriculado",
+    "peca_disparo",
+    "texto_disparo",
+    "consultor_disparo",
+    "data_envio",
+    "campanha",
+    "observacao",
+    "data_contato",
+    "data_matricula",
+]
+
 EXPORT_COLUMNS = [
     ("data_inscricao_dt", "Data Inscrição"),
     ("nome", "Candidato"),
@@ -482,6 +507,30 @@ EXPORT_COLUMNS = [
     ("consultor", "Consultor"),
     ("campanha", "Campanha"),
 ]
+
+
+def export_staging_variable_rows(max_rows: int = EXPORT_MAX_ROWS) -> Iterable[Dict[str, Any]]:
+    """Exporta as colunas variáveis diretamente da staging com ordem fixa."""
+    client = get_bq_client()
+    max_rows = max(1, min(int(max_rows), EXPORT_MAX_ROWS))
+
+    select_cols = ",\n      ".join([f"{c}" for c in EXPORT_VARIABLE_COLUMNS])
+    sql = f"""
+    SELECT
+      {select_cols}
+    FROM {_tbl(BQ_STAGING_TABLE)}
+    """
+
+    job = client.query(sql)
+
+    yielded = 0
+    for page in job.result(page_size=EXPORT_PAGE_SIZE).pages:
+        for row in page:
+            d = dict(row)
+            yield {col: d.get(col) for col in EXPORT_VARIABLE_COLUMNS}
+            yielded += 1
+            if yielded >= max_rows:
+                return
 
 
 def export_leads_rows(
