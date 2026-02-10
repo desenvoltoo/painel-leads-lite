@@ -15,15 +15,7 @@ steps:
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk:slim'
     id: Deploy
     entrypoint: gcloud
-    args:
-      [
-        'run','deploy','${_SERVICE_NAME}',
-        '--image','${_IMAGE}:$COMMIT_SHA',
-        '--region','${_REGION}',
-        '--platform','managed',
-        '--allow-unauthenticated',
-        '--quiet'
-      ]
+    args: ['run','deploy','${_SERVICE_NAME}','--image','${_IMAGE}:$COMMIT_SHA','--region','${_REGION}','--platform','managed','--allow-unauthenticated','--quiet']
 
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk:slim'
     id: PromoteTraffic
