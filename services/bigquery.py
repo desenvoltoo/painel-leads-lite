@@ -621,7 +621,12 @@ def export_leads_rows(
     yielded = 0
     for page in job.result(page_size=EXPORT_PAGE_SIZE).pages:
         for row in page:
-            yield dict(row)
+            raw = dict(row)
+            normalized = {
+                k: (_fix_mojibake(v) if isinstance(v, str) else v)
+                for k, v in raw.items()
+            }
+            yield normalized
             yielded += 1
             if yielded >= max_rows:
                 return
