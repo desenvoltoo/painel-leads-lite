@@ -151,6 +151,32 @@ function ensureModalidadeField() {
 
   targetFilters.prepend(field);
 }
+function ensureExportButtons() {
+  const actions = document.querySelector('.topbar .actions') || document.querySelector('.actions');
+  if (!actions) return;
+
+  if (!document.querySelector('#btnExportXlsx')) {
+    const xlsx = document.createElement('a');
+    xlsx.id = 'btnExportXlsx';
+    xlsx.className = 'btn btn-ghost';
+    xlsx.href = '/api/export/xlsx?max_rows=50000';
+    xlsx.setAttribute('download', '');
+    xlsx.textContent = 'Exportar XLSX';
+    actions.appendChild(xlsx);
+  }
+
+  if (!document.querySelector('#btnExportCsv')) {
+    const csv = document.createElement('a');
+    csv.id = 'btnExportCsv';
+    csv.className = 'btn btn-ghost';
+    csv.href = '/api/export/csv?max_rows=50000';
+    csv.setAttribute('download', '');
+    csv.textContent = 'Exportar CSV';
+    actions.appendChild(csv);
+  }
+}
+
+
 
 function initMultiSelects() {
   tsStatus = makeTomSelect("#fStatus");
@@ -433,6 +459,7 @@ function clearFilters() {
    Eventos
 ========================= */
 document.addEventListener("DOMContentLoaded", async () => {
+  ensureExportButtons();
   ensureModalidadeField();
   initMultiSelects();
 
