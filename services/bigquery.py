@@ -2,8 +2,8 @@
 # =========================
 # V14 — Staging (WRITE_TRUNCATE) -> CALL SP -> Query f_lead + LEFT JOIN dims
 # + query_options() direto nas dimensões
-# + FILTROS MULTI (IN UNNEST) para: status/curso/polo/consultor
-# + EXPORT ROWS (server-side) para endpoint /api/export
+# + FILTROS MULTI (IN UNNEST) para: status/curso/polo/consultor/modalidade
+# + EXPORT ROWS (server-side) para endpoint /api/export/xlsx
 # =========================
 
 from __future__ import annotations  # ✅ evita avaliar type hints no import (Python 3.11)
@@ -23,7 +23,10 @@ BQ_DATASET = os.getenv("BQ_DATASET", "modelo_estrela")
 # IMPORTANTE:
 # - BigQuery usa location do DATASET (normalmente "US" ou "EU").
 # - "us-central1" é região do Cloud Run, NÃO do BigQuery.
-BQ_LOCATION = os.getenv("BQ_LOCATION", "uscentral-1")  # ✅ default correto
+#
+# Seu default anterior ("uscentral-1") está incorreto e pode quebrar.
+# Mantemos fallback seguro:
+BQ_LOCATION = os.getenv("BQ_LOCATION", "US")  # ✅ default seguro
 
 BQ_STAGING_TABLE = os.getenv("BQ_STAGING_TABLE", "stg_leads_site")
 BQ_FACT_TABLE = os.getenv("BQ_FACT_TABLE", "f_lead")
@@ -125,9 +128,10 @@ def _apply_filters(sql: str, filters: Dict[str, Any], params: List[Any]) -> str:
     """
     Aplica filtros no SQL + adiciona QueryParameters.
 
-    Multi-select: status/curso/polo/consultor via IN UNNEST(@array)
+    Multi-select: status/curso/polo/consultor/modalidade via IN UNNEST(@array)
     Dimensões reais (modelo_estrela):
       - dim_curso.nome_curso
+      - dim_curso.modalidade
       - dim_polo.polo_original
       - dim_consultor.consultor_original
       - dim_status.status_original
@@ -137,6 +141,7 @@ def _apply_filters(sql: str, filters: Dict[str, Any], params: List[Any]) -> str:
     polos = _as_list(filters.get("polo"))
     status_list = _as_list(filters.get("status"))
     consultores = _as_list(filters.get("consultor"))
+    modalidades = _as_list(filters.get("modalidade"))  # ✅ NOVO
 
     if cursos:
         sql += " AND dc.nome_curso IN UNNEST(@cursos)"
@@ -153,6 +158,10 @@ def _apply_filters(sql: str, filters: Dict[str, Any], params: List[Any]) -> str:
     if consultores:
         sql += " AND dco.consultor_original IN UNNEST(@consultores)"
         params.append(bigquery.ArrayQueryParameter("consultores", "STRING", consultores))
+
+    if modalidades:
+        sql += " AND dc.modalidade IN UNNEST(@modalidades)"
+        params.append(bigquery.ArrayQueryParameter("modalidades", "STRING", modalidades))
 
     # SINGLE
     if filters.get("cpf"):
@@ -204,6 +213,7 @@ def query_leads(
         "data_inscricao_dt": "f.data_inscricao_dt",
         "status": "ds.status_original",
         "curso": "dc.nome_curso",
+        "modalidade": "dc.modalidade",  # ✅ novo (se quiser ordenar)
         "polo": "dp.polo_original",
         "consultor": "dco.consultor_original",
         "nome": "dpe.nome",
@@ -221,6 +231,7 @@ def query_leads(
       f.canal                   AS origem,
       dp.polo_original          AS polo,
       dc.nome_curso             AS curso,
+      dc.modalidade             AS modalidade,
       dco.consultor_original    AS consultor,
       ds.status_original        AS status,
       f.campanha                AS campanha
@@ -270,6 +281,7 @@ def query_options() -> Dict[str, List[str]]:
     return {
         "status": _distinct_dim_values("dim_status", "status_original", "status"),
         "cursos": _distinct_dim_values("dim_curso", "nome_curso", "curso"),
+        "modalidades": _distinct_dim_values("dim_curso", "modalidade", "modalidade"),  # ✅ NOVO
         "polos": _distinct_dim_values("dim_polo", "polo_original", "polo"),
         "consultores": _distinct_dim_values("dim_consultor", "consultor_original", "consultor"),
     }
@@ -287,6 +299,7 @@ EXPORT_COLUMNS = [
     ("origem", "Origem"),
     ("polo", "Polo"),
     ("curso", "Curso"),
+    ("modalidade", "Modalidade"),
     ("status", "Status"),
     ("consultor", "Consultor"),
     ("campanha", "Campanha"),
@@ -295,12 +308,35 @@ EXPORT_COLUMNS = [
 
 def export_leads_rows(
     filters: Optional[Dict[str, Any]] = None,
-    max_rows: int = EXPORT_MAX_ROWS
-) -> Iterable[Dict[str, Any]]:
+    limit: int = EXPORT_MAX_ROWS,
+    offset: int = 0,
+    order_by: str = "data_inscricao_dt",
+    order_dir: str = "DESC",
+) -> List[Dict[str, Any]]:
+    """
+    Retorna rows para export.
+    - Compatível com app.py (limit/offset/order_by/order_dir)
+    - Internamente aplica trava EXPORT_MAX_ROWS
+    """
     client = get_bq_client()
     filters = filters or {}
 
-    max_rows = max(1, min(int(max_rows), EXPORT_MAX_ROWS))
+    # trava de segurança
+    limit = max(1, min(int(limit), EXPORT_MAX_ROWS))
+    offset = max(0, int(offset))
+    order_dir = "ASC" if str(order_dir).upper() == "ASC" else "DESC"
+
+    allowed_order = {
+        "data_inscricao_dt": "f.data_inscricao_dt",
+        "status": "ds.status_original",
+        "curso": "dc.nome_curso",
+        "modalidade": "dc.modalidade",
+        "polo": "dp.polo_original",
+        "consultor": "dco.consultor_original",
+        "nome": "dpe.nome",
+        "cpf": "dpe.cpf",
+    }
+    order_expr = allowed_order.get(order_by, "f.data_inscricao_dt")
 
     sql = """
     SELECT
@@ -312,6 +348,7 @@ def export_leads_rows(
       f.canal                   AS origem,
       dp.polo_original          AS polo,
       dc.nome_curso             AS curso,
+      dc.modalidade             AS modalidade,
       ds.status_original        AS status,
       dco.consultor_original    AS consultor,
       f.campanha                AS campanha
@@ -319,18 +356,13 @@ def export_leads_rows(
 
     params: List[Any] = []
     sql = _apply_filters(sql, filters, params)
-    sql += "\n ORDER BY f.data_inscricao_dt DESC"
+    sql += f"\n ORDER BY {order_expr} {order_dir} \n LIMIT @limit OFFSET @offset"
+    params.append(bigquery.ScalarQueryParameter("limit", "INT64", limit))
+    params.append(bigquery.ScalarQueryParameter("offset", "INT64", offset))
 
     job_config = bigquery.QueryJobConfig(query_parameters=params)
-    job = client.query(sql, job_config=job_config)
-
-    yielded = 0
-    for page in job.result(page_size=EXPORT_PAGE_SIZE).pages:
-        for row in page:
-            yield dict(row)
-            yielded += 1
-            if yielded >= max_rows:
-                return
+    rows = client.query(sql, job_config=job_config).result()
+    return [dict(r) for r in rows]
 
 
 # =========================
