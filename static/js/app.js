@@ -1,13 +1,14 @@
 // static/js/app.js
 // V14 — compatível com:
-//   GET  /api/options  -> { ok:true, data:{ status:[], cursos:[], polos:[], consultores:[] } }
+//   GET  /api/options  -> { ok:true, data:{ status:[], cursos:[], modalidades:[], polos:[], consultores:[] } }
 //   GET  /api/leads    -> { ok:true, total:N, data:[...] }
 //   GET  /api/kpis     -> { ok:true, total:N, top_status:{status,cnt} }
+//   GET  /api/export/xlsx -> arquivo XLSX (download)
 //   POST /api/upload   -> { ok:true, message:"..." }
 //
 // HTML base (ids):
 // upload: #uploadFile #btnUpload #uploadStatus
-// filtros: #fStatus #fCurso #fPolo #fConsultor #fIni #fFim #fLimit #fBusca
+// filtros: #fStatus #fCurso #fModalidade #fPolo #fConsultor #fIni #fFim #fLimit #fBusca
 // ações: #btnApply #btnClear #btnReload #btnExport
 // kpis: #kpiCount #kpiTopStatus
 // tabela: #tbl tbody
@@ -15,7 +16,9 @@
 
 const $ = (sel) => document.querySelector(sel);
 
-let tsStatus, tsCurso, tsPolo, tsConsultor;
+let tsStatus, tsCurso, tsModalidade, tsPolo, tsConsultor;
+
+const TABLE_COLS = 11; // ✅ agora tem Modalidade
 
 /* =========================
    Helpers UI
@@ -52,13 +55,6 @@ function fmtDate(d) {
   return s;
 }
 
-function toCsvValue(v) {
-  const s = v === null || v === undefined ? "" : String(v);
-  // CSV seguro
-  if (/[",\n;]/.test(s)) return `"${s.replace(/"/g, '""')}"`;
-  return s;
-}
-
 /* =========================
    API
 ========================= */
@@ -67,13 +63,14 @@ async function apiGet(path, params = {}) {
 
   Object.entries(params).forEach(([k, v]) => {
     if (v === null || v === undefined) return;
+
     if (Array.isArray(v)) {
       if (v.length === 0) return;
-      // envia repetido (melhor prática); backend hoje aceita string -> vamos mandar como string também
-      // como seu backend ainda não interpreta listas nativas, vamos mandar como "A || B"
+      // manda "A || B" (backend faz split com _as_list)
       url.searchParams.set(k, v.join(" || "));
       return;
     }
+
     const s = String(v).trim();
     if (!s) return;
     url.searchParams.set(k, s);
@@ -132,6 +129,7 @@ function makeTomSelect(selector) {
 function initMultiSelects() {
   tsStatus = makeTomSelect("#fStatus");
   tsCurso = makeTomSelect("#fCurso");
+  tsModalidade = makeTomSelect("#fModalidade"); // ✅ novo
   tsPolo = makeTomSelect("#fPolo");
   tsConsultor = makeTomSelect("#fConsultor");
 }
@@ -157,6 +155,7 @@ async function loadOptions() {
 
     fillSelect(tsStatus, data?.status || []);
     fillSelect(tsCurso, data?.cursos || []);
+    fillSelect(tsModalidade, data?.modalidades || []); // ✅ novo
     fillSelect(tsPolo, data?.polos || []);
     fillSelect(tsConsultor, data?.consultores || []);
 
@@ -197,6 +196,7 @@ function parseBuscaRapida(txt) {
 function buildLeadsParams() {
   const status = getMulti(tsStatus);
   const cursos = getMulti(tsCurso);
+  const modalidades = getMulti(tsModalidade); // ✅ novo
   const polos = getMulti(tsPolo);
   const consultores = getMulti(tsConsultor);
 
@@ -207,11 +207,9 @@ function buildLeadsParams() {
   const busca = parseBuscaRapida($("#fBusca")?.value);
 
   return {
-    // multi -> backend atual entende melhor 1 valor por vez;
-    // aqui mandamos como "A || B" e no backend você pode evoluir depois para split.
-    // enquanto isso, o filtro exato funciona quando 1 selecionado.
-    status: status,
+    status,
     curso: cursos,
+    modalidade: modalidades, // ✅ novo
     polo: polos,
     consultor: consultores,
     data_ini,
@@ -267,12 +265,12 @@ function renderTable(rows, { loading = false } = {}) {
   if (!tbody) return;
 
   if (loading) {
-    tbody.innerHTML = `<tr><td colspan="10" class="table-feedback">Carregando dados...</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="${TABLE_COLS}" class="table-feedback">Carregando dados...</td></tr>`;
     return;
   }
 
   if (!rows || rows.length === 0) {
-    tbody.innerHTML = `<tr><td colspan="10" class="table-feedback">Nenhum dado encontrado</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="${TABLE_COLS}" class="table-feedback">Nenhum dado encontrado</td></tr>`;
     return;
   }
 
@@ -285,6 +283,7 @@ function renderTable(rows, { loading = false } = {}) {
       <td>${escapeHtml(r.origem || "-")}</td>
       <td>${escapeHtml(r.polo || "-")}</td>
       <td>${escapeHtml(r.curso || "-")}</td>
+      <td>${escapeHtml(r.modalidade || "-")}</td>
       <td><span class="badge">${escapeHtml(r.status || "Lead")}</span></td>
       <td>${escapeHtml(r.consultor || "-")}</td>
       <td>${escapeHtml(r.campanha || "-")}</td>
@@ -337,35 +336,26 @@ async function doUpload() {
 }
 
 /* =========================
-   Export CSV (client-side)
+   Export XLSX (server-side)
 ========================= */
-function exportCsvFromTable() {
-  const tbody = $("#tbl tbody");
-  if (!tbody) return;
+function exportXlsxServerSide() {
+  const params = buildLeadsParams();
+  const url = new URL("/api/export/xlsx", window.location.origin);
 
-  const rows = Array.from(tbody.querySelectorAll("tr"));
-  if (rows.length === 0) {
-    setStatus("Nada para exportar.", "err");
-    return;
-  }
-
-  const headers = Array.from($("#tbl thead tr").children).map(th => th.textContent.trim());
-  const lines = [];
-  lines.push(headers.map(toCsvValue).join(";"));
-
-  rows.forEach(tr => {
-    const cols = Array.from(tr.children).map(td => td.textContent.trim());
-    lines.push(cols.map(toCsvValue).join(";"));
+  Object.entries(params).forEach(([k, v]) => {
+    if (v === null || v === undefined) return;
+    if (Array.isArray(v)) {
+      if (v.length === 0) return;
+      url.searchParams.set(k, v.join(" || "));
+      return;
+    }
+    const s = String(v).trim();
+    if (!s) return;
+    url.searchParams.set(k, s);
   });
 
-  const blob = new Blob([lines.join("\n")], { type: "text/csv;charset=utf-8" });
-  const a = document.createElement("a");
-  const ts = new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-");
-  a.href = URL.createObjectURL(blob);
-  a.download = `leads_v14_${ts}.csv`;
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
+  // dispara download
+  window.location.href = url.toString();
 }
 
 /* =========================
@@ -374,6 +364,7 @@ function exportCsvFromTable() {
 function clearFilters() {
   tsStatus?.clear(true);
   tsCurso?.clear(true);
+  tsModalidade?.clear(true); // ✅ novo
   tsPolo?.clear(true);
   tsConsultor?.clear(true);
 
@@ -400,7 +391,8 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   $("#btnUpload")?.addEventListener("click", doUpload);
 
-  $("#btnExport")?.addEventListener("click", exportCsvFromTable);
+  // ✅ Agora export é XLSX server-side
+  $("#btnExport")?.addEventListener("click", exportXlsxServerSide);
 
   // carregamento inicial
   await loadOptions();
