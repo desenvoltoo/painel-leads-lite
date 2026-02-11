@@ -8,7 +8,7 @@
 // HTML base (ids):
 // upload: #uploadFile #btnUpload #uploadStatus
 // filtros: #fStatus #fCurso #fModalidade #fPolo #fConsultor #fIni #fFim #fLimit #fBusca
-// ações: #btnApply #btnClear #btnReload #btnExport
+// ações: #btnApply #btnClear #btnReload #btnExportXlsx #btnExportCsv
 // kpis: #kpiCount #kpiTopStatus
 // tabela: #tbl tbody
 // labels: #statusLine #lblTotal
@@ -133,7 +133,8 @@ function ensureModalidadeField() {
   if (document.querySelector('#fModalidade')) return;
 
   const cursoField = document.querySelector('#fCurso')?.closest('.field');
-  const targetFilters = cursoField?.parentElement || document.querySelector('#fConsultor')?.closest('.filters') || document.querySelector('.filters.filters-6');
+  const filtrosCard = document.querySelector('#fStatus')?.closest('.filters') || document.querySelector('#fCurso')?.closest('.filters');
+  const targetFilters = filtrosCard || cursoField?.parentElement || document.querySelector('#fConsultor')?.closest('.filters') || document.querySelectorAll('.filters.filters-6')[1] || document.querySelector('.filters.filters-6');
   if (!targetFilters) return;
 
   const field = document.createElement('div');
@@ -363,17 +364,19 @@ async function doUpload() {
 }
 
 /* =========================
-   Export XLSX (server-side)
+   Export (server-side)
 ========================= */
-async function exportCsvFromTable() {
+async function exportLeads({ format = "xlsx" } = {}) {
   try {
-    setStatus("Gerando exportação XLSX dos leads filtrados...", "ok");
+    const upperFmt = String(format).toUpperCase();
+    setStatus(`Gerando exportação ${upperFmt} dos leads filtrados...`, "ok");
 
     const params = buildLeadsParams();
     delete params.limit; // export deve trazer todos os filtrados (até max_rows no backend)
     params.max_rows = 50000;
 
-    const url = new URL('/api/export/xlsx', window.location.origin);
+    const route = format === "csv" ? '/api/export/csv' : '/api/export/xlsx';
+    const url = new URL(route, window.location.origin);
     Object.entries(params).forEach(([k, v]) => {
       if (v === null || v === undefined) return;
       if (Array.isArray(v)) {
@@ -389,22 +392,22 @@ async function exportCsvFromTable() {
     const res = await fetch(url.toString(), { cache: 'no-store' });
     if (!res.ok) {
       const body = await res.json().catch(() => ({}));
-      throw new Error(body?.error || 'Falha ao exportar leads filtrados.');
+      throw new Error(body?.error || `Falha ao exportar leads filtrados (${upperFmt}).`);
     }
 
     const blob = await res.blob();
     const a = document.createElement("a");
     const ts = new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-");
     a.href = URL.createObjectURL(blob);
-    a.download = `leads_filtrados_${ts}.xlsx`;
+    a.download = `leads_filtrados_${ts}.${format}`;
     document.body.appendChild(a);
     a.click();
     a.remove();
 
-    setStatus("Exportação concluída com sucesso.", "ok");
+    setStatus(`Exportação ${upperFmt} concluída com sucesso.`, "ok");
   } catch (e) {
     console.error(e);
-    setStatus(e.message || "Erro ao exportar XLSX dos leads filtrados.", "err");
+    setStatus(e.message || "Erro ao exportar leads filtrados.", "err");
   }
 }
 
@@ -442,7 +445,8 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   $("#btnUpload")?.addEventListener("click", doUpload);
 
-  $("#btnExport")?.addEventListener("click", (e) => { e.preventDefault(); exportCsvFromTable(); });
+  $("#btnExportXlsx")?.addEventListener("click", (e) => { e.preventDefault(); exportLeads({ format: "xlsx" }); });
+  $("#btnExportCsv")?.addEventListener("click", (e) => { e.preventDefault(); exportLeads({ format: "csv" }); });
 
   // carregamento inicial
   await loadOptions();
