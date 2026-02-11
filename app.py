@@ -9,7 +9,9 @@ import io
 import csv
 import logging
 import traceback
+import uuid
 import pandas as pd
+from typing import Optional
 from flask import Flask, render_template, request, jsonify, Response, stream_with_context
 
 from services.bigquery import (
@@ -69,13 +71,16 @@ def _get_filters_from_request():
     }
     return filters, meta
 
-def _error_payload(e: Exception, public_msg: str):
-    return {
+def _error_payload(e: Exception, public_msg: str, upload_id: Optional[str] = None):
+    payload = {
         "ok": False,
         "error": public_msg,
         "details": str(e),
         "trace": traceback.format_exc(limit=3)
     }
+    if upload_id:
+        payload["upload_id"] = upload_id
+    return payload
 
 def _read_csv_flexible(file_storage):
     """Lê CSV com tolerância a encoding/separador para evitar falhas de import."""
@@ -247,23 +252,41 @@ def create_app() -> Flask:
 
     @app.post("/api/upload")
     def api_upload():
+        upload_id = str(uuid.uuid4())
+
         if "file" not in request.files:
-            return jsonify({"ok": False, "error": "Arquivo não encontrado."}), 400
+            logger.error("Upload sem arquivo [upload_id=%s]", upload_id)
+            return jsonify({"ok": False, "error": "Arquivo não encontrado.", "upload_id": upload_id}), 400
 
         f = request.files["file"]
         if not f.filename:
-            return jsonify({"ok": False, "error": "Nome de arquivo vazio."}), 400
+            logger.error("Upload com nome vazio [upload_id=%s]", upload_id)
+            return jsonify({"ok": False, "error": "Nome de arquivo vazio.", "upload_id": upload_id}), 400
 
         try:
             filename = (f.filename or "").lower()
+            logger.info(
+                "Iniciando upload [upload_id=%s] filename=%s mimetype=%s",
+                upload_id,
+                f.filename,
+                getattr(f, "mimetype", None),
+            )
 
             if filename.endswith(".csv"):
                 # lê CSV com fallback de encoding/separador e processa em lotes
                 csv_df = _read_csv_flexible(f)
+                logger.info(
+                    "CSV lido [upload_id=%s] linhas=%s colunas=%s",
+                    upload_id,
+                    len(csv_df),
+                    list(csv_df.columns),
+                )
                 total_rows = process_upload_dataframe_batched(csv_df)
+                logger.info("Upload finalizado [upload_id=%s] total_rows=%s", upload_id, total_rows)
                 return jsonify(
                     {
                         "ok": True,
+                        "upload_id": upload_id,
                         "message": f"Processado com sucesso! (staging + procedure V14) - {total_rows} linhas em lotes.",
                     }
                 ), 200
@@ -271,26 +294,37 @@ def create_app() -> Flask:
                 try:
                     df = pd.read_excel(f)
                 except ImportError as e:
+                    logger.exception("Falha de dependência no Excel [upload_id=%s]", upload_id)
                     return jsonify(
                         {
                             "ok": False,
+                            "upload_id": upload_id,
                             "error": "Leitura de Excel indisponível no ambiente. Instale 'openpyxl' para processar XLSX.",
                             "details": str(e),
                         }
                     ), 500
 
+                logger.info(
+                    "Excel lido [upload_id=%s] linhas=%s colunas=%s",
+                    upload_id,
+                    len(df),
+                    list(df.columns),
+                )
                 total_rows = process_upload_dataframe_batched(df)
+                logger.info("Upload finalizado [upload_id=%s] total_rows=%s", upload_id, total_rows)
                 return jsonify(
                     {
                         "ok": True,
+                        "upload_id": upload_id,
                         "message": f"Processado com sucesso! (staging + procedure V14) - {total_rows} linhas em lotes.",
                     }
                 ), 200
             else:
-                return jsonify({"ok": False, "error": "Formato inválido. Envie CSV ou XLSX."}), 400
+                logger.error("Formato inválido [upload_id=%s] filename=%s", upload_id, f.filename)
+                return jsonify({"ok": False, "upload_id": upload_id, "error": "Formato inválido. Envie CSV ou XLSX."}), 400
         except Exception as e:
-            logger.exception("Falha na ingestão V14 durante upload")
-            return jsonify(_error_payload(e, "Falha na ingestão V14.")), 500
+            logger.exception("Falha na ingestão V14 durante upload [upload_id=%s]", upload_id)
+            return jsonify(_error_payload(e, "Falha na ingestão V14.", upload_id=upload_id)), 500
 
     return app
 
