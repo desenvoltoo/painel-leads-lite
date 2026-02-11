@@ -162,6 +162,28 @@ def _as_list(v: Any) -> List[str]:
     return [s]
 
 
+def _fix_mojibake(value: Any) -> Any:
+    """Corrige casos comuns de mojibake UTF-8 lido como Latin-1 (ex.: JOSÃ‰)."""
+    if value is None:
+        return None
+    s = str(value).strip()
+    if not s:
+        return None
+
+    # Heurística: tenta corrigir apenas quando há sinais típicos de mojibake.
+    if "Ã" not in s and "Â" not in s:
+        return s
+
+    try:
+        fixed = s.encode("cp1252").decode("utf-8")
+        if fixed.count("Ã") + fixed.count("Â") < s.count("Ã") + s.count("Â"):
+            return fixed
+    except Exception:
+        pass
+
+    return s
+
+
 # =========================
 # 1) LOAD -> STAGING (WRITE_TRUNCATE)
 # =========================
@@ -192,7 +214,7 @@ def normalize_upload_dataframe(df):
         if col in FLOAT_STAGING_COLUMNS:
             out[col] = pd.to_numeric(out[col], errors="coerce")
         else:
-            out[col] = out[col].apply(lambda v: None if v is None else str(v).strip() or None)
+            out[col] = out[col].apply(_fix_mojibake)
 
     return out
 

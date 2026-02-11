@@ -118,7 +118,7 @@ def create_app() -> Flask:
     app = Flask(__name__)
     app.config["MAX_CONTENT_LENGTH"] = 30 * 1024 * 1024  # Limite de 30MB para uploads
 
-    asset_version = _env("ASSET_VERSION", "20260210-visual9")
+    asset_version = _env("ASSET_VERSION", "20260210-visual10")
     ui_version = _env("UI_VERSION", f"v{asset_version}")
 
 
@@ -235,17 +235,17 @@ def create_app() -> Flask:
 
             ts = pd.Timestamp.utcnow().strftime('%Y%m%d-%H%M%S')
             filename = f"variaveis_staging_{ts}.csv"
-            bom = "﻿"
             headers = {
                 "Content-Disposition": f'attachment; filename="{filename}"',
                 "Content-Type": "text/csv; charset=utf-8",
             }
-            def _stream_with_bom():
-                yield bom
-                for line in _iter_csv_lines():
-                    yield line
 
-            return Response(stream_with_context(_stream_with_bom()), headers=headers)
+            def _stream_with_bom_bytes():
+                yield b"\xef\xbb\xbf"  # UTF-8 BOM
+                for line in _iter_csv_lines():
+                    yield line.encode("utf-8")
+
+            return Response(stream_with_context(_stream_with_bom_bytes()), headers=headers)
         except Exception as e:
             logger.exception("Falha na exportação de variáveis")
             return jsonify(_error_payload(e, "Falha ao exportar variáveis da staging.")), 500
