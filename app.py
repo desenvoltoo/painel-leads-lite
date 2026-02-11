@@ -118,7 +118,7 @@ def create_app() -> Flask:
     app = Flask(__name__)
     app.config["MAX_CONTENT_LENGTH"] = 30 * 1024 * 1024  # Limite de 30MB para uploads
 
-    asset_version = _env("ASSET_VERSION", "20260210-visual10")
+    asset_version = _env("ASSET_VERSION", "20260210-visual11")
     ui_version = _env("UI_VERSION", f"v{asset_version}")
 
 
@@ -245,6 +245,7 @@ def create_app() -> Flask:
                 for line in _iter_csv_lines():
                     yield line.encode("utf-8")
 
+            logger.info("Export concluído com sucesso")
             return Response(stream_with_context(_stream_with_bom_bytes()), headers=headers)
         except Exception as e:
             logger.exception("Falha na exportação de variáveis")

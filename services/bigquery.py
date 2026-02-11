@@ -83,6 +83,7 @@ FLOAT_STAGING_COLUMNS = {
 
 _bq_client: Optional[bigquery.Client] = None
 _column_exists_cache: Dict[tuple[str, str], bool] = {}
+_table_columns_cache: Dict[str, set[str]] = {}
 
 
 def get_bq_client() -> bigquery.Client:
@@ -124,6 +125,29 @@ def _column_exists(table_name: str, column_name: str) -> bool:
 
     _column_exists_cache[key] = exists
     return exists
+
+
+def _get_table_columns(table_name: str) -> set[str]:
+    """Lista colunas da tabela via INFORMATION_SCHEMA (com cache)."""
+    if table_name in _table_columns_cache:
+        return _table_columns_cache[table_name]
+
+    sql = f"""
+    SELECT column_name
+    FROM `{GCP_PROJECT_ID}.{BQ_DATASET}.INFORMATION_SCHEMA.COLUMNS`
+    WHERE table_name = @table_name
+    """
+    params = [bigquery.ScalarQueryParameter("table_name", "STRING", table_name)]
+
+    try:
+        client = get_bq_client()
+        rows = client.query(sql, job_config=bigquery.QueryJobConfig(query_parameters=params)).result()
+        cols = {str(r["column_name"]).lower() for r in rows}
+    except Exception:
+        cols = set()
+
+    _table_columns_cache[table_name] = cols
+    return cols
 
 
 def _get_modalidade_expr() -> Optional[str]:
@@ -532,11 +556,19 @@ EXPORT_COLUMNS = [
 
 
 def export_staging_variable_rows(max_rows: int = EXPORT_MAX_ROWS) -> Iterable[Dict[str, Any]]:
-    """Exporta as colunas variáveis diretamente da staging com ordem fixa."""
+    """Exporta variáveis da staging com ordem fixa, preenchendo colunas ausentes com NULL."""
     client = get_bq_client()
     max_rows = max(1, min(int(max_rows), EXPORT_MAX_ROWS))
 
-    select_cols = ",\n      ".join([f"{c}" for c in EXPORT_VARIABLE_COLUMNS])
+    existing_cols = _get_table_columns(BQ_STAGING_TABLE)
+    select_exprs = []
+    for col in EXPORT_VARIABLE_COLUMNS:
+        if col.lower() in existing_cols:
+            select_exprs.append(f"`{col}` AS `{col}`")
+        else:
+            select_exprs.append(f"CAST(NULL AS STRING) AS `{col}`")
+
+    select_cols = ",\n      ".join(select_exprs)
     sql = f"""
     SELECT
       {select_cols}
