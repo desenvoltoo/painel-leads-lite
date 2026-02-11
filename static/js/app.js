@@ -363,17 +363,17 @@ async function doUpload() {
 }
 
 /* =========================
-   Export CSV (server-side)
+   Export XLSX (server-side)
 ========================= */
 async function exportCsvFromTable() {
   try {
-    setStatus("Gerando exportação dos leads filtrados...", "ok");
+    setStatus("Gerando exportação XLSX dos leads filtrados...", "ok");
 
     const params = buildLeadsParams();
     delete params.limit; // export deve trazer todos os filtrados (até max_rows no backend)
     params.max_rows = 50000;
 
-    const url = new URL('/api/export', window.location.origin);
+    const url = new URL('/api/export/xlsx', window.location.origin);
     Object.entries(params).forEach(([k, v]) => {
       if (v === null || v === undefined) return;
       if (Array.isArray(v)) {
@@ -396,7 +396,7 @@ async function exportCsvFromTable() {
     const a = document.createElement("a");
     const ts = new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-");
     a.href = URL.createObjectURL(blob);
-    a.download = `leads_filtrados_${ts}.csv`;
+    a.download = `leads_filtrados_${ts}.xlsx`;
     document.body.appendChild(a);
     a.click();
     a.remove();
@@ -404,7 +404,7 @@ async function exportCsvFromTable() {
     setStatus("Exportação concluída com sucesso.", "ok");
   } catch (e) {
     console.error(e);
-    setStatus(e.message || "Erro ao exportar leads filtrados.", "err");
+    setStatus(e.message || "Erro ao exportar XLSX dos leads filtrados.", "err");
   }
 }
 

@@ -12,7 +12,7 @@ import traceback
 import uuid
 import pandas as pd
 from typing import Optional
-from flask import Flask, render_template, request, jsonify, Response, stream_with_context
+from flask import Flask, render_template, request, jsonify, Response, stream_with_context, send_file
 
 from services.bigquery import (
     query_leads,
@@ -140,7 +140,7 @@ def create_app() -> Flask:
     app = Flask(__name__)
     app.config["MAX_CONTENT_LENGTH"] = 30 * 1024 * 1024  # Limite de 30MB para uploads
 
-    asset_version = _env("ASSET_VERSION", "20260210-visual13")
+    asset_version = _env("ASSET_VERSION", "20260210-visual14")
     ui_version = _env("UI_VERSION", f"v{asset_version}")
 
 
@@ -313,6 +313,37 @@ def create_app() -> Flask:
         except Exception as e:
             logger.exception("Falha na exportação filtrada")
             return jsonify(_error_payload(e, "Falha ao exportar leads filtrados.")), 500
+
+
+    @app.get("/api/export/xlsx")
+    def api_export_filtrado_xlsx():
+        try:
+            filters, _meta = _get_filters_from_request()
+            max_rows = int(request.args.get("max_rows") or 50000)
+            logger.info("Iniciando exportação XLSX filtrada [max_rows=%s filters=%s]", max_rows, filters)
+
+            rows = []
+            for row in export_leads_rows(filters=filters, max_rows=max_rows):
+                rows.append({h: _repair_mojibake_text(row.get(k)) for k, h in EXPORT_COLUMNS})
+
+            df = pd.DataFrame(rows, columns=[h for _, h in EXPORT_COLUMNS])
+            output = io.BytesIO()
+            with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
+                df.to_excel(writer, index=False, sheet_name="Leads")
+            output.seek(0)
+
+            ts = pd.Timestamp.utcnow().strftime('%Y%m%d-%H%M%S')
+            filename = f"leads_filtrados_{ts}.xlsx"
+            logger.info("Export XLSX filtrado concluído com sucesso")
+            return send_file(
+                output,
+                as_attachment=True,
+                download_name=filename,
+                mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+        except Exception as e:
+            logger.exception("Falha na exportação XLSX filtrada")
+            return jsonify(_error_payload(e, "Falha ao exportar leads filtrados em XLSX.")), 500
 
     @app.post("/api/upload")
     def api_upload():
