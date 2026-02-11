@@ -490,6 +490,18 @@ def _distinct_dim_values(table: str, col: str, alias: str) -> List[str]:
     return [str(r[alias]) for r in rows]
 
 
+
+
+def _distinct_first_available(table: str, candidates: List[str], alias: str) -> List[str]:
+    for col in candidates:
+        try:
+            vals = _distinct_dim_values(table, col, alias)
+            if vals:
+                return vals
+        except Exception:
+            continue
+    return []
+
 def query_options() -> Dict[str, List[str]]:
     modalidades: List[str] = []
     modalidade_expr = _get_modalidade_expr()
@@ -502,6 +514,11 @@ def query_options() -> Dict[str, List[str]]:
             modalidades = _distinct_dim_values(BQ_FACT_TABLE, col, "modalidade")
     except Exception:
         modalidades = []
+
+    if not modalidades:
+        modalidades = _distinct_first_available("dim_curso", ["modalidade", "modalidade_curso", "tp_modalidade"], "modalidade")
+    if not modalidades:
+        modalidades = _distinct_first_available(BQ_FACT_TABLE, ["modalidade", "modalidade_curso", "tp_modalidade"], "modalidade")
 
     return {
         "status": _distinct_dim_values("dim_status", "status_original", "status"),

@@ -140,7 +140,7 @@ def create_app() -> Flask:
     app = Flask(__name__)
     app.config["MAX_CONTENT_LENGTH"] = 30 * 1024 * 1024  # Limite de 30MB para uploads
 
-    asset_version = _env("ASSET_VERSION", "20260210-visual19")
+    asset_version = _env("ASSET_VERSION", "20260210-visual20")
     ui_version = _env("UI_VERSION", f"v{asset_version}")
 
 
@@ -157,6 +157,8 @@ def create_app() -> Flask:
             response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
             response.headers["Pragma"] = "no-cache"
             response.headers["Expires"] = "0"
+        response.headers["X-UI-Version"] = ui_version
+        response.headers["X-Asset-Version"] = asset_version
         return response
 
     @app.get("/")
@@ -178,6 +180,19 @@ def create_app() -> Flask:
                 "asset_version": asset_version,
             }
         )
+
+    @app.get("/api/ui-meta")
+    def ui_meta():
+        return jsonify({
+            "ok": True,
+            "ui_version": ui_version,
+            "asset_version": asset_version,
+            "features": {
+                "export_xlsx": True,
+                "export_csv": True,
+                "modalidade_filter": True,
+            },
+        })
 
     @app.get("/api/leads")
     def api_leads():

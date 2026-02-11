@@ -9,8 +9,8 @@
   <link rel="stylesheet" href="{{ url_for('static', filename='css/styles.css', v=asset_version) }}">
 </head>
 
-<body>
-  <div class="release-banner">Versão ativa no servidor: {{ ui_version }}</div>
+<body data-ui-version="{{ ui_version }}" data-asset-version="{{ asset_version }}">
+  <div class="release-banner">✅ UI {{ ui_version }} • Assets {{ asset_version }}</div>
 
   <header class="topbar">
     <div class="brand">
@@ -31,12 +31,15 @@
 
   <section class="quick-actions">
     <strong>Ações rápidas:</strong>
+    <button id="btnHardRefresh" class="btn btn-primary" type="button">Forçar atualização</button>
     <a class="btn btn-primary" href="/api/export/xlsx?max_rows=50000" download>Exportar XLSX</a>
     <a class="btn btn-ghost" href="/api/export/csv?max_rows=50000" download>Exportar CSV</a>
     <span class="build-tag">UI {{ ui_version }}</span>
   </section>
 
   <main class="container">
+
+    <section id="uiMetaBox" class="ui-meta-box">Carregando versão da UI...</section>
 
     <section class="kpis">
       <div class="kpi">

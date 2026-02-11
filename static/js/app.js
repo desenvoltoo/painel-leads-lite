@@ -455,11 +455,32 @@ function clearFilters() {
   loadLeadsAndKpis();
 }
 
+
+
+async function loadUiMeta() {
+  const box = document.querySelector('#uiMetaBox');
+  const body = document.body;
+  const ui = body?.dataset?.uiVersion || '-';
+  const asset = body?.dataset?.assetVersion || '-';
+  if (box) {
+    box.textContent = `UI ativa: ${ui} | Assets: ${asset} | Export XLSX/CSV e filtro Modalidade habilitados.`;
+  }
+
+  try {
+    const meta = await apiGet('/api/ui-meta');
+    if (box && meta?.ok) {
+      box.textContent = `UI ativa: ${meta.ui_version} | Assets: ${meta.asset_version} | Export XLSX/CSV e filtro Modalidade habilitados.`;
+    }
+  } catch (_) {
+    // mantém fallback local
+  }
+}
 /* =========================
    Eventos
 ========================= */
 document.addEventListener("DOMContentLoaded", async () => {
   ensureExportButtons();
+  await loadUiMeta();
   ensureModalidadeField();
   initMultiSelects();
 
@@ -471,6 +492,11 @@ document.addEventListener("DOMContentLoaded", async () => {
   $("#btnClear")?.addEventListener("click", clearFilters);
 
   $("#btnUpload")?.addEventListener("click", doUpload);
+  $("#btnHardRefresh")?.addEventListener("click", () => {
+    const u = new URL(window.location.href);
+    u.searchParams.set("refresh", Date.now().toString());
+    window.location.href = u.toString();
+  });
 
   $("#btnExportXlsx")?.addEventListener("click", (e) => { e.preventDefault(); exportLeads({ format: "xlsx" }); });
   $("#btnExportCsv")?.addEventListener("click", (e) => { e.preventDefault(); exportLeads({ format: "csv" }); });
