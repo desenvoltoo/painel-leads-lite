@@ -367,18 +367,36 @@ async function doUpload() {
 ========================= */
 async function exportCsvFromTable() {
   try {
-    setStatus("Gerando exportação completa de variáveis...", "ok");
-    const res = await fetch('/api/export/variaveis', { cache: 'no-store' });
+    setStatus("Gerando exportação dos leads filtrados...", "ok");
+
+    const params = buildLeadsParams();
+    delete params.limit; // export deve trazer todos os filtrados (até max_rows no backend)
+    params.max_rows = 50000;
+
+    const url = new URL('/api/export', window.location.origin);
+    Object.entries(params).forEach(([k, v]) => {
+      if (v === null || v === undefined) return;
+      if (Array.isArray(v)) {
+        if (!v.length) return;
+        url.searchParams.set(k, v.join(' || '));
+        return;
+      }
+      const s = String(v).trim();
+      if (!s) return;
+      url.searchParams.set(k, s);
+    });
+
+    const res = await fetch(url.toString(), { cache: 'no-store' });
     if (!res.ok) {
       const body = await res.json().catch(() => ({}));
-      throw new Error(body?.error || 'Falha ao exportar variáveis.');
+      throw new Error(body?.error || 'Falha ao exportar leads filtrados.');
     }
 
     const blob = await res.blob();
     const a = document.createElement("a");
     const ts = new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-");
     a.href = URL.createObjectURL(blob);
-    a.download = `variaveis_staging_${ts}.csv`;
+    a.download = `leads_filtrados_${ts}.csv`;
     document.body.appendChild(a);
     a.click();
     a.remove();
@@ -386,7 +404,7 @@ async function exportCsvFromTable() {
     setStatus("Exportação concluída com sucesso.", "ok");
   } catch (e) {
     console.error(e);
-    setStatus(e.message || "Erro ao exportar variáveis.", "err");
+    setStatus(e.message || "Erro ao exportar leads filtrados.", "err");
   }
 }
 

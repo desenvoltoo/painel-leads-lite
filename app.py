@@ -20,7 +20,9 @@ from services.bigquery import (
     query_options,
     process_upload_dataframe_batched,
     export_staging_variable_rows,
+    export_leads_rows,
     EXPORT_VARIABLE_COLUMNS,
+    EXPORT_COLUMNS,
 )
 
 # ============================================================
@@ -214,10 +216,11 @@ def create_app() -> Flask:
             return jsonify(_error_payload(e, "Erro ao carregar opções dos filtros.")), 500
 
     @app.get("/api/export/variaveis")
-    @app.get("/api/export")
     def api_export_variaveis():
         try:
             logger.info("Iniciando exportação de variáveis da staging")
+            max_rows = int(request.args.get("max_rows") or 50000)
+
             def _iter_csv_lines():
                 sio = io.StringIO()
                 writer = csv.writer(sio, delimiter=';', quoting=csv.QUOTE_ALL)
@@ -227,7 +230,7 @@ def create_app() -> Flask:
                 sio.seek(0)
                 sio.truncate(0)
 
-                for row in export_staging_variable_rows():
+                for row in export_staging_variable_rows(max_rows=max_rows):
                     writer.writerow([row.get(col) for col in EXPORT_VARIABLE_COLUMNS])
                     yield sio.getvalue()
                     sio.seek(0)
@@ -245,11 +248,51 @@ def create_app() -> Flask:
                 for line in _iter_csv_lines():
                     yield line.encode("utf-8")
 
-            logger.info("Export concluído com sucesso")
+            logger.info("Export variáveis concluído com sucesso")
             return Response(stream_with_context(_stream_with_bom_bytes()), headers=headers)
         except Exception as e:
             logger.exception("Falha na exportação de variáveis")
             return jsonify(_error_payload(e, "Falha ao exportar variáveis da staging.")), 500
+
+    @app.get("/api/export")
+    def api_export_filtrado():
+        try:
+            filters, _meta = _get_filters_from_request()
+            max_rows = int(request.args.get("max_rows") or 50000)
+            logger.info("Iniciando exportação filtrada [max_rows=%s filters=%s]", max_rows, filters)
+
+            def _iter_csv_lines():
+                sio = io.StringIO()
+                writer = csv.writer(sio, delimiter=';', quoting=csv.QUOTE_ALL)
+
+                writer.writerow([h for _, h in EXPORT_COLUMNS])
+                yield sio.getvalue()
+                sio.seek(0)
+                sio.truncate(0)
+
+                for row in export_leads_rows(filters=filters, max_rows=max_rows):
+                    writer.writerow([row.get(k) for k, _ in EXPORT_COLUMNS])
+                    yield sio.getvalue()
+                    sio.seek(0)
+                    sio.truncate(0)
+
+            ts = pd.Timestamp.utcnow().strftime('%Y%m%d-%H%M%S')
+            filename = f"leads_filtrados_{ts}.csv"
+            headers = {
+                "Content-Disposition": f'attachment; filename="{filename}"',
+                "Content-Type": "text/csv; charset=utf-8",
+            }
+
+            def _stream_with_bom_bytes():
+                yield b"\xef\xbb\xbf"
+                for line in _iter_csv_lines():
+                    yield line.encode("utf-8")
+
+            logger.info("Export filtrado concluído com sucesso")
+            return Response(stream_with_context(_stream_with_bom_bytes()), headers=headers)
+        except Exception as e:
+            logger.exception("Falha na exportação filtrada")
+            return jsonify(_error_payload(e, "Falha ao exportar leads filtrados.")), 500
 
     @app.post("/api/upload")
     def api_upload():
