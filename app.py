@@ -140,7 +140,7 @@ def create_app() -> Flask:
     app = Flask(__name__)
     app.config["MAX_CONTENT_LENGTH"] = 30 * 1024 * 1024  # Limite de 30MB para uploads
 
-    asset_version = _env("ASSET_VERSION", "20260210-visual14")
+    asset_version = _env("ASSET_VERSION", "20260210-visual15")
     ui_version = _env("UI_VERSION", f"v{asset_version}")
 
 
@@ -274,8 +274,8 @@ def create_app() -> Flask:
             logger.exception("Falha na exportação de variáveis")
             return jsonify(_error_payload(e, "Falha ao exportar variáveis da staging.")), 500
 
-    @app.get("/api/export")
-    def api_export_filtrado():
+    @app.get("/api/export/csv")
+    def api_export_filtrado_csv():
         try:
             filters, _meta = _get_filters_from_request()
             max_rows = int(request.args.get("max_rows") or 50000)
@@ -316,6 +316,7 @@ def create_app() -> Flask:
 
 
     @app.get("/api/export/xlsx")
+    @app.get("/api/export")
     def api_export_filtrado_xlsx():
         try:
             filters, _meta = _get_filters_from_request()
