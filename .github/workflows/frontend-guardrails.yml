@@ -1,0 +1,80 @@
+name: Frontend Guardrails
+
+on:
+  workflow_dispatch:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+  push:
+    branches:
+      - "**"
+
+jobs:
+  validate-frontend:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Python syntax check
+        run: |
+          python -m py_compile app.py services/bigquery.py
+
+      - name: Validate cache-busting params in template
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          html = Path('templates/index.html').read_text(encoding='utf-8')
+
+          checks = {
+              "css cache-busting": "filename='css/styles.css', v=",
+              "js cache-busting": "filename='js/app.js', v=",
+          }
+
+          missing = [name for name, needle in checks.items() if needle not in html]
+          if missing:
+              raise SystemExit(f"Missing expected template checks: {', '.join(missing)}")
+
+          print('Cache-busting checks passed.')
+          PY
+
+      - name: Validate dashboard style hooks
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          css = Path('static/css/styles.css').read_text(encoding='utf-8')
+          js = Path('static/js/app.js').read_text(encoding='utf-8')
+
+          css_needles = [
+              '.status-line',
+              '.table-feedback',
+              '.ts-opt-check',
+              '.filters-6',
+          ]
+          js_needles = [
+              'renderTable([], { loading: true })',
+              'class="table-feedback"',
+              'status-line',
+              'ts-opt-check',
+              'fModalidade',
+          ]
+
+          missing_css = [n for n in css_needles if n not in css]
+          missing_js = [n for n in js_needles if n not in js]
+
+          if missing_css or missing_js:
+              raise SystemExit(
+                  'Missing guardrail hooks: '
+                  + (f"css={missing_css} " if missing_css else '')
+                  + (f"js={missing_js}" if missing_js else '')
+              )
+
+          print('Dashboard hook checks passed.')
+          PY

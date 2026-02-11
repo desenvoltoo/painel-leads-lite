@@ -2,6 +2,8 @@ substitutions:
   _SERVICE_NAME: painel-leads-lite
   _REGION: us-central1
   _IMAGE: us-central1-docker.pkg.dev/$PROJECT_ID/cloud-run-source-deploy/painel-leads-lite/painel-leads-lite
+  _MEMORY: 2Gi
+  _TIMEOUT: 120s
 
 steps:
   - name: 'gcr.io/cloud-builders/docker'
@@ -15,7 +17,7 @@ steps:
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk:slim'
     id: Deploy
     entrypoint: gcloud 
-    args: ['run','deploy','${_SERVICE_NAME}','--image','${_IMAGE}:$COMMIT_SHA','--region','${_REGION}','--platform','managed','--allow-unauthenticated','--quiet']
+    args: ['run','deploy','${_SERVICE_NAME}','--image','${_IMAGE}:$COMMIT_SHA','--region','${_REGION}','--platform','managed','--memory','${_MEMORY}','--timeout','${_TIMEOUT}','--allow-unauthenticated','--quiet']
 
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk:slim'
     id: PromoteTraffic

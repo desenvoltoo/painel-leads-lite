@@ -7,15 +7,15 @@
 //
 // HTML base (ids):
 // upload: #uploadFile #btnUpload #uploadStatus
-// filtros: #fStatus #fCurso #fPolo #fConsultor #fIni #fFim #fLimit #fBusca
-// ações: #btnApply #btnClear #btnReload #btnExport
+// filtros: #fStatus #fCurso #fModalidade #fPolo #fConsultor #fIni #fFim #fLimit #fBusca
+// ações: #btnApply #btnClear #btnReload #btnExportXlsx #btnExportCsv
 // kpis: #kpiCount #kpiTopStatus
 // tabela: #tbl tbody
 // labels: #statusLine #lblTotal
 
 const $ = (sel) => document.querySelector(sel);
 
-let tsStatus, tsCurso, tsPolo, tsConsultor;
+let tsStatus, tsCurso, tsModalidade, tsPolo, tsConsultor;
 
 /* =========================
    Helpers UI
@@ -24,7 +24,7 @@ function setStatus(msg, type = "ok") {
   const el = $("#statusLine");
   if (!el) return;
   el.textContent = msg;
-  el.className = type === "err" ? "error" : "";
+  el.className = `status-line ${type === "err" ? "error" : "status-ok"}`;
 }
 
 function setUploadStatus(msg, type = "ok") {
@@ -119,6 +119,7 @@ function makeTomSelect(selector) {
     render: {
       option: (data, escape) => `
         <div class="ts-opt">
+          <span class="ts-opt-check" aria-hidden="true"></span>
           <span class="ts-opt-text">${escape(data.text)}</span>
         </div>
       `,
@@ -128,9 +129,33 @@ function makeTomSelect(selector) {
   });
 }
 
+function ensureModalidadeField() {
+  if (document.querySelector('#fModalidade')) return;
+
+  const cursoField = document.querySelector('#fCurso')?.closest('.field');
+  const filtrosCard = document.querySelector('#fStatus')?.closest('.filters') || document.querySelector('#fCurso')?.closest('.filters');
+  const targetFilters = filtrosCard || cursoField?.parentElement || document.querySelector('#fConsultor')?.closest('.filters') || document.querySelectorAll('.filters.filters-6')[1] || document.querySelector('.filters.filters-6');
+  if (!targetFilters) return;
+
+  const field = document.createElement('div');
+  field.className = 'field col-2';
+  field.innerHTML = `
+    <label>Modalidade (Multi)</label>
+    <select id="fModalidade" multiple placeholder="Todas as modalidades..."></select>
+  `;
+
+  if (cursoField && cursoField.parentElement === targetFilters) {
+    cursoField.insertAdjacentElement('afterend', field);
+    return;
+  }
+
+  targetFilters.prepend(field);
+}
+
 function initMultiSelects() {
   tsStatus = makeTomSelect("#fStatus");
   tsCurso = makeTomSelect("#fCurso");
+  tsModalidade = makeTomSelect("#fModalidade");
   tsPolo = makeTomSelect("#fPolo");
   tsConsultor = makeTomSelect("#fConsultor");
 }
@@ -156,6 +181,7 @@ async function loadOptions() {
 
     fillSelect(tsStatus, data?.status || []);
     fillSelect(tsCurso, data?.cursos || []);
+    fillSelect(tsModalidade, data?.modalidades || []);
     fillSelect(tsPolo, data?.polos || []);
     fillSelect(tsConsultor, data?.consultores || []);
 
@@ -196,6 +222,7 @@ function parseBuscaRapida(txt) {
 function buildLeadsParams() {
   const status = getMulti(tsStatus);
   const cursos = getMulti(tsCurso);
+  const modalidades = getMulti(tsModalidade);
   const polos = getMulti(tsPolo);
   const consultores = getMulti(tsConsultor);
 
@@ -211,6 +238,7 @@ function buildLeadsParams() {
     // enquanto isso, o filtro exato funciona quando 1 selecionado.
     status: status,
     curso: cursos,
+    modalidade: modalidades,
     polo: polos,
     consultor: consultores,
     data_ini,
@@ -222,6 +250,7 @@ function buildLeadsParams() {
 
 async function loadLeadsAndKpis() {
   setStatus("Consultando BigQuery...", "ok");
+  renderTable([], { loading: true });
 
   const params = buildLeadsParams();
 
@@ -260,12 +289,17 @@ function renderTotals(total, shown) {
   if ($("#lblTotal")) $("#lblTotal").textContent = `${shown} / ${total ?? shown}`;
 }
 
-function renderTable(rows) {
+function renderTable(rows, { loading = false } = {}) {
   const tbody = $("#tbl tbody");
   if (!tbody) return;
 
+  if (loading) {
+    tbody.innerHTML = `<tr><td colspan="10" class="table-feedback">Carregando dados...</td></tr>`;
+    return;
+  }
+
   if (!rows || rows.length === 0) {
-    tbody.innerHTML = `<tr><td colspan="10" style="text-align:center">Nenhum dado encontrado</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="10" class="table-feedback">Nenhum dado encontrado</td></tr>`;
     return;
   }
 
@@ -330,35 +364,51 @@ async function doUpload() {
 }
 
 /* =========================
-   Export CSV (client-side)
+   Export (server-side)
 ========================= */
-function exportCsvFromTable() {
-  const tbody = $("#tbl tbody");
-  if (!tbody) return;
+async function exportLeads({ format = "xlsx" } = {}) {
+  try {
+    const upperFmt = String(format).toUpperCase();
+    setStatus(`Gerando exportação ${upperFmt} dos leads filtrados...`, "ok");
 
-  const rows = Array.from(tbody.querySelectorAll("tr"));
-  if (rows.length === 0) {
-    setStatus("Nada para exportar.", "err");
-    return;
+    const params = buildLeadsParams();
+    delete params.limit; // export deve trazer todos os filtrados (até max_rows no backend)
+    params.max_rows = 50000;
+
+    const route = format === "csv" ? '/api/export/csv' : '/api/export/xlsx';
+    const url = new URL(route, window.location.origin);
+    Object.entries(params).forEach(([k, v]) => {
+      if (v === null || v === undefined) return;
+      if (Array.isArray(v)) {
+        if (!v.length) return;
+        url.searchParams.set(k, v.join(' || '));
+        return;
+      }
+      const s = String(v).trim();
+      if (!s) return;
+      url.searchParams.set(k, s);
+    });
+
+    const res = await fetch(url.toString(), { cache: 'no-store' });
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      throw new Error(body?.error || `Falha ao exportar leads filtrados (${upperFmt}).`);
+    }
+
+    const blob = await res.blob();
+    const a = document.createElement("a");
+    const ts = new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-");
+    a.href = URL.createObjectURL(blob);
+    a.download = `leads_filtrados_${ts}.${format}`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+
+    setStatus(`Exportação ${upperFmt} concluída com sucesso.`, "ok");
+  } catch (e) {
+    console.error(e);
+    setStatus(e.message || "Erro ao exportar leads filtrados.", "err");
   }
-
-  const headers = Array.from($("#tbl thead tr").children).map(th => th.textContent.trim());
-  const lines = [];
-  lines.push(headers.map(toCsvValue).join(";"));
-
-  rows.forEach(tr => {
-    const cols = Array.from(tr.children).map(td => td.textContent.trim());
-    lines.push(cols.map(toCsvValue).join(";"));
-  });
-
-  const blob = new Blob([lines.join("\n")], { type: "text/csv;charset=utf-8" });
-  const a = document.createElement("a");
-  const ts = new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-");
-  a.href = URL.createObjectURL(blob);
-  a.download = `leads_v14_${ts}.csv`;
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
 }
 
 /* =========================
@@ -367,6 +417,7 @@ function exportCsvFromTable() {
 function clearFilters() {
   tsStatus?.clear(true);
   tsCurso?.clear(true);
+  tsModalidade?.clear(true);
   tsPolo?.clear(true);
   tsConsultor?.clear(true);
 
@@ -382,6 +433,7 @@ function clearFilters() {
    Eventos
 ========================= */
 document.addEventListener("DOMContentLoaded", async () => {
+  ensureModalidadeField();
   initMultiSelects();
 
   $("#btnApply")?.addEventListener("click", loadLeadsAndKpis);
@@ -393,7 +445,8 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   $("#btnUpload")?.addEventListener("click", doUpload);
 
-  $("#btnExport")?.addEventListener("click", exportCsvFromTable);
+  $("#btnExportXlsx")?.addEventListener("click", (e) => { e.preventDefault(); exportLeads({ format: "xlsx" }); });
+  $("#btnExportCsv")?.addEventListener("click", (e) => { e.preventDefault(); exportLeads({ format: "csv" }); });
 
   // carregamento inicial
   await loadOptions();

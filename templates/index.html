@@ -6,10 +6,12 @@
   <title>Painel Leads Lite | Modelo Estrela V14</title>
 
   <link href="https://cdn.jsdelivr.net/npm/tom-select@2.2.2/dist/css/tom-select.css" rel="stylesheet">
-  <link rel="stylesheet" href="{{ url_for('static', filename='css/styles.css') }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/styles.css', v=asset_version) }}">
 </head>
 
 <body>
+  <div class="release-banner">Versão ativa no servidor: {{ ui_version }}</div>
+
   <header class="topbar">
     <div class="brand">
       <div class="logo">PL</div>
@@ -21,7 +23,8 @@
 
     <div class="actions">
       <button id="btnReload" class="btn">Recarregar Dados</button>
-      <button id="btnExport" class="btn btn-ghost">Exportar CSV</button>
+      <a id="btnExportXlsx" class="btn btn-ghost" href="/api/export/xlsx?max_rows=50000" download>Exportar XLSX</a>
+      <a id="btnExportCsv" class="btn btn-ghost" href="/api/export/csv?max_rows=50000" download>Exportar CSV</a>
     </div>
   </header>
 
@@ -38,7 +41,7 @@
       </div>
       <div class="kpi">
         <div class="kpi-label">Base de Dados</div>
-        <div class="kpi-value" style="font-size: 1.2rem;">BigQuery Pro</div>
+        <div class="kpi-value kpi-value-small">BigQuery Pro</div>
       </div>
     </section>
 
@@ -48,19 +51,19 @@
         <p>O arquivo será processado pela <strong>Procedure V14</strong> e distribuído para as dimensões.</p>
       </div>
 
-      <div class="filters" style="grid-template-columns: repeat(6, minmax(0,1fr));">
-        <div class="field" style="grid-column: span 4;">
+      <div class="filters filters-6">
+        <div class="field col-4">
           <label>Arquivo (CSV ou XLSX)</label>
           <input id="uploadFile" type="file" accept=".csv,.xlsx,.xls" />
         </div>
 
-        <div class="field" style="grid-column: span 2;">
+        <div class="field col-2">
           <label>Tag de Lote (Opcional)</label>
           <input id="uploadSource" placeholder="Ex: Lote_Fevereiro" />
           <small class="muted">Obs.: a API V14 ignora a tag por enquanto (guardado para futuras versões).</small>
         </div>
 
-        <div class="field field-actions" style="grid-column: span 6;">
+        <div class="field field-actions col-6">
           <button id="btnUpload" class="btn btn-primary">Processar no BigQuery</button>
           <span id="uploadStatus" class="muted"></span>
         </div>
@@ -71,54 +74,61 @@
       <div class="card-header">
         <h2>Filtros Dinâmicos</h2>
         <p>Busca em tempo real nas tabelas de dimensão. Agora com seleção múltipla em dropdown com checkbox.</p>
+        <div class="novo-filtro-alerta">Novo filtro ativo: Modalidade</div>
       </div>
 
-      <div class="filters" style="grid-template-columns: repeat(6, minmax(0,1fr));">
-        <div class="field" style="grid-column: span 2;">
+      <div class="filters filters-6">
+        <div class="field col-2">
           <label>Status (Multi)</label>
           <!-- MULTI com checkbox -->
           <select id="fStatus" multiple placeholder="Todos os status..."></select>
         </div>
 
-        <div class="field" style="grid-column: span 2;">
+        <div class="field col-2">
           <label>Cursos (Multi)</label>
           <!-- MULTI com checkbox -->
           <select id="fCurso" multiple placeholder="Todos os cursos..."></select>
         </div>
 
-        <div class="field" style="grid-column: span 2;">
+        <div class="field col-2">
+          <label>Modalidade (Multi)</label>
+          <!-- MULTI com checkbox -->
+          <select id="fModalidade" multiple placeholder="Todas as modalidades..."></select>
+        </div>
+
+        <div class="field col-2">
           <label>Polos (Multi)</label>
           <!-- MULTI com checkbox -->
           <select id="fPolo" multiple placeholder="Todos os polos..."></select>
         </div>
 
-        <div class="field" style="grid-column: span 2;">
+        <div class="field col-2">
           <label>Consultor (Multi)</label>
           <!-- MULTI com checkbox -->
           <select id="fConsultor" multiple placeholder="Todos os consultores..."></select>
         </div>
 
-        <div class="field" style="grid-column: span 1;">
+        <div class="field col-1">
           <label>Data Inicial</label>
           <input id="fIni" type="date" />
         </div>
 
-        <div class="field" style="grid-column: span 1;">
+        <div class="field col-1">
           <label>Data Final</label>
           <input id="fFim" type="date" />
         </div>
 
-        <div class="field" style="grid-column: span 1;">
+        <div class="field col-1">
           <label>Limite</label>
           <input id="fLimit" type="number" min="50" step="50" value="500" />
         </div>
 
-        <div class="field field-actions" style="grid-column: span 2;">
+        <div class="field field-actions col-2">
           <button id="btnApply" class="btn btn-primary">Aplicar Filtros</button>
           <button id="btnClear" class="btn btn-ghost">Limpar Tudo</button>
         </div>
 
-        <div class="field" style="grid-column: span 3;">
+        <div class="field col-3">
           <label>Busca rápida (Nome / CPF / Celular / Email)</label>
           <input id="fBusca" placeholder="Ex.: Maria / 12345678900 / 11999999999 / email@..." />
           <small class="muted">A lógica de busca (nome/cpf/celular/email) será aplicada no JS enviando os params corretos.</small>
@@ -126,7 +136,7 @@
       </div>
 
       <!-- Dica visual simples: o TomSelect com plugin de checkbox usa o próprio dropdown -->
-      <div class="muted" style="margin-top: 8px;">
+      <div class="muted section-hint">
         Dica: use o campo de busca dentro do dropdown para achar opções rápido e marque/desmarque as caixas.
       </div>
     </section>
@@ -159,7 +169,7 @@
         </table>
       </div>
 
-      <div class="muted" style="margin-top: 10px;">
+      <div class="muted section-total">
         <span>Total retornado: </span><strong id="lblTotal">—</strong>
       </div>
     </section>
@@ -167,6 +177,7 @@
     <footer class="footer">
       <span>© Painel Leads Lite - Engenharia de Dados</span>
       <span class="muted">Infra: BigQuery + Modelo Estrela (Star Schema)</span>
+      <span class="build-tag">UI {{ ui_version }}</span>
     </footer>
   </main>
 
@@ -184,6 +195,6 @@
     };
   </script>
 
-  <script src="{{ url_for('static', filename='js/app.js') }}"></script>
+  <script src="{{ url_for('static', filename='js/app.js', v=asset_version) }}"></script>
 </body>
 </html>
