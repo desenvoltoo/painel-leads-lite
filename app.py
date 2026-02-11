@@ -113,6 +113,26 @@ def _read_csv_flexible(file_storage):
     raise ValueError(f"Falha ao ler CSV. Verifique encoding/separador. Erro: {last_error}")
 
 
+def _repair_mojibake_text(value):
+    """Corrige mojibake comum em textos antes de escrever no CSV."""
+    if not isinstance(value, str):
+        return value
+
+    s = value.strip()
+    if not s:
+        return s
+    if "Ã" not in s and "Â" not in s:
+        return s
+
+    try:
+        fixed = s.encode("cp1252").decode("utf-8")
+        if fixed.count("Ã") + fixed.count("Â") < s.count("Ã") + s.count("Â"):
+            return fixed
+    except Exception:
+        pass
+    return s
+
+
 # ============================================================
 # APP FACTORY
 # ============================================================
@@ -120,7 +140,7 @@ def create_app() -> Flask:
     app = Flask(__name__)
     app.config["MAX_CONTENT_LENGTH"] = 30 * 1024 * 1024  # Limite de 30MB para uploads
 
-    asset_version = _env("ASSET_VERSION", "20260210-visual12")
+    asset_version = _env("ASSET_VERSION", "20260210-visual13")
     ui_version = _env("UI_VERSION", f"v{asset_version}")
 
 
@@ -231,7 +251,7 @@ def create_app() -> Flask:
                 sio.truncate(0)
 
                 for row in export_staging_variable_rows(max_rows=max_rows):
-                    writer.writerow([row.get(col) for col in EXPORT_VARIABLE_COLUMNS])
+                    writer.writerow([_repair_mojibake_text(row.get(col)) for col in EXPORT_VARIABLE_COLUMNS])
                     yield sio.getvalue()
                     sio.seek(0)
                     sio.truncate(0)
@@ -271,7 +291,7 @@ def create_app() -> Flask:
                 sio.truncate(0)
 
                 for row in export_leads_rows(filters=filters, max_rows=max_rows):
-                    writer.writerow([row.get(k) for k, _ in EXPORT_COLUMNS])
+                    writer.writerow([_repair_mojibake_text(row.get(k)) for k, _ in EXPORT_COLUMNS])
                     yield sio.getvalue()
                     sio.seek(0)
                     sio.truncate(0)
