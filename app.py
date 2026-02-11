@@ -6,14 +6,17 @@ Versão: 3.0 - Modelo Estrela Consolidado V14
 
 import os
 import traceback
+import io
 import pandas as pd
-from flask import Flask, render_template, request, jsonify
+from flask import Flask, render_template, request, jsonify, send_file
 
 from services.bigquery import (
     query_leads,
     query_leads_count,
     query_options,
-    process_upload_dataframe
+    process_upload_dataframe,
+    # ✅ NOVO (vamos implementar/garantir no bigquery.py no próximo passo)
+    export_leads_rows,
 )
 
 # ============================================================
@@ -42,6 +45,7 @@ def _get_filters_from_request():
         "curso": n(request.args.get("curso")),
         "polo": n(request.args.get("polo")),
         "consultor": n(request.args.get("consultor")),
+        "modalidade": n(request.args.get("modalidade")),  # ✅ NOVO
         "cpf": n(request.args.get("cpf")),
         "celular": n(request.args.get("celular")),
         "email": n(request.args.get("email")),
@@ -159,6 +163,48 @@ def create_app() -> Flask:
             return jsonify({"ok": True, "data": data})
         except Exception as e:
             return jsonify(_error_payload(e, "Erro ao carregar opções dos filtros.")), 500
+
+    # ============================================================
+    # ✅ NOVO: EXPORT XLSX (server-side)
+    # ============================================================
+    @app.get("/api/export/xlsx")
+    def api_export_xlsx():
+        """
+        Exporta XLSX server-side com os mesmos filtros do /api/leads.
+        Usa BigQuery no backend (não exporta do HTML).
+        """
+        try:
+            filters, meta = _get_filters_from_request()
+
+            # Segurança: limite máximo para evitar explodir memória/tempo
+            # (se quiser, depois fazemos export paginado/assíncrono)
+            limit = min(int(meta.get("limit") or 50000), 100000)
+
+            rows = export_leads_rows(
+                filters=filters,
+                limit=limit,
+                offset=int(meta.get("offset") or 0),
+                order_by=meta.get("order_by") or "data_inscricao_dt",
+                order_dir=meta.get("order_dir") or "DESC",
+            )
+
+            df = pd.DataFrame(rows or [])
+
+            bio = io.BytesIO()
+            with pd.ExcelWriter(bio, engine="xlsxwriter") as writer:
+                df.to_excel(writer, index=False, sheet_name="Leads")
+
+            bio.seek(0)
+
+            return send_file(
+                bio,
+                as_attachment=True,
+                download_name="leads_export.xlsx",
+                mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
+
+        except Exception as e:
+            return jsonify(_error_payload(e, "Erro ao exportar XLSX.")), 500
 
     @app.post("/api/upload")
     def api_upload():
