@@ -140,14 +140,20 @@ def create_app() -> Flask:
     app = Flask(__name__)
     app.config["MAX_CONTENT_LENGTH"] = 30 * 1024 * 1024  # Limite de 30MB para uploads
 
-    asset_version = _env("ASSET_VERSION", "20260210-visual18")
+    asset_version = _env("ASSET_VERSION", "20260210-visual19")
     ui_version = _env("UI_VERSION", f"v{asset_version}")
 
 
     @app.after_request
     def add_no_cache_headers(response):
         content_type = (response.headers.get("Content-Type") or "").lower()
-        if "text/html" in content_type:
+        path = request.path or ""
+        if (
+            "text/html" in content_type
+            or "text/css" in content_type
+            or "javascript" in content_type
+            or path.startswith("/static/")
+        ):
             response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
             response.headers["Pragma"] = "no-cache"
             response.headers["Expires"] = "0"

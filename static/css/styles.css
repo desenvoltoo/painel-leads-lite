@@ -354,3 +354,35 @@ tbody tr:hover { background: rgba(122, 125, 255, 0.1); }
   .filters { grid-template-columns: repeat(2, minmax(0, 1fr)) !important; }
   .field, .field-actions { grid-column: span 2 !important; }
 }
+
+
+.quick-actions {
+  position: sticky;
+  top: 94px;
+  z-index: 35;
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  padding: 10px 12px;
+  margin: 0 0 10px 0;
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+  background: rgba(8, 16, 32, 0.95);
+}
+
+.quick-actions .build-tag {
+  margin-left: auto;
+}
+
+@media (max-width: 1100px) {
+  .quick-actions {
+    top: 120px;
+    flex-wrap: wrap;
+  }
+  .quick-actions .btn {
+    flex: 1 1 calc(50% - 8px);
+  }
+  .quick-actions .build-tag {
+    margin-left: 0;
+  }
+}
