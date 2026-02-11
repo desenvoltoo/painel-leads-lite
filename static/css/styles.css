@@ -230,6 +230,7 @@ table {
   width: 100%;
   min-width: 960px;
   border-collapse: collapse;
+  table-layout: fixed;   /* ✅ trava as colunas */
 }
 
 thead th {
@@ -247,6 +248,9 @@ thead th {
 th, td {
   padding: 10px 12px;
   border-bottom: 1px solid rgba(151, 180, 255, 0.16);
+  white-space: nowrap;        /* ✅ evita “crescer” linha/coluna */
+  overflow: hidden;           /* ✅ corta excesso */
+  text-overflow: ellipsis;    /* ✅ ... */
 }
 
 tbody tr:nth-child(even) { background: rgba(255, 255, 255, 0.015); }
