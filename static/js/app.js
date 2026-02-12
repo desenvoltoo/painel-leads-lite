@@ -114,12 +114,7 @@ function makeTomSelect(selector) {
     labelField: "text",
     searchField: ["text"],
     render: {
-      option: (data, escape) => `
-        <div class="ts-opt">
-          <span class="ts-opt-check" aria-hidden="true"></span>
-          <span class="ts-opt-text">${escape(data.text)}</span>
-        </div>
-      `,
+      option: (data, escape) => `<div class="ts-opt"><span class="ts-opt-text">${escape(data.text)}</span></div>`,
       item: (data, escape) => `<div>${escape(data.text)}</div>`
     },
     onChange: () => loadLeadsAndKpisDebounced()

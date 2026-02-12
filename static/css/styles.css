@@ -301,32 +301,16 @@ tbody tr:hover { background: rgba(122, 125, 255, 0.1); }
 
 .ts-opt { display: flex; align-items: center; gap: 8px; }
 
-.ts-opt-check {
-  width: 16px;
-  height: 16px;
-  border-radius: 4px;
-  border: 1px solid rgba(188, 208, 255, 0.6);
-  background: rgba(255, 255, 255, 0.04);
-  display: inline-grid;
-  place-items: center;
+.ts-dropdown .option input[type="checkbox"] {
+  width: 12px;
+  height: 12px;
+  margin: 0;
+  accent-color: var(--accent);
   flex-shrink: 0;
 }
 
 .ts-dropdown .selected { background: rgba(122, 125, 255, 0.22) !important; }
 
-.ts-dropdown .selected .ts-opt-check {
-  border-color: var(--accent);
-  background: rgba(99, 163, 255, 0.45);
-}
-
-.ts-dropdown .selected .ts-opt-check::after {
-  content: "";
-  width: 4px;
-  height: 8px;
-  border: solid #061224;
-  border-width: 0 2px 2px 0;
-  transform: rotate(45deg);
-}
 
 .ts-wrapper.multi .ts-control > div {
   color: var(--text) !important;
