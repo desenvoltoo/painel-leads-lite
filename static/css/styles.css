@@ -301,12 +301,16 @@ tbody tr:hover { background: rgba(122, 125, 255, 0.1); }
 
 .ts-opt { display: flex; align-items: center; gap: 8px; }
 
+.ts-dropdown .option input[type="checkbox"] {
+  display: none !important;
+}
+
 .ts-opt-check {
-  width: 16px;
-  height: 16px;
-  border-radius: 4px;
-  border: 1px solid rgba(188, 208, 255, 0.6);
-  background: rgba(255, 255, 255, 0.04);
+  width: 12px;
+  height: 12px;
+  border-radius: 3px;
+  border: 1px solid rgba(188, 208, 255, 0.75);
+  background: rgba(255, 255, 255, 0.05);
   display: inline-grid;
   place-items: center;
   flex-shrink: 0;
@@ -316,15 +320,15 @@ tbody tr:hover { background: rgba(122, 125, 255, 0.1); }
 
 .ts-dropdown .selected .ts-opt-check {
   border-color: var(--accent);
-  background: rgba(99, 163, 255, 0.45);
+  background: rgba(99, 163, 255, 0.5);
 }
 
 .ts-dropdown .selected .ts-opt-check::after {
   content: "";
-  width: 4px;
-  height: 8px;
+  width: 3px;
+  height: 6px;
   border: solid #061224;
-  border-width: 0 2px 2px 0;
+  border-width: 0 1.5px 1.5px 0;
   transform: rotate(45deg);
 }
 
