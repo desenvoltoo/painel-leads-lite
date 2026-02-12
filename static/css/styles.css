@@ -302,15 +302,35 @@ tbody tr:hover { background: rgba(122, 125, 255, 0.1); }
 .ts-opt { display: flex; align-items: center; gap: 8px; }
 
 .ts-dropdown .option input[type="checkbox"] {
+  display: none !important;
+}
+
+.ts-opt-check {
   width: 12px;
   height: 12px;
-  margin: 0;
-  accent-color: var(--accent);
+  border-radius: 3px;
+  border: 1px solid rgba(188, 208, 255, 0.75);
+  background: rgba(255, 255, 255, 0.05);
+  display: inline-grid;
+  place-items: center;
   flex-shrink: 0;
 }
 
 .ts-dropdown .selected { background: rgba(122, 125, 255, 0.22) !important; }
 
+.ts-dropdown .selected .ts-opt-check {
+  border-color: var(--accent);
+  background: rgba(99, 163, 255, 0.5);
+}
+
+.ts-dropdown .selected .ts-opt-check::after {
+  content: "";
+  width: 3px;
+  height: 6px;
+  border: solid #061224;
+  border-width: 0 1.5px 1.5px 0;
+  transform: rotate(45deg);
+}
 
 .ts-wrapper.multi .ts-control > div {
   color: var(--text) !important;
