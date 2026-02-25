@@ -17,7 +17,7 @@ from openpyxl.utils import get_column_letter
 # ============================================================
 GCP_PROJECT_ID = os.getenv("GCP_PROJECT_ID", "painel-universidade")
 BQ_DATASET = os.getenv("BQ_DATASET", "modelo_estrela")
-BQ_LOCATION = os.getenv("BQ_LOCATION", "us-central1")  # ✅ confirmado por você
+
 
 # Mantém seu staging atual (tabela no MESMO dataset)
 BQ_STAGING_TABLE = os.getenv("BQ_STAGING_TABLE", "stg_leads_site")
@@ -38,7 +38,7 @@ _bq_client: Optional[bigquery.Client] = None
 def get_bq_client() -> bigquery.Client:
     global _bq_client
     if _bq_client is None:
-        _bq_client = bigquery.Client(project=GCP_PROJECT_ID, location=BQ_LOCATION)
+        _bq_client = bigquery.Client(project=GCP_PROJECT_ID)
     return _bq_client
 
 
