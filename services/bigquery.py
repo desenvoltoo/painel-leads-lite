@@ -24,7 +24,7 @@ BQ_STAGING_TABLE = os.getenv("BQ_STAGING_TABLE", "stg_leads_site")
 # Procedure do seu star (no MESMO dataset)
 BQ_PROCEDURE = os.getenv("BQ_PROCEDURE", "sp_import_star_from_site")
 
-# ✅ TRAVADO: painel lê SOMENTE essa view (não depende de ENV)
+# ✅ TRAVADO: painel lê SOMENTE essa view
 BQ_VIEW_LEADS = "vw_leads_painel_lite"
 
 DEFAULT_LIMIT = int(os.getenv("BQ_DEFAULT_LIMIT", "200"))
@@ -180,7 +180,7 @@ def _apply_filters(sql: str, filters: Dict[str, Any], params: List[Any]) -> str:
             )
         )
 
-    # ✅ matriculado: usa SOMENTE flag_matriculado (a view garante)
+    # ✅ matriculado: só flag_matriculado
     if filters.get("matriculado") is not None and str(filters.get("matriculado")).strip() != "":
         val = str(filters.get("matriculado")).lower().strip()
         b = (
@@ -194,7 +194,7 @@ def _apply_filters(sql: str, filters: Dict[str, Any], params: List[Any]) -> str:
             sql += " AND IFNULL(v.flag_matriculado, FALSE) = @matriculado"
             params.append(bigquery.ScalarQueryParameter("matriculado", "BOOL", b))
 
-    # data_inscricao é DATE na view
+    # datas
     if filters.get("data_ini"):
         sql += " AND v.data_inscricao >= @data_ini"
         params.append(bigquery.ScalarQueryParameter("data_ini", "DATE", filters["data_ini"]))
@@ -207,7 +207,7 @@ def _apply_filters(sql: str, filters: Dict[str, Any], params: List[Any]) -> str:
 
 
 # ============================================================
-# LISTAGEM (Tabela do painel) - sempre VIEW
+# LISTAGEM
 # ============================================================
 def query_leads(
     filters: Optional[Dict[str, Any]] = None,
@@ -223,7 +223,6 @@ def query_leads(
     offset = max(0, int(offset))
     order_dir = "ASC" if str(order_dir).upper() == "ASC" else "DESC"
 
-    # compat antiga
     if order_by == "data_inscricao_dt":
         order_by = "data_inscricao"
 
@@ -278,7 +277,7 @@ def query_leads_count(filters: Optional[Dict[str, Any]] = None) -> int:
 
 
 # ============================================================
-# OPTIONS (dropdowns/autocomplete) - sempre VIEW
+# OPTIONS
 # ============================================================
 def _distinct_values_from_view(col: str, alias: str) -> List[str]:
     client = get_bq_client()
@@ -309,7 +308,7 @@ def query_options() -> Dict[str, List[str]]:
 
 
 # ============================================================
-# EXPORT (XLSX) - sempre VIEW
+# EXPORT (XLSX)
 # ============================================================
 EXPORT_COLUMNS: List[Tuple[str, str]] = [
     ("data_inscricao", "Data Inscrição"),
@@ -336,7 +335,6 @@ EXPORT_COLUMNS: List[Tuple[str, str]] = [
     ("texto_disparo", "Texto Disparo"),
     ("qtd_acionamentos", "Qtd Acionamentos"),
     ("data_matricula", "Data Matrícula"),
-    ("data_contato", "Data Contato"),  # (vai vir NULL se seu star não tem)
     ("data_ultima_acao", "Data Última Ação"),
     ("data_disparo", "Data Disparo"),
     ("data_atualizacao", "Atualizado em"),
