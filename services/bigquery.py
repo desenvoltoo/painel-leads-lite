@@ -23,8 +23,8 @@ BQ_STAGING_TABLE = os.getenv("BQ_STAGING_TABLE", "stg_leads_site")
 # ✅ Nova SP do novo star
 BQ_PROCEDURE = os.getenv("BQ_PROCEDURE", "sp_import_star_from_site")
 
-# ✅ Nova view (a LITE que refizemos)
-BQ_VIEW_LEADS = os.getenv("BQ_VIEW_LEADS", "vw_leads_painel_lite")
+# ✅ View fixa exigida pelo painel (sempre lê exatamente esta view)
+BQ_VIEW_LEADS = "vw_leads_painel_lite"
 
 DEFAULT_LIMIT = int(os.getenv("BQ_DEFAULT_LIMIT", "200"))
 MAX_LIMIT = int(os.getenv("BQ_MAX_LIMIT", "2000"))
@@ -95,6 +95,14 @@ def process_upload_dataframe(df) -> None:
 # ---------------------------
 def _base_select_sql() -> str:
     return f"FROM {_tbl(BQ_VIEW_LEADS)} v WHERE 1=1"
+
+
+def _matriculado_expr() -> str:
+    """
+    Compatibilidade de schema: algumas versões da view expõem
+    `flag_matriculado`, outras `matriculado_flag` (ou ambas).
+    """
+    return "COALESCE(v.flag_matriculado, v.matriculado_flag)"
 
 
 def _apply_filters(sql: str, filters: Dict[str, Any], params: List[Any]) -> str:
@@ -201,7 +209,7 @@ def _apply_filters(sql: str, filters: Dict[str, Any], params: List[Any]) -> str:
         val = str(filters.get("matriculado")).lower().strip()
         b = True if val in ("true", "1", "sim", "yes") else False if val in ("false", "0", "nao", "não", "no") else None
         if b is not None:
-            sql += " AND IFNULL(v.flag_matriculado, FALSE) = @matriculado"
+            sql += f" AND IFNULL({_matriculado_expr()}, FALSE) = @matriculado"
             params.append(bigquery.ScalarQueryParameter("matriculado", "BOOL", b))
 
     # data_inscricao já é DATE na view
@@ -252,14 +260,28 @@ def query_leads(
 
     sql = """
     SELECT
+      v.sk_pessoa,
       v.data_inscricao,
+      v.data_matricula,
+      v.data_contato,
+      v.data_ultima_acao,
+      v.data_disparo,
+      v.data_atualizacao,
+      v.ano_mes_inscricao,
       v.nome, v.cpf, v.celular, v.email,
       v.curso, v.modalidade, v.turno,
       v.polo,
       v.origem,
-      v.status_inscricao, v.status, v.flag_matriculado,
+      v.status_inscricao, v.status,
+      v.matriculado_flag,
+      v.flag_matriculado,
+      COALESCE(v.flag_matriculado, v.matriculado_flag) AS matriculado,
+      v.observacao,
+      v.tipo_negocio,
       v.consultor_comercial, v.consultor_disparo,
-      v.canal, v.campanha
+      v.canal, v.campanha, v.acao_comercial,
+      v.tipo_disparo, v.peca_disparo, v.texto_disparo,
+      v.qtd_acionamentos
     """ + _base_select_sql()
 
     params: List[Any] = []
@@ -320,7 +342,9 @@ def query_options() -> Dict[str, List[str]]:
 # EXPORT (XLSX)
 # ---------------------------
 EXPORT_COLUMNS: List[Tuple[str, str]] = [
+    ("sk_pessoa", "SK Pessoa"),
     ("data_inscricao", "Data Inscrição"),
+    ("ano_mes_inscricao", "Ano/Mês Inscrição"),
     ("nome", "Candidato"),
     ("cpf", "CPF"),
     ("celular", "Celular"),
@@ -332,6 +356,7 @@ EXPORT_COLUMNS: List[Tuple[str, str]] = [
     ("origem", "Origem"),
     ("status_inscricao", "Status Inscrição"),
     ("status", "Status"),
+    ("matriculado_flag", "Matriculado Flag"),
     ("flag_matriculado", "Matriculado"),
     ("tipo_negocio", "Tipo Negócio"),
     ("consultor_comercial", "Consultor Comercial"),

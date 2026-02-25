@@ -325,7 +325,7 @@ function renderTable(rows, { loading = false } = {}) {
       <td>${escapeHtml(r.curso || "-")}</td>
       <td>${escapeHtml(r.modalidade || "-")}</td>
       <td><span class="badge">${escapeHtml(r.status_inscricao || r.status || "LEAD")}</span></td>
-      <td>${escapeHtml(fmtBool(r.flag_matriculado))}</td>
+      <td>${escapeHtml(fmtBool(r.matriculado ?? r.flag_matriculado ?? r.matriculado_flag))}</td>
       <td>${escapeHtml(r.consultor_disparo || "-")}</td>
       <td>${escapeHtml(r.campanha || "-")}</td>
       <td>${escapeHtml(r.canal || "-")}</td>
