@@ -18,7 +18,6 @@ from openpyxl.utils import get_column_letter
 GCP_PROJECT_ID = os.getenv("GCP_PROJECT_ID", "painel-universidade")
 BQ_DATASET = os.getenv("BQ_DATASET", "modelo_estrela")
 
-
 # Mantém seu staging atual (tabela no MESMO dataset)
 BQ_STAGING_TABLE = os.getenv("BQ_STAGING_TABLE", "stg_leads_site")
 
@@ -43,7 +42,6 @@ def get_bq_client() -> bigquery.Client:
 
 
 def _tbl(name: str) -> str:
-    """Retorna `project.dataset.object`."""
     return f"`{GCP_PROJECT_ID}.{BQ_DATASET}.{name}`"
 
 
@@ -66,10 +64,6 @@ def _as_list(v: Any) -> List[str]:
 # STAGING + PROCEDURE (upload)
 # ============================================================
 def load_to_staging(df) -> None:
-    """
-    Carrega o dataframe na staging (WRITE_TRUNCATE).
-    Mantém o que você já fazia.
-    """
     client = get_bq_client()
     table_id = f"{GCP_PROJECT_ID}.{BQ_DATASET}.{BQ_STAGING_TABLE}"
     job = client.load_table_from_dataframe(
@@ -97,28 +91,10 @@ def process_upload_dataframe(df) -> None:
 # QUERY HELPERS (sempre a VIEW)
 # ============================================================
 def _base_select_sql() -> str:
-    # ✅ tudo parte da VIEW
     return f"FROM {_tbl(BQ_VIEW_LEADS)} v WHERE 1=1"
 
 
 def _apply_filters(sql: str, filters: Dict[str, Any], params: List[Any]) -> str:
-    """
-    Filtros alinhados à vw_leads_painel_lite.
-
-    Campos esperados na VIEW:
-      - pessoa: nome, cpf, celular, email
-      - curso: curso, modalidade, turno
-      - polo: polo
-      - origem: origem
-      - consultor: consultor_comercial, consultor_disparo
-      - status: status, status_inscricao, observacao, flag_matriculado/matriculado_flag
-      - campanha: campanha, canal, acao_comercial
-      - disparo: tipo_disparo, peca_disparo, texto_disparo, qtd_acionamentos
-      - tipo_negocio: tipo_negocio
-      - datas: data_inscricao (DATE), data_matricula (DATE),
-               data_contato (TIMESTAMP), data_ultima_acao (TIMESTAMP),
-               data_disparo (TIMESTAMP), data_atualizacao (TIMESTAMP)
-    """
     cursos = _as_list(filters.get("curso"))
     polos = _as_list(filters.get("polo"))
     modalidades = _as_list(filters.get("modalidade"))
@@ -127,14 +103,11 @@ def _apply_filters(sql: str, filters: Dict[str, Any], params: List[Any]) -> str:
     campanhas = _as_list(filters.get("campanha"))
     origens = _as_list(filters.get("origem"))
     tipos_negocio = _as_list(filters.get("tipo_negocio"))
+    tipos_disparo = _as_list(filters.get("tipo_disparo"))
 
-    # status: compat antiga pode mandar "status" e esperar status_inscricao
     status_list = _as_list(filters.get("status")) or _as_list(filters.get("status_inscricao"))
-
     consultores_disp = _as_list(filters.get("consultor_disparo")) or _as_list(filters.get("consultor"))
     consultores_com = _as_list(filters.get("consultor_comercial"))
-
-    tipos_disparo = _as_list(filters.get("tipo_disparo"))
 
     if cursos:
         sql += " AND v.curso IN UNNEST(@cursos)"
@@ -207,7 +180,7 @@ def _apply_filters(sql: str, filters: Dict[str, Any], params: List[Any]) -> str:
             )
         )
 
-    # matriculado (blindado: aceita flag_matriculado OU matriculado_flag)
+    # ✅ matriculado: usa SOMENTE flag_matriculado (a view garante)
     if filters.get("matriculado") is not None and str(filters.get("matriculado")).strip() != "":
         val = str(filters.get("matriculado")).lower().strip()
         b = (
@@ -218,13 +191,14 @@ def _apply_filters(sql: str, filters: Dict[str, Any], params: List[Any]) -> str:
             else None
         )
         if b is not None:
-            sql += " AND IFNULL(COALESCE(v.flag_matriculado), FALSE) = @matriculado"
+            sql += " AND IFNULL(v.flag_matriculado, FALSE) = @matriculado"
             params.append(bigquery.ScalarQueryParameter("matriculado", "BOOL", b))
 
     # data_inscricao é DATE na view
     if filters.get("data_ini"):
         sql += " AND v.data_inscricao >= @data_ini"
         params.append(bigquery.ScalarQueryParameter("data_ini", "DATE", filters["data_ini"]))
+
     if filters.get("data_fim"):
         sql += " AND v.data_inscricao <= @data_fim"
         params.append(bigquery.ScalarQueryParameter("data_fim", "DATE", filters["data_fim"]))
@@ -250,7 +224,7 @@ def query_leads(
     order_dir = "ASC" if str(order_dir).upper() == "ASC" else "DESC"
 
     # compat antiga
-    if order_by == "data_inscricao":
+    if order_by == "data_inscricao_dt":
         order_by = "data_inscricao"
 
     allowed_order = {
@@ -362,7 +336,7 @@ EXPORT_COLUMNS: List[Tuple[str, str]] = [
     ("texto_disparo", "Texto Disparo"),
     ("qtd_acionamentos", "Qtd Acionamentos"),
     ("data_matricula", "Data Matrícula"),
-    ("data_contato", "Data Contato"),
+    ("data_contato", "Data Contato"),  # (vai vir NULL se seu star não tem)
     ("data_ultima_acao", "Data Última Ação"),
     ("data_disparo", "Data Disparo"),
     ("data_atualizacao", "Atualizado em"),
@@ -400,14 +374,7 @@ def export_leads_rows(
     }
     order_expr = allowed_order.get(order_by, "v.data_inscricao")
 
-    # monta SELECT explicitamente e blinda flag_matriculado via COALESCE
-    select_parts: List[str] = []
-    for c, _ in EXPORT_COLUMNS:
-        if c == "flag_matriculado":
-            select_parts.append("COALESCE(v.flag_matriculado, v.matriculado_flag) AS flag_matriculado")
-        else:
-            select_parts.append(f"v.{c}")
-    select_cols = ",\n      ".join(select_parts)
+    select_cols = ",\n      ".join([f"v.{c}" for c, _ in EXPORT_COLUMNS])
 
     sql = f"""
     SELECT
@@ -426,22 +393,17 @@ def export_leads_rows(
 
 
 def rows_to_xlsx(rows: List[Dict[str, Any]], xlsx_path: str, sheet_name: str = "Leads") -> str:
-    """
-    Gera XLSX no disco.
-    """
     wb = Workbook()
     ws = wb.active
     ws.title = sheet_name[:31]
 
     headers = [label for _, label in EXPORT_COLUMNS]
     keys = [key for key, _ in EXPORT_COLUMNS]
-
     ws.append(headers)
 
     for r in rows:
         ws.append([r.get(k) for k in keys])
 
-    # ajuste de largura simples
     for col_idx, header in enumerate(headers, start=1):
         col_letter = get_column_letter(col_idx)
         ws.column_dimensions[col_letter].width = max(12, min(42, len(str(header)) + 6))
@@ -452,9 +414,6 @@ def rows_to_xlsx(rows: List[Dict[str, Any]], xlsx_path: str, sheet_name: str = "
 
 
 def df_to_xlsx(df, xlsx_path: str, sheet_name: str = "Upload") -> str:
-    """
-    Salva cópia do upload em XLSX.
-    """
     wb = Workbook()
     ws = wb.active
     ws.title = sheet_name[:31]
