@@ -391,6 +391,20 @@ def export_leads_rows(
 
 
 def rows_to_xlsx(rows: List[Dict[str, Any]], xlsx_path: str, sheet_name: str = "Leads") -> str:
+    """
+    Gera XLSX no disco (Excel não aceita datetime com timezone).
+    """
+    from datetime import datetime, date
+
+    def _excel_safe(v):
+        # Remove tzinfo de datetimes (Excel/OpenPyXL não suporta timezone)
+        if isinstance(v, datetime):
+            return v.replace(tzinfo=None) if v.tzinfo is not None else v
+        # date ok
+        if isinstance(v, date):
+            return v
+        return v
+
     wb = Workbook()
     ws = wb.active
     ws.title = sheet_name[:31]
@@ -400,7 +414,7 @@ def rows_to_xlsx(rows: List[Dict[str, Any]], xlsx_path: str, sheet_name: str = "
     ws.append(headers)
 
     for r in rows:
-        ws.append([r.get(k) for k in keys])
+        ws.append([_excel_safe(r.get(k)) for k in keys])
 
     for col_idx, header in enumerate(headers, start=1):
         col_letter = get_column_letter(col_idx)
