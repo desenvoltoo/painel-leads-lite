@@ -79,7 +79,7 @@ def create_app() -> Flask:
     app = Flask(__name__)
     app.config["MAX_CONTENT_LENGTH"] = 30 * 1024 * 1024  # Limite de 30MB para uploads
 
-    asset_version = _env("ASSET_VERSION", "20260210-visual4")
+    asset_version = _env("ASSET_VERSION", "20260212-checkbox-fix-v2")
     ui_version = _env("UI_VERSION", f"v{asset_version}")
 
     @app.get("/")

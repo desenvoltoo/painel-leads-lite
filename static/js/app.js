@@ -100,11 +100,11 @@ function makeTomSelect(selector) {
   const el = $(selector);
   if (!el) return null;
 
-  const pluginCheckbox = window.__TOMSELECT_PLUGINS__?.checkbox || "checkbox_options";
   const pluginRemove = window.__TOMSELECT_PLUGINS__?.remove_button || "remove_button";
 
   return new TomSelect(selector, {
-    plugins: [pluginCheckbox, pluginRemove],
+    // Usamos apenas checkbox customizado para evitar duplicidade visual
+    plugins: [pluginRemove],
     maxItems: null,
     hideSelected: false,
     closeAfterSelect: false,
