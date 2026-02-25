@@ -1,12 +1,14 @@
 # -*- coding: utf-8 -*-
 """
 Painel Leads Lite (Flask + BigQuery)
-Versão: 3.0 - Modelo Estrela Consolidado V14
+Versão: 4.0 - Novo Modelo Estrela (vw_leads_painel_lite + sp_import_star_from_site)
 """
 
 import os
 import traceback
-import io
+from datetime import datetime
+from pathlib import Path
+
 import pandas as pd
 from flask import Flask, render_template, request, jsonify, send_file
 
@@ -15,8 +17,9 @@ from services.bigquery import (
     query_leads_count,
     query_options,
     process_upload_dataframe,
-    # ✅ NOVO (vamos implementar/garantir no bigquery.py no próximo passo)
     export_leads_rows,
+    df_to_xlsx,         # ✅ salva cópia do upload
+    rows_to_xlsx,       # ✅ gera export XLSX no servidor
 )
 
 # ============================================================
@@ -27,7 +30,6 @@ def _env(name: str, default: str = "") -> str:
     return v.strip() if isinstance(v, str) else v if v else default
 
 def _required_envs_ok():
-    # Verificação mínima para o app rodar com segurança
     missing = []
     for k in ("GCP_PROJECT_ID", "BQ_DATASET"):
         if not _env(k):
@@ -39,27 +41,35 @@ def _get_filters_from_request():
         v = (v or "").strip()
         return v if v else None
 
-    # filtros
+    # filtros (mantém compat e adiciona novos do star)
     filters = {
-        "status": n(request.args.get("status")),
+        "status": n(request.args.get("status")),  # pode ser status_inscricao também (bigquery.py trata)
         "curso": n(request.args.get("curso")),
         "polo": n(request.args.get("polo")),
-        "consultor": n(request.args.get("consultor")),
-        "modalidade": n(request.args.get("modalidade")),  # ✅ NOVO
+        "origem": n(request.args.get("origem")),                 # ✅ novo
+        "consultor": n(request.args.get("consultor")),           # compat -> consultor_disparo
+        "consultor_disparo": n(request.args.get("consultor_disparo")),
+        "consultor_comercial": n(request.args.get("consultor_comercial")),  # ✅ novo
+        "modalidade": n(request.args.get("modalidade")),
+        "turno": n(request.args.get("turno")),                   # ✅ novo
+        "canal": n(request.args.get("canal")),
+        "campanha": n(request.args.get("campanha")),
+        "tipo_disparo": n(request.args.get("tipo_disparo")),     # ✅ novo
+        "tipo_negocio": n(request.args.get("tipo_negocio")),     # ✅ novo
         "cpf": n(request.args.get("cpf")),
         "celular": n(request.args.get("celular")),
         "email": n(request.args.get("email")),
         "nome": n(request.args.get("nome")),
+        "matriculado": n(request.args.get("matriculado")),       # ✅ novo
         "data_ini": n(request.args.get("data_ini")),
         "data_fim": n(request.args.get("data_fim")),
     }
-    filters = {k: v for k, v in filters.items() if v}
+    filters = {k: v for k, v in filters.items() if v is not None and str(v).strip() != ""}
 
-    # meta (paginação/ordenação)
     meta = {
         "limit": int(request.args.get("limit") or 500),
         "offset": int(request.args.get("offset") or 0),
-        "order_by": n(request.args.get("order_by")) or "data_inscricao_dt",
+        "order_by": n(request.args.get("order_by")) or "data_inscricao",  # ✅ novo padrão
         "order_dir": n(request.args.get("order_dir")) or "DESC",
     }
     return filters, meta
@@ -69,18 +79,27 @@ def _error_payload(e: Exception, public_msg: str):
         "ok": False,
         "error": public_msg,
         "details": str(e),
-        "trace": traceback.format_exc(limit=3)
+        "trace": traceback.format_exc(limit=3),
     }
+
+def _stamp() -> str:
+    return datetime.now().strftime("%Y%m%d_%H%M%S")
 
 # ============================================================
 # APP FACTORY
 # ============================================================
 def create_app() -> Flask:
     app = Flask(__name__)
-    app.config["MAX_CONTENT_LENGTH"] = 30 * 1024 * 1024  # Limite de 30MB para uploads
+    app.config["MAX_CONTENT_LENGTH"] = 30 * 1024 * 1024
 
-    asset_version = _env("ASSET_VERSION", "20260210-visual4")
+    asset_version = _env("ASSET_VERSION", "20260225-star-v1")
     ui_version = _env("UI_VERSION", f"v{asset_version}")
+
+    # pastas locais (mantém XLSX)
+    UPLOAD_DIR = Path(_env("UPLOAD_DIR", "enviados"))
+    EXPORT_DIR = Path(_env("EXPORT_DIR", "exportados"))
+    UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+    EXPORT_DIR.mkdir(parents=True, exist_ok=True)
 
     @app.get("/")
     def index():
@@ -123,24 +142,22 @@ def create_app() -> Flask:
     @app.get("/api/kpis")
     def api_kpis():
         """
-        OBS: Esta rota faz uma query completa de leads para calcular KPI.
-        Em produção, o ideal é ter uma query agregada dedicada no BigQuery.
+        Melhorado: usa status_inscricao quando existir (novo star).
         """
         try:
             filters, meta = _get_filters_from_request()
-            # Usa o mesmo limit da requisição, mas pra KPI você pode querer ignorar limit.
             rows = query_leads(
                 filters=filters,
-                limit=meta["limit"],
+                limit=min(int(meta["limit"]), 5000),  # evita estourar
                 offset=meta["offset"],
                 order_by=meta["order_by"],
                 order_dir=meta["order_dir"],
             )
 
             total = len(rows)
-            status_counts = {}
+            status_counts: dict = {}
             for r in rows:
-                st = r.get("status") or "Lead"
+                st = r.get("status_inscricao") or r.get("status") or "LEAD"
                 status_counts[st] = status_counts.get(st, 0) + 1
 
             top_status = None
@@ -148,11 +165,7 @@ def create_app() -> Flask:
                 best = max(status_counts, key=status_counts.get)
                 top_status = {"status": best, "cnt": status_counts[best]}
 
-            return jsonify({
-                "ok": True,
-                "total": total,
-                "top_status": top_status
-            })
+            return jsonify({"ok": True, "total": total, "top_status": top_status})
         except Exception as e:
             return jsonify(_error_payload(e, "Erro ao calcular KPIs.")), 500
 
@@ -165,47 +178,39 @@ def create_app() -> Flask:
             return jsonify(_error_payload(e, "Erro ao carregar opções dos filtros.")), 500
 
     # ============================================================
-    # ✅ NOVO: EXPORT XLSX (server-side)
+    # ✅ EXPORT XLSX (gera arquivo em exportados/ e também envia)
     # ============================================================
     @app.get("/api/export/xlsx")
     def api_export_xlsx():
-        """
-        Exporta XLSX server-side com os mesmos filtros do /api/leads.
-        Usa BigQuery no backend (não exporta do HTML).
-        """
         try:
             filters, meta = _get_filters_from_request()
 
-            # Segurança: limite máximo para evitar explodir memória/tempo
-            # (se quiser, depois fazemos export paginado/assíncrono)
             limit = min(int(meta.get("limit") or 50000), 100000)
-
             rows = export_leads_rows(
                 filters=filters,
                 limit=limit,
                 offset=int(meta.get("offset") or 0),
-                order_by=meta.get("order_by") or "data_inscricao_dt",
+                order_by=meta.get("order_by") or "data_inscricao",
                 order_dir=meta.get("order_dir") or "DESC",
             )
 
-            df = pd.DataFrame(rows or [])
+            fname = f"leads_export_{_stamp()}.xlsx"
+            out_path = str(EXPORT_DIR / fname)
 
-            bio = io.BytesIO()
-            with pd.ExcelWriter(bio, engine="xlsxwriter") as writer:
-                df.to_excel(writer, index=False, sheet_name="Leads")
-
-            bio.seek(0)
+            rows_to_xlsx(rows or [], out_path, sheet_name="Leads")
 
             return send_file(
-                bio,
+                out_path,
                 as_attachment=True,
                 download_name="leads_export.xlsx",
-                mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             )
-
         except Exception as e:
             return jsonify(_error_payload(e, "Erro ao exportar XLSX.")), 500
 
+    # ============================================================
+    # ✅ UPLOAD (CSV/XLSX) + salva cópia XLSX em enviados/
+    # ============================================================
     @app.post("/api/upload")
     def api_upload():
         if "file" not in request.files:
@@ -225,12 +230,24 @@ def create_app() -> Flask:
             else:
                 return jsonify({"ok": False, "error": "Formato inválido. Envie CSV ou XLSX."}), 400
 
-            # V14: staging TRUNCATE + CALL procedure
+            # ✅ salva cópia SEMPRE em XLSX
+            saved_name = f"upload_{_stamp()}.xlsx"
+            saved_path = str(UPLOAD_DIR / saved_name)
+            df_to_xlsx(df, saved_path, sheet_name="Upload")
+
+            # ✅ staging + SP nova (amarrada no star)
             process_upload_dataframe(df)
 
-            return jsonify({"ok": True, "message": "Processado com sucesso! (staging + procedure V14)"}), 200
+            return jsonify(
+                {
+                    "ok": True,
+                    "message": "Processado com sucesso! (staging + procedure do novo Modelo Estrela)",
+                    "saved_xlsx": saved_name,
+                }
+            ), 200
+
         except Exception as e:
-            return jsonify(_error_payload(e, "Falha na ingestão V14.")), 500
+            return jsonify(_error_payload(e, "Falha na ingestão.")), 500
 
     return app
 
