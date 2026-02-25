@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from google.cloud import bigquery
 
@@ -31,7 +31,6 @@ MAX_LIMIT = int(os.getenv("BQ_MAX_LIMIT", "2000"))
 EXPORT_MAX_ROWS = int(os.getenv("BQ_EXPORT_MAX_ROWS", "50000"))
 
 _bq_client: Optional[bigquery.Client] = None
-_view_columns_cache: Optional[Set[str]] = None
 
 
 def get_bq_client() -> bigquery.Client:
@@ -98,51 +97,44 @@ def _base_select_sql() -> str:
     return f"FROM {_tbl(BQ_VIEW_LEADS)} v WHERE 1=1"
 
 
-def _get_view_columns() -> Set[str]:
-    """
-    Lê o schema da view uma vez e guarda em cache local do processo.
-    """
-    global _view_columns_cache
-    if _view_columns_cache is None:
-        client = get_bq_client()
-        table_ref = f"{GCP_PROJECT_ID}.{BQ_DATASET}.{BQ_VIEW_LEADS}"
-        table = client.get_table(table_ref)
-        _view_columns_cache = {f.name for f in table.schema}
-    return _view_columns_cache
-
-
-def _has_col(col: str) -> bool:
-    return col in _get_view_columns()
-
-
-def _col_expr(col: str, alias: Optional[str] = None) -> str:
-    """
-    Retorna expressão segura para SELECT:
-    - se a coluna existir: v.col
-    - se não existir: NULL AS alias
-    """
-    target = alias or col
-    if _has_col(col):
-        if alias and alias != col:
-            return f"v.{col} AS {alias}"
-        return f"v.{col}"
-    return f"NULL AS {target}"
+LEADS_VIEW_COLUMNS: List[str] = [
+    "sk_pessoa",
+    "cpf",
+    "celular",
+    "nome",
+    "email",
+    "curso",
+    "modalidade",
+    "turno",
+    "polo",
+    "origem",
+    "tipo_negocio",
+    "consultor_comercial",
+    "consultor_disparo",
+    "campanha",
+    "canal",
+    "acao_comercial",
+    "tipo_disparo",
+    "peca_disparo",
+    "texto_disparo",
+    "qtd_acionamentos",
+    "status",
+    "status_inscricao",
+    "observacao",
+    "matriculado_flag",
+    "data_inscricao",
+    "data_matricula",
+    "data_contato",
+    "data_ultima_acao",
+    "data_disparo",
+    "data_atualizacao",
+    "ano_mes_inscricao",
+    "flag_matriculado",
+]
 
 
 def _matriculado_expr() -> str:
-    """
-    Compatibilidade de schema: algumas versões da view expõem
-    `flag_matriculado`, outras `matriculado_flag` (ou ambas).
-    """
-    has_flag = _has_col("flag_matriculado")
-    has_alt = _has_col("matriculado_flag")
-    if has_flag and has_alt:
-        return "COALESCE(v.flag_matriculado, v.matriculado_flag)"
-    if has_flag:
-        return "v.flag_matriculado"
-    if has_alt:
-        return "v.matriculado_flag"
-    return "NULL"
+    return "COALESCE(v.matriculado_flag, v.flag_matriculado)"
 
 
 def _apply_filters(sql: str, filters: Dict[str, Any], params: List[Any]) -> str:
@@ -298,32 +290,12 @@ def query_leads(
     }
     order_expr = allowed_order.get(order_by, "v.data_inscricao")
 
-    select_exprs = [
-        _col_expr("sk_pessoa"),
-        _col_expr("data_inscricao"),
-        _col_expr("data_matricula"),
-        _col_expr("data_contato"),
-        _col_expr("data_ultima_acao"),
-        _col_expr("data_disparo"),
-        _col_expr("data_atualizacao"),
-        _col_expr("ano_mes_inscricao"),
-        _col_expr("nome"), _col_expr("cpf"), _col_expr("celular"), _col_expr("email"),
-        _col_expr("curso"), _col_expr("modalidade"), _col_expr("turno"),
-        _col_expr("polo"),
-        _col_expr("origem"),
-        _col_expr("status_inscricao"), _col_expr("status"),
-        _col_expr("matriculado_flag"),
-        _col_expr("flag_matriculado"),
-        f"{_matriculado_expr()} AS matriculado",
-        _col_expr("observacao"),
-        _col_expr("tipo_negocio"),
-        _col_expr("consultor_comercial"), _col_expr("consultor_disparo"),
-        _col_expr("canal"), _col_expr("campanha"), _col_expr("acao_comercial"),
-        _col_expr("tipo_disparo"), _col_expr("peca_disparo"), _col_expr("texto_disparo"),
-        _col_expr("qtd_acionamentos"),
-    ]
+    select_cols = ",\n      ".join([f"v.{c}" for c in LEADS_VIEW_COLUMNS])
 
-    sql = "SELECT\n      " + ",\n      ".join(select_exprs) + "\n" + _base_select_sql()
+    sql = f"""
+    SELECT
+      {select_cols}
+    """ + _base_select_sql()
 
     params: List[Any] = []
     sql = _apply_filters(sql, filters, params)
@@ -352,9 +324,6 @@ def query_leads_count(filters: Optional[Dict[str, Any]] = None) -> int:
 # OPTIONS (dropdowns/autocomplete)
 # ---------------------------
 def _distinct_values_from_view(col: str, alias: str) -> List[str]:
-    if not _has_col(col):
-        return []
-
     client = get_bq_client()
     sql = f"""
     SELECT DISTINCT {col} AS {alias}
@@ -451,7 +420,7 @@ def export_leads_rows(
     }
     order_expr = allowed_order.get(order_by, "v.data_inscricao")
 
-    select_cols = ",\n      ".join([_col_expr(c) for c, _ in EXPORT_COLUMNS])
+    select_cols = ",\n      ".join([f"v.{c}" for c, _ in EXPORT_COLUMNS])
 
     sql = f"""
     SELECT
