@@ -7,7 +7,7 @@
 //   POST /api/upload   -> { ok:true, message:"..." , saved_xlsx:"..." }
 //
 // HTML (ids):
-// upload: #uploadFile #btnUpload #uploadStatus
+// upload: #uploadFile #btnUpload #uploadStatus #uploadSource
 // filtros: #fStatus #fCurso #fModalidade #fTurno #fPolo #fOrigem
 //          #fConsultorDisparo #fConsultorComercial #fCanal #fCampanha
 //          #fTipoDisparo #fTipoNegocio
@@ -45,7 +45,11 @@ function setUploadStatus(msg, type = "ok") {
 function escapeHtml(str) {
   if (str === null || str === undefined) return "";
   return String(str).replace(/[&<>"']/g, (m) => ({
-    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
+    "&": "&amp;",
+    "<": "&lt;",
+    ">": "&gt;",
+    '"': "&quot;",
+    "'": "&#39;",
   }[m]));
 }
 
@@ -66,7 +70,7 @@ function fmtBool(b) {
 }
 
 /* =========================
-   API
+   API (com erro detalhado)
 ========================= */
 async function apiGet(path, params = {}) {
   const url = new URL(path, window.location.origin);
@@ -87,16 +91,49 @@ async function apiGet(path, params = {}) {
   });
 
   const res = await fetch(url.toString(), { cache: "no-store" });
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data?.error || data?.message || "Erro na API");
+
+  // tenta entender o corpo sempre (pra erro útil)
+  const text = await res.text();
+  let data = {};
+  try {
+    data = text ? JSON.parse(text) : {};
+  } catch {
+    data = { message: text || "" };
+  }
+
+  if (!res.ok) {
+    const msg =
+      data?.error ||
+      data?.message ||
+      (typeof data === "string" ? data : "") ||
+      `Erro na API (${res.status})`;
+    throw new Error(msg);
+  }
+
   return data;
 }
 
 async function apiPostForm(path, formData) {
   const url = new URL(path, window.location.origin);
   const res = await fetch(url.toString(), { method: "POST", body: formData });
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data?.error || data?.message || "Erro na API");
+
+  const text = await res.text();
+  let data = {};
+  try {
+    data = text ? JSON.parse(text) : {};
+  } catch {
+    data = { message: text || "" };
+  }
+
+  if (!res.ok) {
+    const msg =
+      data?.error ||
+      data?.message ||
+      (typeof data === "string" ? data : "") ||
+      `Erro na API (${res.status})`;
+    throw new Error(msg);
+  }
+
   return data;
 }
 
@@ -127,9 +164,9 @@ function makeTomSelect(selector) {
           <span class="ts-opt-text">${escape(data.text)}</span>
         </div>
       `,
-      item: (data, escape) => `<div>${escape(data.text)}</div>`
+      item: (data, escape) => `<div>${escape(data.text)}</div>`,
     },
-    onChange: () => loadLeadsAndKpisDebounced()
+    onChange: () => loadLeadsAndKpisDebounced(),
   });
 }
 
@@ -187,7 +224,7 @@ async function loadOptions() {
     fillSelect(tsTipoNegocio, data?.tipos_negocio || []);
   } catch (e) {
     console.error("Erro ao carregar opções:", e);
-    setStatus("Falha ao carregar filtros (options).", "err");
+    setStatus(`Falha ao carregar filtros (options): ${e.message || "erro"}`, "err");
   }
 }
 
@@ -199,7 +236,7 @@ function getMulti(ts) {
   const v = ts.getValue();
   if (Array.isArray(v)) return v;
   if (!v) return [];
-  return String(v).split(",").map(s => s.trim()).filter(Boolean);
+  return String(v).split(",").map((s) => s.trim()).filter(Boolean);
 }
 
 function parseBuscaRapida(txt) {
@@ -212,6 +249,15 @@ function parseBuscaRapida(txt) {
   if (onlyDigits.length >= 10) return { celular: onlyDigits };
 
   return { nome: t };
+}
+
+// normaliza datas (input date) para YYYY-MM-DD (o backend espera DATE)
+function safeDate(v) {
+  const s = String(v || "").trim();
+  if (!s) return "";
+  // já vem yyyy-mm-dd
+  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
+  return s; // fallback
 }
 
 function buildLeadsParams() {
@@ -231,10 +277,10 @@ function buildLeadsParams() {
   const tipo_disparo = getMulti(tsTipoDisparo);
   const tipo_negocio = getMulti(tsTipoNegocio);
 
-  const data_ini = $("#fIni")?.value || "";
-  const data_fim = $("#fFim")?.value || "";
-  const matriculado = $("#fMatriculado")?.value || ""; // "" | "true" | "false"
-  const limit = $("#fLimit")?.value || 500;
+  const data_ini = safeDate($("#fIni")?.value || "");
+  const data_fim = safeDate($("#fFim")?.value || "");
+  const matriculado = ($("#fMatriculado")?.value || "").trim(); // "" | "true" | "false"
+  const limit = Number($("#fLimit")?.value || 500) || 500;
 
   const busca = parseBuscaRapida($("#fBusca")?.value);
 
@@ -255,7 +301,7 @@ function buildLeadsParams() {
     data_ini,
     data_fim,
     limit,
-    ...busca
+    ...busca,
   };
 }
 
@@ -314,7 +360,9 @@ function renderTable(rows, { loading = false } = {}) {
     return;
   }
 
-  tbody.innerHTML = rows.map((r) => `
+  tbody.innerHTML = rows
+    .map(
+      (r) => `
     <tr>
       <td>${escapeHtml(fmtDate(r.data_inscricao))}</td>
       <td>${escapeHtml(r.nome || "-")}</td>
@@ -330,7 +378,9 @@ function renderTable(rows, { loading = false } = {}) {
       <td>${escapeHtml(r.campanha || "-")}</td>
       <td>${escapeHtml(r.canal || "-")}</td>
     </tr>
-  `).join("");
+  `
+    )
+    .join("");
 }
 
 function renderKpis(k) {
@@ -382,11 +432,13 @@ function exportXlsxServerSide() {
 
   Object.entries(params).forEach(([k, v]) => {
     if (v === null || v === undefined) return;
+
     if (Array.isArray(v)) {
       if (v.length === 0) return;
       url.searchParams.set(k, v.join(" || "));
       return;
     }
+
     const s = String(v).trim();
     if (!s) return;
     url.searchParams.set(k, s);
