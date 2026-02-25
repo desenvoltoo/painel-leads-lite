@@ -1,14 +1,17 @@
 // static/js/app.js
-// V14 — compatível com:
-//   GET  /api/options  -> { ok:true, data:{ status:[], cursos:[], modalidades:[], polos:[], consultores:[] } }
+// STAR — compatível com:
+//   GET  /api/options  -> { ok:true, data:{ status:[], cursos:[], modalidades:[], turnos:[], polos:[], origens:[], canais:[], campanhas:[], consultores_disparo:[], consultores_comercial:[], tipos_disparo:[], tipos_negocio:[] } }
 //   GET  /api/leads    -> { ok:true, total:N, data:[...] }
 //   GET  /api/kpis     -> { ok:true, total:N, top_status:{status,cnt} }
-//   GET  /api/export/xlsx -> arquivo XLSX (download)
-//   POST /api/upload   -> { ok:true, message:"..." }
+//   GET  /api/export/xlsx -> XLSX (download)
+//   POST /api/upload   -> { ok:true, message:"..." , saved_xlsx:"..." }
 //
-// HTML base (ids):
+// HTML (ids):
 // upload: #uploadFile #btnUpload #uploadStatus
-// filtros: #fStatus #fCurso #fModalidade #fPolo #fConsultor #fIni #fFim #fLimit #fBusca
+// filtros: #fStatus #fCurso #fModalidade #fTurno #fPolo #fOrigem
+//          #fConsultorDisparo #fConsultorComercial #fCanal #fCampanha
+//          #fTipoDisparo #fTipoNegocio
+//          #fIni #fFim #fMatriculado #fLimit #fBusca
 // ações: #btnApply #btnClear #btnReload #btnExport
 // kpis: #kpiCount #kpiTopStatus
 // tabela: #tbl tbody
@@ -16,9 +19,11 @@
 
 const $ = (sel) => document.querySelector(sel);
 
-let tsStatus, tsCurso, tsModalidade, tsPolo, tsConsultor;
+let tsStatus, tsCurso, tsModalidade, tsTurno, tsPolo, tsOrigem;
+let tsConsultorDisparo, tsConsultorComercial, tsCanal, tsCampanha;
+let tsTipoDisparo, tsTipoNegocio;
 
-const TABLE_COLS = 11; // ✅ agora tem Modalidade
+const TABLE_COLS = 13;
 
 /* =========================
    Helpers UI
@@ -47,12 +52,17 @@ function escapeHtml(str) {
 function fmtDate(d) {
   if (!d || d === "None") return "-";
   const s = String(d);
-  // pode vir "YYYY-MM-DD" ou "YYYY-MM-DDTHH:MM:SS"
   const datePart = s.slice(0, 10);
   if (/^\d{4}-\d{2}-\d{2}$/.test(datePart)) {
     return datePart.split("-").reverse().join("/");
   }
   return s;
+}
+
+function fmtBool(b) {
+  if (b === true || String(b).toLowerCase() === "true") return "Sim";
+  if (b === false || String(b).toLowerCase() === "false") return "Não";
+  return "-";
 }
 
 /* =========================
@@ -78,10 +88,7 @@ async function apiGet(path, params = {}) {
 
   const res = await fetch(url.toString(), { cache: "no-store" });
   const data = await res.json().catch(() => ({}));
-
-  if (!res.ok) {
-    throw new Error(data?.error || data?.message || "Erro na API");
-  }
+  if (!res.ok) throw new Error(data?.error || data?.message || "Erro na API");
   return data;
 }
 
@@ -129,9 +136,19 @@ function makeTomSelect(selector) {
 function initMultiSelects() {
   tsStatus = makeTomSelect("#fStatus");
   tsCurso = makeTomSelect("#fCurso");
-  tsModalidade = makeTomSelect("#fModalidade"); // ✅ novo
+  tsModalidade = makeTomSelect("#fModalidade");
+  tsTurno = makeTomSelect("#fTurno");
   tsPolo = makeTomSelect("#fPolo");
-  tsConsultor = makeTomSelect("#fConsultor");
+  tsOrigem = makeTomSelect("#fOrigem");
+
+  tsConsultorDisparo = makeTomSelect("#fConsultorDisparo");
+  tsConsultorComercial = makeTomSelect("#fConsultorComercial");
+
+  tsCanal = makeTomSelect("#fCanal");
+  tsCampanha = makeTomSelect("#fCampanha");
+
+  tsTipoDisparo = makeTomSelect("#fTipoDisparo");
+  tsTipoNegocio = makeTomSelect("#fTipoNegocio");
 }
 
 /* =========================
@@ -151,14 +168,23 @@ function fillSelect(ts, values) {
 async function loadOptions() {
   try {
     const resp = await apiGet("/api/options");
-    const data = resp?.data || resp; // fallback se algum dia você retornar direto
+    const data = resp?.data || resp;
 
     fillSelect(tsStatus, data?.status || []);
     fillSelect(tsCurso, data?.cursos || []);
-    fillSelect(tsModalidade, data?.modalidades || []); // ✅ novo
+    fillSelect(tsModalidade, data?.modalidades || []);
+    fillSelect(tsTurno, data?.turnos || []);
     fillSelect(tsPolo, data?.polos || []);
-    fillSelect(tsConsultor, data?.consultores || []);
+    fillSelect(tsOrigem, data?.origens || []);
 
+    fillSelect(tsConsultorDisparo, data?.consultores_disparo || []);
+    fillSelect(tsConsultorComercial, data?.consultores_comercial || []);
+
+    fillSelect(tsCanal, data?.canais || []);
+    fillSelect(tsCampanha, data?.campanhas || []);
+
+    fillSelect(tsTipoDisparo, data?.tipos_disparo || []);
+    fillSelect(tsTipoNegocio, data?.tipos_negocio || []);
   } catch (e) {
     console.error("Erro ao carregar opções:", e);
     setStatus("Falha ao carregar filtros (options).", "err");
@@ -171,17 +197,12 @@ async function loadOptions() {
 function getMulti(ts) {
   if (!ts) return [];
   const v = ts.getValue();
-  // TomSelect pode devolver string ou array dependendo config; normaliza
   if (Array.isArray(v)) return v;
   if (!v) return [];
   return String(v).split(",").map(s => s.trim()).filter(Boolean);
 }
 
 function parseBuscaRapida(txt) {
-  // Heurística leve:
-  // - se tiver "@": email
-  // - se só números e len >= 10: celular/cpf (preferir cpf se 11)
-  // - caso contrário: nome
   const t = (txt || "").trim();
   if (!t) return {};
   if (t.includes("@")) return { email: t };
@@ -195,23 +216,42 @@ function parseBuscaRapida(txt) {
 
 function buildLeadsParams() {
   const status = getMulti(tsStatus);
-  const cursos = getMulti(tsCurso);
-  const modalidades = getMulti(tsModalidade); // ✅ novo
-  const polos = getMulti(tsPolo);
-  const consultores = getMulti(tsConsultor);
+  const curso = getMulti(tsCurso);
+  const modalidade = getMulti(tsModalidade);
+  const turno = getMulti(tsTurno);
+  const polo = getMulti(tsPolo);
+  const origem = getMulti(tsOrigem);
+
+  const consultor_disparo = getMulti(tsConsultorDisparo);
+  const consultor_comercial = getMulti(tsConsultorComercial);
+
+  const canal = getMulti(tsCanal);
+  const campanha = getMulti(tsCampanha);
+
+  const tipo_disparo = getMulti(tsTipoDisparo);
+  const tipo_negocio = getMulti(tsTipoNegocio);
 
   const data_ini = $("#fIni")?.value || "";
   const data_fim = $("#fFim")?.value || "";
+  const matriculado = $("#fMatriculado")?.value || ""; // "" | "true" | "false"
   const limit = $("#fLimit")?.value || 500;
 
   const busca = parseBuscaRapida($("#fBusca")?.value);
 
   return {
     status,
-    curso: cursos,
-    modalidade: modalidades, // ✅ novo
-    polo: polos,
-    consultor: consultores,
+    curso,
+    modalidade,
+    turno,
+    polo,
+    origem,
+    consultor_disparo,
+    consultor_comercial,
+    canal,
+    campanha,
+    tipo_disparo,
+    tipo_negocio,
+    matriculado,
     data_ini,
     data_fim,
     limit,
@@ -276,23 +316,24 @@ function renderTable(rows, { loading = false } = {}) {
 
   tbody.innerHTML = rows.map((r) => `
     <tr>
-      <td>${escapeHtml(fmtDate(r.data_inscricao_dt))}</td>
-      <td>${escapeHtml(r.nome)}</td>
-      <td>${escapeHtml(r.cpf)}</td>
-      <td>${escapeHtml(r.celular)}</td>
+      <td>${escapeHtml(fmtDate(r.data_inscricao))}</td>
+      <td>${escapeHtml(r.nome || "-")}</td>
+      <td>${escapeHtml(r.cpf || "-")}</td>
+      <td>${escapeHtml(r.celular || "-")}</td>
       <td>${escapeHtml(r.origem || "-")}</td>
       <td>${escapeHtml(r.polo || "-")}</td>
       <td>${escapeHtml(r.curso || "-")}</td>
       <td>${escapeHtml(r.modalidade || "-")}</td>
-      <td><span class="badge">${escapeHtml(r.status || "Lead")}</span></td>
-      <td>${escapeHtml(r.consultor || "-")}</td>
+      <td><span class="badge">${escapeHtml(r.status_inscricao || r.status || "LEAD")}</span></td>
+      <td>${escapeHtml(fmtBool(r.flag_matriculado))}</td>
+      <td>${escapeHtml(r.consultor_disparo || "-")}</td>
       <td>${escapeHtml(r.campanha || "-")}</td>
+      <td>${escapeHtml(r.canal || "-")}</td>
     </tr>
   `).join("");
 }
 
 function renderKpis(k) {
-  // kpis endpoint retorna: { ok:true, total, top_status:{status,cnt} }
   const total = k?.total ?? 0;
   const top = k?.top_status;
   if ($("#kpiCount")) $("#kpiCount").textContent = total;
@@ -312,21 +353,18 @@ async function doUpload() {
   }
 
   const file = fileInput.files[0];
-
   setUploadStatus("Enviando e processando... (staging + procedure)", "ok");
 
   try {
     const fd = new FormData();
     fd.append("file", file);
 
-    // A API atual ignora source, mas deixo pronto para evoluir
     const src = ($("#uploadSource")?.value || "").trim();
     if (src) fd.append("source", src);
 
     const resp = await apiPostForm("/api/upload", fd);
     setUploadStatus(resp?.message || "Processado com sucesso!", "ok");
 
-    // Recarrega opções (dims podem ter aumentado) e recarrega tabela
     await loadOptions();
     await loadLeadsAndKpis();
   } catch (e) {
@@ -354,7 +392,6 @@ function exportXlsxServerSide() {
     url.searchParams.set(k, s);
   });
 
-  // dispara download
   window.location.href = url.toString();
 }
 
@@ -364,12 +401,23 @@ function exportXlsxServerSide() {
 function clearFilters() {
   tsStatus?.clear(true);
   tsCurso?.clear(true);
-  tsModalidade?.clear(true); // ✅ novo
+  tsModalidade?.clear(true);
+  tsTurno?.clear(true);
   tsPolo?.clear(true);
-  tsConsultor?.clear(true);
+  tsOrigem?.clear(true);
+
+  tsConsultorDisparo?.clear(true);
+  tsConsultorComercial?.clear(true);
+
+  tsCanal?.clear(true);
+  tsCampanha?.clear(true);
+
+  tsTipoDisparo?.clear(true);
+  tsTipoNegocio?.clear(true);
 
   if ($("#fIni")) $("#fIni").value = "";
   if ($("#fFim")) $("#fFim").value = "";
+  if ($("#fMatriculado")) $("#fMatriculado").value = "";
   if ($("#fLimit")) $("#fLimit").value = "500";
   if ($("#fBusca")) $("#fBusca").value = "";
 
@@ -390,11 +438,11 @@ document.addEventListener("DOMContentLoaded", async () => {
   $("#btnClear")?.addEventListener("click", clearFilters);
 
   $("#btnUpload")?.addEventListener("click", doUpload);
-
-  // ✅ Agora export é XLSX server-side
   $("#btnExport")?.addEventListener("click", exportXlsxServerSide);
 
-  // carregamento inicial
+  // busca rápida com debounce (não precisa clicar aplicar)
+  $("#fBusca")?.addEventListener("input", loadLeadsAndKpisDebounced);
+
   await loadOptions();
   await loadLeadsAndKpis();
 });
