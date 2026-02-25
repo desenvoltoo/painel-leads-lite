@@ -218,7 +218,7 @@ def _apply_filters(sql: str, filters: Dict[str, Any], params: List[Any]) -> str:
             else None
         )
         if b is not None:
-            sql += " AND IFNULL(COALESCE(v.flag_matriculado, v.matriculado_flag), FALSE) = @matriculado"
+            sql += " AND IFNULL(COALESCE(v.flag_matriculado), FALSE) = @matriculado"
             params.append(bigquery.ScalarQueryParameter("matriculado", "BOOL", b))
 
     # data_inscricao é DATE na view
@@ -250,7 +250,7 @@ def query_leads(
     order_dir = "ASC" if str(order_dir).upper() == "ASC" else "DESC"
 
     # compat antiga
-    if order_by == "data_inscricao_dt":
+    if order_by == "data_inscricao":
         order_by = "data_inscricao"
 
     allowed_order = {
@@ -275,7 +275,7 @@ def query_leads(
       v.polo,
       v.origem,
       v.status_inscricao, v.status,
-      COALESCE(v.flag_matriculado, v.matriculado_flag) AS flag_matriculado,
+      v.flag_matriculado,
       v.consultor_comercial, v.consultor_disparo,
       v.canal, v.campanha
     """ + _base_select_sql()
