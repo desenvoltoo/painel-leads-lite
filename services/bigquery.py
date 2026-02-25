@@ -12,19 +12,21 @@ from openpyxl import Workbook
 from openpyxl.utils import get_column_letter
 
 
-# ENV
+# ============================================================
+# CONFIG (ENV + travas)
+# ============================================================
 GCP_PROJECT_ID = os.getenv("GCP_PROJECT_ID", "painel-universidade")
 BQ_DATASET = os.getenv("BQ_DATASET", "modelo_estrela")
 BQ_LOCATION = os.getenv("BQ_LOCATION", "us-central1")  # ✅ confirmado por você
 
-# Mantém seu staging atual
+# Mantém seu staging atual (tabela no MESMO dataset)
 BQ_STAGING_TABLE = os.getenv("BQ_STAGING_TABLE", "stg_leads_site")
 
-# ✅ Nova SP do novo star
+# Procedure do seu star (no MESMO dataset)
 BQ_PROCEDURE = os.getenv("BQ_PROCEDURE", "sp_import_star_from_site")
 
-# ✅ Nova view (a LITE que refizemos)
-BQ_VIEW_LEADS = os.getenv("BQ_VIEW_LEADS", "vw_leads_painel_lite")
+# ✅ TRAVADO: painel lê SOMENTE essa view (não depende de ENV)
+BQ_VIEW_LEADS = "vw_leads_painel_lite"
 
 DEFAULT_LIMIT = int(os.getenv("BQ_DEFAULT_LIMIT", "200"))
 MAX_LIMIT = int(os.getenv("BQ_MAX_LIMIT", "2000"))
@@ -41,6 +43,7 @@ def get_bq_client() -> bigquery.Client:
 
 
 def _tbl(name: str) -> str:
+    """Retorna `project.dataset.object`."""
     return f"`{GCP_PROJECT_ID}.{BQ_DATASET}.{name}`"
 
 
@@ -59,9 +62,9 @@ def _as_list(v: Any) -> List[str]:
     return [s]
 
 
-# ---------------------------
-# STAGING + PROCEDURE
-# ---------------------------
+# ============================================================
+# STAGING + PROCEDURE (upload)
+# ============================================================
 def load_to_staging(df) -> None:
     """
     Carrega o dataframe na staging (WRITE_TRUNCATE).
@@ -90,28 +93,31 @@ def process_upload_dataframe(df) -> None:
     run_procedure()
 
 
-# ---------------------------
-# QUERY HELPERS
-# ---------------------------
+# ============================================================
+# QUERY HELPERS (sempre a VIEW)
+# ============================================================
 def _base_select_sql() -> str:
+    # ✅ tudo parte da VIEW
     return f"FROM {_tbl(BQ_VIEW_LEADS)} v WHERE 1=1"
 
 
 def _apply_filters(sql: str, filters: Dict[str, Any], params: List[Any]) -> str:
     """
-    Filtros alinhados à vw_leads_painel_lite (novo star).
+    Filtros alinhados à vw_leads_painel_lite.
 
-    Colunas principais disponíveis na view:
-    - pessoa: nome, cpf, celular, email
-    - curso: curso, modalidade, turno
-    - polo: polo
-    - origem: origem
-    - consultor: consultor_comercial, consultor_disparo
-    - status: status, status_inscricao, observacao, matriculado_flag/flag_matriculado
-    - campanha: campanha, canal, acao_comercial
-    - disparo: tipo_disparo, peca_disparo, texto_disparo, qtd_acionamentos
-    - tipo_negocio: tipo_negocio
-    - datas: data_inscricao (DATE), data_matricula (DATE), data_contato, data_ultima_acao, data_disparo, data_atualizacao
+    Campos esperados na VIEW:
+      - pessoa: nome, cpf, celular, email
+      - curso: curso, modalidade, turno
+      - polo: polo
+      - origem: origem
+      - consultor: consultor_comercial, consultor_disparo
+      - status: status, status_inscricao, observacao, flag_matriculado/matriculado_flag
+      - campanha: campanha, canal, acao_comercial
+      - disparo: tipo_disparo, peca_disparo, texto_disparo, qtd_acionamentos
+      - tipo_negocio: tipo_negocio
+      - datas: data_inscricao (DATE), data_matricula (DATE),
+               data_contato (TIMESTAMP), data_ultima_acao (TIMESTAMP),
+               data_disparo (TIMESTAMP), data_atualizacao (TIMESTAMP)
     """
     cursos = _as_list(filters.get("curso"))
     polos = _as_list(filters.get("polo"))
@@ -122,7 +128,7 @@ def _apply_filters(sql: str, filters: Dict[str, Any], params: List[Any]) -> str:
     origens = _as_list(filters.get("origem"))
     tipos_negocio = _as_list(filters.get("tipo_negocio"))
 
-    # status: painel antigo pode mandar "status" e esperar status_inscricao
+    # status: compat antiga pode mandar "status" e esperar status_inscricao
     status_list = _as_list(filters.get("status")) or _as_list(filters.get("status_inscricao"))
 
     consultores_disp = _as_list(filters.get("consultor_disparo")) or _as_list(filters.get("consultor"))
@@ -163,7 +169,6 @@ def _apply_filters(sql: str, filters: Dict[str, Any], params: List[Any]) -> str:
         params.append(bigquery.ArrayQueryParameter("tipos_negocio", "STRING", tipos_negocio))
 
     if status_list:
-        # tenta bater em status_inscricao primeiro, mas também permite status
         sql += " AND (v.status_inscricao IN UNNEST(@status_list) OR v.status IN UNNEST(@status_list))"
         params.append(bigquery.ArrayQueryParameter("status_list", "STRING", status_list))
 
@@ -194,17 +199,29 @@ def _apply_filters(sql: str, filters: Dict[str, Any], params: List[Any]) -> str:
 
     if filters.get("nome"):
         sql += " AND LOWER(v.nome) LIKE LOWER(@nome_like)"
-        params.append(bigquery.ScalarQueryParameter("nome_like", "STRING", f"%{str(filters['nome']).strip()}%"))
+        params.append(
+            bigquery.ScalarQueryParameter(
+                "nome_like",
+                "STRING",
+                f"%{str(filters['nome']).strip()}%",
+            )
+        )
 
-    # matriculado (no lite eu expus matriculado_flag + flag_matriculado)
+    # matriculado (blindado: aceita flag_matriculado OU matriculado_flag)
     if filters.get("matriculado") is not None and str(filters.get("matriculado")).strip() != "":
         val = str(filters.get("matriculado")).lower().strip()
-        b = True if val in ("true", "1", "sim", "yes") else False if val in ("false", "0", "nao", "não", "no") else None
+        b = (
+            True
+            if val in ("true", "1", "sim", "yes")
+            else False
+            if val in ("false", "0", "nao", "não", "no")
+            else None
+        )
         if b is not None:
-            sql += " AND IFNULL(v.flag_matriculado, FALSE) = @matriculado"
+            sql += " AND IFNULL(COALESCE(v.flag_matriculado, v.matriculado_flag), FALSE) = @matriculado"
             params.append(bigquery.ScalarQueryParameter("matriculado", "BOOL", b))
 
-    # data_inscricao já é DATE na view
+    # data_inscricao é DATE na view
     if filters.get("data_ini"):
         sql += " AND v.data_inscricao >= @data_ini"
         params.append(bigquery.ScalarQueryParameter("data_ini", "DATE", filters["data_ini"]))
@@ -215,9 +232,9 @@ def _apply_filters(sql: str, filters: Dict[str, Any], params: List[Any]) -> str:
     return sql
 
 
-# ---------------------------
-# LISTAGEM (Tabela do painel)
-# ---------------------------
+# ============================================================
+# LISTAGEM (Tabela do painel) - sempre VIEW
+# ============================================================
 def query_leads(
     filters: Optional[Dict[str, Any]] = None,
     limit: int = DEFAULT_LIMIT,
@@ -257,7 +274,8 @@ def query_leads(
       v.curso, v.modalidade, v.turno,
       v.polo,
       v.origem,
-      v.status_inscricao, v.status, v.flag_matriculado,
+      v.status_inscricao, v.status,
+      COALESCE(v.flag_matriculado, v.matriculado_flag) AS flag_matriculado,
       v.consultor_comercial, v.consultor_disparo,
       v.canal, v.campanha
     """ + _base_select_sql()
@@ -285,9 +303,9 @@ def query_leads_count(filters: Optional[Dict[str, Any]] = None) -> int:
     return int(rows[0]["total"]) if rows else 0
 
 
-# ---------------------------
-# OPTIONS (dropdowns/autocomplete)
-# ---------------------------
+# ============================================================
+# OPTIONS (dropdowns/autocomplete) - sempre VIEW
+# ============================================================
 def _distinct_values_from_view(col: str, alias: str) -> List[str]:
     client = get_bq_client()
     sql = f"""
@@ -316,9 +334,9 @@ def query_options() -> Dict[str, List[str]]:
     }
 
 
-# ---------------------------
-# EXPORT (XLSX)
-# ---------------------------
+# ============================================================
+# EXPORT (XLSX) - sempre VIEW
+# ============================================================
 EXPORT_COLUMNS: List[Tuple[str, str]] = [
     ("data_inscricao", "Data Inscrição"),
     ("nome", "Candidato"),
@@ -382,7 +400,14 @@ def export_leads_rows(
     }
     order_expr = allowed_order.get(order_by, "v.data_inscricao")
 
-    select_cols = ",\n      ".join([f"v.{c}" for c, _ in EXPORT_COLUMNS])
+    # monta SELECT explicitamente e blinda flag_matriculado via COALESCE
+    select_parts: List[str] = []
+    for c, _ in EXPORT_COLUMNS:
+        if c == "flag_matriculado":
+            select_parts.append("COALESCE(v.flag_matriculado, v.matriculado_flag) AS flag_matriculado")
+        else:
+            select_parts.append(f"v.{c}")
+    select_cols = ",\n      ".join(select_parts)
 
     sql = f"""
     SELECT
@@ -402,7 +427,7 @@ def export_leads_rows(
 
 def rows_to_xlsx(rows: List[Dict[str, Any]], xlsx_path: str, sheet_name: str = "Leads") -> str:
     """
-    Gera XLSX no disco (mantém 100% XLSX).
+    Gera XLSX no disco.
     """
     wb = Workbook()
     ws = wb.active
