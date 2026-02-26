@@ -61,12 +61,12 @@ def _as_list(v: Any) -> List[str]:
 
 
 # ============================================================
-# STAGING SCHEMA (como você passou)
+# STAGING SCHEMA (BLINDADO)
 # ============================================================
-# Obs: se isso estiver errado (email/texto/status como FLOAT etc.), me fala que eu ajusto.
+# ✅ Tudo STRING para não quebrar em CSV/XLSX e deixar a SP parsear
 STAGING_SCHEMA: List[bigquery.SchemaField] = [
     bigquery.SchemaField("status_inscricao", "STRING", mode="NULLABLE"),
-    bigquery.SchemaField("data_inscricao", "DATETIME", mode="NULLABLE"),
+    bigquery.SchemaField("data_inscricao", "STRING", mode="NULLABLE"),
     bigquery.SchemaField("origem", "STRING", mode="NULLABLE"),
     bigquery.SchemaField("unidade", "STRING", mode="NULLABLE"),
     bigquery.SchemaField("tipo_negocio", "STRING", mode="NULLABLE"),
@@ -75,20 +75,20 @@ STAGING_SCHEMA: List[bigquery.SchemaField] = [
     bigquery.SchemaField("turno", "STRING", mode="NULLABLE"),
     bigquery.SchemaField("nome", "STRING", mode="NULLABLE"),
     bigquery.SchemaField("cpf", "STRING", mode="NULLABLE"),
-    bigquery.SchemaField("celular", "INTEGER", mode="NULLABLE"),
-    bigquery.SchemaField("email", "FLOAT", mode="NULLABLE"),
-    bigquery.SchemaField("data_ultima_acao", "FLOAT", mode="NULLABLE"),
-    bigquery.SchemaField("qtd_acionamentos", "FLOAT", mode="NULLABLE"),
-    bigquery.SchemaField("status", "FLOAT", mode="NULLABLE"),
-    bigquery.SchemaField("data_disparo", "FLOAT", mode="NULLABLE"),
-    bigquery.SchemaField("peca_disparo", "FLOAT", mode="NULLABLE"),
-    bigquery.SchemaField("texto_disparo", "FLOAT", mode="NULLABLE"),
-    bigquery.SchemaField("consultor_disparo", "FLOAT", mode="NULLABLE"),
-    bigquery.SchemaField("tipo_disparo", "FLOAT", mode="NULLABLE"),
-    bigquery.SchemaField("campanha", "FLOAT", mode="NULLABLE"),
-    bigquery.SchemaField("observacao", "FLOAT", mode="NULLABLE"),
-    bigquery.SchemaField("data_matricula", "FLOAT", mode="NULLABLE"),
-    bigquery.SchemaField("matriculado", "FLOAT", mode="NULLABLE"),
+    bigquery.SchemaField("celular", "STRING", mode="NULLABLE"),
+    bigquery.SchemaField("email", "STRING", mode="NULLABLE"),
+    bigquery.SchemaField("data_ultima_acao", "STRING", mode="NULLABLE"),
+    bigquery.SchemaField("qtd_acionamentos", "STRING", mode="NULLABLE"),
+    bigquery.SchemaField("status", "STRING", mode="NULLABLE"),
+    bigquery.SchemaField("data_disparo", "STRING", mode="NULLABLE"),
+    bigquery.SchemaField("peca_disparo", "STRING", mode="NULLABLE"),
+    bigquery.SchemaField("texto_disparo", "STRING", mode="NULLABLE"),
+    bigquery.SchemaField("consultor_disparo", "STRING", mode="NULLABLE"),
+    bigquery.SchemaField("tipo_disparo", "STRING", mode="NULLABLE"),
+    bigquery.SchemaField("campanha", "STRING", mode="NULLABLE"),
+    bigquery.SchemaField("observacao", "STRING", mode="NULLABLE"),
+    bigquery.SchemaField("data_matricula", "STRING", mode="NULLABLE"),
+    bigquery.SchemaField("matriculado", "STRING", mode="NULLABLE"),
     bigquery.SchemaField("canal", "STRING", mode="NULLABLE"),
     bigquery.SchemaField("acao_comercial", "STRING", mode="NULLABLE"),
     bigquery.SchemaField("consultor_comercial", "STRING", mode="NULLABLE"),
@@ -98,7 +98,8 @@ STAGING_SCHEMA: List[bigquery.SchemaField] = [
 def _coerce_df_to_staging_schema(df):
     """
     Ajusta o DataFrame para bater com o schema da staging.
-    Evita 400 no load_table_from_dataframe.
+    ✅ Blindado: NÃO converte datas/float/int — manda tudo como STRING.
+    Evita crash do pandas (guess_datetime_format) e 400 no load.
     """
     import pandas as pd
 
@@ -112,71 +113,22 @@ def _coerce_df_to_staging_schema(df):
         if c not in df.columns:
             df[c] = None
 
-    # remove extras
+    # remove extras e mantém ordem
     df = df[expected_cols]
 
     def to_str(x):
         if x is None:
             return None
-        s = str(x).strip()
-        return s if s and s.lower() != "nan" else None
-
-    def to_int(x):
-        if x is None:
+        # pandas NaN
+        if isinstance(x, float) and pd.isna(x):
             return None
         s = str(x).strip()
         if not s or s.lower() == "nan":
             return None
-        digits = "".join(ch for ch in s if ch.isdigit())
-        if not digits:
-            return None
-        try:
-            return int(digits)
-        except:
-            return None
+        return s
 
-    def to_float(x):
-        if x is None:
-            return None
-        s = str(x).strip()
-        if not s or s.lower() == "nan":
-            return None
-        s = s.replace(",", ".")
-        try:
-            return float(s)
-        except:
-            return None
-
-    def to_datetime(x):
-        if x is None:
-            return None
-        if isinstance(x, pd.Timestamp):
-            ts = x
-        else:
-            s = str(x).strip()
-            if not s or s.lower() == "nan":
-                return None
-            ts = pd.to_datetime(s, errors="coerce", dayfirst=True)
-        if pd.isna(ts):
-            return None
-        if getattr(ts, "tzinfo", None) is not None:
-            ts = ts.tz_convert(None)
-        return ts.to_pydatetime()
-
-    for field in STAGING_SCHEMA:
-        col = field.name
-        t = field.field_type.upper()
-
-        if t == "STRING":
-            df[col] = df[col].map(to_str)
-        elif t == "INTEGER":
-            df[col] = df[col].map(to_int).astype("Int64")
-        elif t == "FLOAT":
-            df[col] = df[col].map(to_float)
-        elif t == "DATETIME":
-            df[col] = df[col].map(to_datetime)
-        else:
-            df[col] = df[col].map(to_str)
+    for col in expected_cols:
+        df[col] = df[col].map(to_str)
 
     return df
 
