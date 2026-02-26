@@ -2,29 +2,29 @@
 from __future__ import annotations
 
 import os
+import logging
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from google.cloud import bigquery
+from google.api_core.exceptions import GoogleAPICallError, BadRequest, Forbidden, NotFound
 
-# XLSX
+# XLSX export
 from openpyxl import Workbook
 from openpyxl.utils import get_column_letter
 
+logger = logging.getLogger(__name__)
 
 # ============================================================
-# CONFIG (ENV + travas)
+# CONFIG
 # ============================================================
 GCP_PROJECT_ID = os.getenv("GCP_PROJECT_ID", "painel-universidade")
 BQ_DATASET = os.getenv("BQ_DATASET", "modelo_estrela")
 
-# Mantém seu staging atual (tabela no MESMO dataset)
 BQ_STAGING_TABLE = os.getenv("BQ_STAGING_TABLE", "stg_leads_site")
-
-# Procedure do seu star (no MESMO dataset)
 BQ_PROCEDURE = os.getenv("BQ_PROCEDURE", "sp_import_star_from_site")
 
-# ✅ TRAVADO: painel lê SOMENTE essa view
+# Painel lê SOMENTE a view
 BQ_VIEW_LEADS = "vw_leads_painel_lite"
 
 DEFAULT_LIMIT = int(os.getenv("BQ_DEFAULT_LIMIT", "200"))
@@ -61,30 +61,180 @@ def _as_list(v: Any) -> List[str]:
 
 
 # ============================================================
-# STAGING + PROCEDURE (upload)
+# STAGING SCHEMA (EXATO como você passou)
+# ============================================================
+STAGING_SCHEMA: List[bigquery.SchemaField] = [
+    bigquery.SchemaField("status_inscricao", "STRING", mode="NULLABLE"),
+    bigquery.SchemaField("data_inscricao", "DATETIME", mode="NULLABLE"),
+    bigquery.SchemaField("origem", "STRING", mode="NULLABLE"),
+    bigquery.SchemaField("unidade", "STRING", mode="NULLABLE"),
+    bigquery.SchemaField("tipo_negocio", "STRING", mode="NULLABLE"),
+    bigquery.SchemaField("curso", "STRING", mode="NULLABLE"),
+    bigquery.SchemaField("modalidade", "STRING", mode="NULLABLE"),
+    bigquery.SchemaField("turno", "STRING", mode="NULLABLE"),
+    bigquery.SchemaField("nome", "STRING", mode="NULLABLE"),
+    bigquery.SchemaField("cpf", "STRING", mode="NULLABLE"),
+    bigquery.SchemaField("celular", "INTEGER", mode="NULLABLE"),
+    bigquery.SchemaField("email", "FLOAT", mode="NULLABLE"),
+    bigquery.SchemaField("data_ultima_acao", "FLOAT", mode="NULLABLE"),
+    bigquery.SchemaField("qtd_acionamentos", "FLOAT", mode="NULLABLE"),
+    bigquery.SchemaField("status", "FLOAT", mode="NULLABLE"),
+    bigquery.SchemaField("data_disparo", "FLOAT", mode="NULLABLE"),
+    bigquery.SchemaField("peca_disparo", "FLOAT", mode="NULLABLE"),
+    bigquery.SchemaField("texto_disparo", "FLOAT", mode="NULLABLE"),
+    bigquery.SchemaField("consultor_disparo", "FLOAT", mode="NULLABLE"),
+    bigquery.SchemaField("tipo_disparo", "FLOAT", mode="NULLABLE"),
+    bigquery.SchemaField("campanha", "FLOAT", mode="NULLABLE"),
+    bigquery.SchemaField("observacao", "FLOAT", mode="NULLABLE"),
+    bigquery.SchemaField("data_matricula", "FLOAT", mode="NULLABLE"),
+    bigquery.SchemaField("matriculado", "FLOAT", mode="NULLABLE"),
+    bigquery.SchemaField("canal", "STRING", mode="NULLABLE"),
+    bigquery.SchemaField("acao_comercial", "STRING", mode="NULLABLE"),
+    bigquery.SchemaField("consultor_comercial", "STRING", mode="NULLABLE"),
+]
+
+
+def _coerce_df_to_staging_schema(df):
+    """
+    - Garante colunas esperadas
+    - Remove colunas extras
+    - Converte para bater com o schema do BigQuery (LoadFromDataFrame)
+    """
+    import pandas as pd
+
+    df = df.copy()
+    df.columns = [str(c).strip() for c in df.columns]
+    expected_cols = [f.name for f in STAGING_SCHEMA]
+
+    for c in expected_cols:
+        if c not in df.columns:
+            df[c] = None
+
+    df = df[expected_cols]
+
+    def to_str(x):
+        if x is None:
+            return None
+        s = str(x).strip()
+        return s if s and s.lower() != "nan" else None
+
+    def to_int(x):
+        if x is None:
+            return None
+        s = str(x).strip()
+        if not s or s.lower() == "nan":
+            return None
+        digits = "".join(ch for ch in s if ch.isdigit())
+        if not digits:
+            return None
+        try:
+            return int(digits)
+        except:
+            return None
+
+    def to_float(x):
+        if x is None:
+            return None
+        s = str(x).strip()
+        if not s or s.lower() == "nan":
+            return None
+        s = s.replace(",", ".")
+        try:
+            return float(s)
+        except:
+            return None
+
+    def to_datetime(x):
+        if x is None:
+            return None
+        if isinstance(x, pd.Timestamp):
+            ts = x
+        else:
+            s = str(x).strip()
+            if not s or s.lower() == "nan":
+                return None
+            ts = pd.to_datetime(s, errors="coerce", dayfirst=True)
+        if pd.isna(ts):
+            return None
+        if getattr(ts, "tzinfo", None) is not None:
+            ts = ts.tz_convert(None)
+        return ts.to_pydatetime()
+
+    for field in STAGING_SCHEMA:
+        col = field.name
+        t = field.field_type.upper()
+        if t == "STRING":
+            df[col] = df[col].map(to_str)
+        elif t == "INTEGER":
+            df[col] = df[col].map(to_int).astype("Int64")
+        elif t == "FLOAT":
+            df[col] = df[col].map(to_float)
+        elif t == "DATETIME":
+            df[col] = df[col].map(to_datetime)
+        else:
+            df[col] = df[col].map(to_str)
+
+    return df
+
+
+# ============================================================
+# UPLOAD: staging + procedure (async)
 # ============================================================
 def load_to_staging(df) -> None:
     client = get_bq_client()
     table_id = f"{GCP_PROJECT_ID}.{BQ_DATASET}.{BQ_STAGING_TABLE}"
-    job = client.load_table_from_dataframe(
-        df,
-        table_id,
-        job_config=bigquery.LoadJobConfig(
-            write_disposition=bigquery.WriteDisposition.WRITE_TRUNCATE
-        ),
-    )
-    job.result()
+    try:
+        df2 = _coerce_df_to_staging_schema(df)
+        job = client.load_table_from_dataframe(
+            df2,
+            table_id,
+            job_config=bigquery.LoadJobConfig(
+                schema=STAGING_SCHEMA,
+                write_disposition=bigquery.WriteDisposition.WRITE_TRUNCATE,
+            ),
+        )
+        job.result()
+    except (BadRequest, Forbidden, NotFound, GoogleAPICallError) as e:
+        logger.exception("BQ load_to_staging falhou: %s", str(e))
+        raise RuntimeError(f"Erro ao carregar staging ({table_id}): {e}") from e
 
 
-def run_procedure() -> None:
+def run_procedure_async() -> str:
     client = get_bq_client()
     sql = f"CALL `{GCP_PROJECT_ID}.{BQ_DATASET}.{BQ_PROCEDURE}`();"
-    client.query(sql).result()
+    try:
+        job = client.query(sql)  # NÃO espera .result()
+        return job.job_id
+    except (BadRequest, Forbidden, NotFound, GoogleAPICallError) as e:
+        logger.exception("BQ run_procedure_async falhou: %s", str(e))
+        raise RuntimeError(f"Erro ao disparar procedure ({BQ_PROCEDURE}): {e}") from e
 
 
-def process_upload_dataframe(df) -> None:
+def process_upload_dataframe(df) -> str:
     load_to_staging(df)
-    run_procedure()
+    return run_procedure_async()
+
+
+def get_bq_job_status(job_id: str) -> Dict[str, Any]:
+    client = get_bq_client()
+    job = client.get_job(job_id)
+
+    payload: Dict[str, Any] = {
+        "job_id": job.job_id,
+        "state": job.state,  # PENDING, RUNNING, DONE
+        "created": job.created.isoformat() if job.created else None,
+        "started": job.started.isoformat() if job.started else None,
+        "ended": job.ended.isoformat() if job.ended else None,
+    }
+
+    if job.error_result:
+        payload["ok"] = False
+        payload["error"] = job.error_result
+        payload["errors"] = job.errors
+    else:
+        payload["ok"] = True if job.state == "DONE" else None
+
+    return payload
 
 
 # ============================================================
@@ -173,23 +323,13 @@ def _apply_filters(sql: str, filters: Dict[str, Any], params: List[Any]) -> str:
     if filters.get("nome"):
         sql += " AND LOWER(v.nome) LIKE LOWER(@nome_like)"
         params.append(
-            bigquery.ScalarQueryParameter(
-                "nome_like",
-                "STRING",
-                f"%{str(filters['nome']).strip()}%",
-            )
+            bigquery.ScalarQueryParameter("nome_like", "STRING", f"%{str(filters['nome']).strip()}%")
         )
 
-    # ✅ matriculado: só flag_matriculado
+    # matriculado via flag_matriculado
     if filters.get("matriculado") is not None and str(filters.get("matriculado")).strip() != "":
         val = str(filters.get("matriculado")).lower().strip()
-        b = (
-            True
-            if val in ("true", "1", "sim", "yes")
-            else False
-            if val in ("false", "0", "nao", "não", "no")
-            else None
-        )
+        b = True if val in ("true", "1", "sim", "yes") else False if val in ("false", "0", "nao", "não", "no") else None
         if b is not None:
             sql += " AND IFNULL(v.flag_matriculado, FALSE) = @matriculado"
             params.append(bigquery.ScalarQueryParameter("matriculado", "BOOL", b))
@@ -308,6 +448,45 @@ def query_options() -> Dict[str, List[str]]:
 
 
 # ============================================================
+# KPIs (simples)
+# ============================================================
+def query_kpis(filters: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """
+    KPIs básicos: total, matriculados, por_status (top 10)
+    """
+    client = get_bq_client()
+    filters = filters or {}
+
+    base = " " + _base_select_sql()
+    params: List[Any] = []
+    where_sql = _apply_filters("", filters, params)  # devolve " AND ..." (vamos usar a parte)
+
+    # _apply_filters espera sql já com SELECT; então fazemos truque:
+    # chamamos com sql="" e ele concatena " AND ..." => pega esse trecho
+    where_clause = where_sql
+
+    sql_total = f"SELECT COUNT(1) AS total {base}{where_clause}"
+    sql_mat = f"SELECT COUNTIF(IFNULL(v.flag_matriculado,FALSE)) AS matriculados {base}{where_clause}"
+    sql_status = f"""
+      SELECT v.status_inscricao AS status, COUNT(1) AS qtd
+      {base}{where_clause}
+      GROUP BY 1
+      ORDER BY qtd DESC
+      LIMIT 10
+    """
+
+    total = list(client.query(sql_total, job_config=bigquery.QueryJobConfig(query_parameters=params)).result())[0]["total"]
+    matriculados = list(client.query(sql_mat, job_config=bigquery.QueryJobConfig(query_parameters=params)).result())[0]["matriculados"]
+    by_status = [dict(r) for r in client.query(sql_status, job_config=bigquery.QueryJobConfig(query_parameters=params)).result()]
+
+    return {
+        "total": int(total),
+        "matriculados": int(matriculados),
+        "by_status": by_status,
+    }
+
+
+# ============================================================
 # EXPORT (XLSX)
 # ============================================================
 EXPORT_COLUMNS: List[Tuple[str, str]] = [
@@ -356,9 +535,6 @@ def export_leads_rows(
     offset = max(0, int(offset))
     order_dir = "ASC" if str(order_dir).upper() == "ASC" else "DESC"
 
-    if order_by == "data_inscricao_dt":
-        order_by = "data_inscricao"
-
     allowed_order = {
         "data_inscricao": "v.data_inscricao",
         "status": "v.status_inscricao",
@@ -381,8 +557,8 @@ def export_leads_rows(
 
     params: List[Any] = []
     sql = _apply_filters(sql, filters, params)
-
     sql += f"\n ORDER BY {order_expr} {order_dir} \n LIMIT @limit OFFSET @offset"
+
     params.append(bigquery.ScalarQueryParameter("limit", "INT64", limit))
     params.append(bigquery.ScalarQueryParameter("offset", "INT64", offset))
 
@@ -391,16 +567,11 @@ def export_leads_rows(
 
 
 def rows_to_xlsx(rows: List[Dict[str, Any]], xlsx_path: str, sheet_name: str = "Leads") -> str:
-    """
-    Gera XLSX no disco (Excel não aceita datetime com timezone).
-    """
     from datetime import datetime, date
 
     def _excel_safe(v):
-        # Remove tzinfo de datetimes (Excel/OpenPyXL não suporta timezone)
         if isinstance(v, datetime):
             return v.replace(tzinfo=None) if v.tzinfo is not None else v
-        # date ok
         if isinstance(v, date):
             return v
         return v
@@ -419,20 +590,6 @@ def rows_to_xlsx(rows: List[Dict[str, Any]], xlsx_path: str, sheet_name: str = "
     for col_idx, header in enumerate(headers, start=1):
         col_letter = get_column_letter(col_idx)
         ws.column_dimensions[col_letter].width = max(12, min(42, len(str(header)) + 6))
-
-    Path(xlsx_path).parent.mkdir(parents=True, exist_ok=True)
-    wb.save(xlsx_path)
-    return xlsx_path
-
-
-def df_to_xlsx(df, xlsx_path: str, sheet_name: str = "Upload") -> str:
-    wb = Workbook()
-    ws = wb.active
-    ws.title = sheet_name[:31]
-
-    ws.append(list(df.columns))
-    for row in df.itertuples(index=False, name=None):
-        ws.append(list(row))
 
     Path(xlsx_path).parent.mkdir(parents=True, exist_ok=True)
     wb.save(xlsx_path)
