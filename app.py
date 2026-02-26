@@ -1,13 +1,16 @@
 # -*- coding: utf-8 -*-
 """
 Painel Leads Lite (Flask + BigQuery)
-Versão: 4.0 - Novo Modelo Estrela (vw_leads_painel_lite + sp_import_star_from_site)
+Versão: 4.1 - Upload Assíncrono (staging + dispara SP sem bloquear)
 """
 
 import os
 import traceback
+import io
+import uuid
 from datetime import datetime
 from pathlib import Path
+from typing import Dict, Any, Tuple
 
 import pandas as pd
 from flask import Flask, render_template, request, jsonify, send_file
@@ -16,10 +19,11 @@ from services.bigquery import (
     query_leads,
     query_leads_count,
     query_options,
-    process_upload_dataframe,
+    process_upload_dataframe,   # agora retorna job_id (async)
+    get_bq_job_status,          # novo
     export_leads_rows,
-    df_to_xlsx,         # ✅ salva cópia do upload
-    rows_to_xlsx,       # ✅ gera export XLSX no servidor
+    df_to_xlsx,                 # salva cópia do upload
+    rows_to_xlsx,               # gera export XLSX no servidor
 )
 
 # ============================================================
@@ -36,31 +40,30 @@ def _required_envs_ok():
             missing.append(k)
     return (len(missing) == 0, missing)
 
-def _get_filters_from_request():
+def _get_filters_from_request() -> Tuple[Dict[str, Any], Dict[str, Any]]:
     def n(v):
         v = (v or "").strip()
         return v if v else None
 
-    # filtros (mantém compat e adiciona novos do star)
     filters = {
-        "status": n(request.args.get("status")),  # pode ser status_inscricao também (bigquery.py trata)
+        "status": n(request.args.get("status")),  # pode ser status_inscricao também
         "curso": n(request.args.get("curso")),
         "polo": n(request.args.get("polo")),
-        "origem": n(request.args.get("origem")),                 # ✅ novo
-        "consultor": n(request.args.get("consultor")),           # compat -> consultor_disparo
+        "origem": n(request.args.get("origem")),
+        "consultor": n(request.args.get("consultor")),  # compat -> consultor_disparo
         "consultor_disparo": n(request.args.get("consultor_disparo")),
-        "consultor_comercial": n(request.args.get("consultor_comercial")),  # ✅ novo
+        "consultor_comercial": n(request.args.get("consultor_comercial")),
         "modalidade": n(request.args.get("modalidade")),
-        "turno": n(request.args.get("turno")),                   # ✅ novo
+        "turno": n(request.args.get("turno")),
         "canal": n(request.args.get("canal")),
         "campanha": n(request.args.get("campanha")),
-        "tipo_disparo": n(request.args.get("tipo_disparo")),     # ✅ novo
-        "tipo_negocio": n(request.args.get("tipo_negocio")),     # ✅ novo
+        "tipo_disparo": n(request.args.get("tipo_disparo")),
+        "tipo_negocio": n(request.args.get("tipo_negocio")),
         "cpf": n(request.args.get("cpf")),
         "celular": n(request.args.get("celular")),
         "email": n(request.args.get("email")),
         "nome": n(request.args.get("nome")),
-        "matriculado": n(request.args.get("matriculado")),       # ✅ novo
+        "matriculado": n(request.args.get("matriculado")),
         "data_ini": n(request.args.get("data_ini")),
         "data_fim": n(request.args.get("data_fim")),
     }
@@ -69,7 +72,7 @@ def _get_filters_from_request():
     meta = {
         "limit": int(request.args.get("limit") or 500),
         "offset": int(request.args.get("offset") or 0),
-        "order_by": n(request.args.get("order_by")) or "data_inscricao",  # ✅ novo padrão
+        "order_by": n(request.args.get("order_by")) or "data_inscricao",
         "order_dir": n(request.args.get("order_dir")) or "DESC",
     }
     return filters, meta
@@ -84,6 +87,33 @@ def _error_payload(e: Exception, public_msg: str):
 
 def _stamp() -> str:
     return datetime.now().strftime("%Y%m%d_%H%M%S")
+
+
+# ============================================================
+# Upload parsing: CSV/XLSX robusto (separador, encoding)
+# ============================================================
+def _read_upload_to_df(file_storage) -> pd.DataFrame:
+    filename = (file_storage.filename or "").lower().strip()
+    raw = file_storage.read()
+
+    # XLSX
+    if filename.endswith(".xlsx") or filename.endswith(".xls"):
+        return pd.read_excel(io.BytesIO(raw))
+
+    # CSV
+    # tenta ; e ,
+    try:
+        return pd.read_csv(io.BytesIO(raw), sep=";", encoding="utf-8")
+    except Exception:
+        try:
+            return pd.read_csv(io.BytesIO(raw), sep=",", encoding="utf-8")
+        except Exception:
+            # fallback latin-1
+            try:
+                return pd.read_csv(io.BytesIO(raw), sep=";", encoding="latin-1")
+            except Exception:
+                return pd.read_csv(io.BytesIO(raw), sep=",", encoding="latin-1")
+
 
 # ============================================================
 # APP FACTORY
@@ -142,13 +172,13 @@ def create_app() -> Flask:
     @app.get("/api/kpis")
     def api_kpis():
         """
-        Melhorado: usa status_inscricao quando existir (novo star).
+        Mantém seu KPI atual (rápido): conta em memória nos rows retornados.
         """
         try:
             filters, meta = _get_filters_from_request()
             rows = query_leads(
                 filters=filters,
-                limit=min(int(meta["limit"]), 5000),  # evita estourar
+                limit=min(int(meta["limit"]), 5000),
                 offset=meta["offset"],
                 order_by=meta["order_by"],
                 order_dir=meta["order_dir"],
@@ -210,6 +240,7 @@ def create_app() -> Flask:
 
     # ============================================================
     # ✅ UPLOAD (CSV/XLSX) + salva cópia XLSX em enviados/
+    # ✅ AGORA ASSÍNCRONO: retorna job_id e NÃO trava request
     # ============================================================
     @app.post("/api/upload")
     def api_upload():
@@ -222,32 +253,47 @@ def create_app() -> Flask:
 
         try:
             filename = (f.filename or "").lower()
-
-            if filename.endswith(".csv"):
-                df = pd.read_csv(f)
-            elif filename.endswith(".xlsx") or filename.endswith(".xls"):
-                df = pd.read_excel(f)
-            else:
+            if not (filename.endswith(".csv") or filename.endswith(".xlsx") or filename.endswith(".xls")):
                 return jsonify({"ok": False, "error": "Formato inválido. Envie CSV ou XLSX."}), 400
 
-            # ✅ salva cópia SEMPRE em XLSX
-            saved_name = f"upload_{_stamp()}.xlsx"
+            # lê df
+            df = _read_upload_to_df(f)
+
+            # ✅ salva cópia SEMPRE em XLSX (igual seu código)
+            saved_name = f"upload_{_stamp()}_{uuid.uuid4().hex[:6]}.xlsx"
             saved_path = str(UPLOAD_DIR / saved_name)
             df_to_xlsx(df, saved_path, sheet_name="Upload")
 
-            # ✅ staging + SP nova (amarrada no star)
-            process_upload_dataframe(df)
+            # ✅ staging + dispara SP async (retorna job_id)
+            job_id = process_upload_dataframe(df)
 
+            # 202 Accepted (processando)
             return jsonify(
                 {
                     "ok": True,
-                    "message": "Processado com sucesso! (staging + procedure do novo Modelo Estrela)",
+                    "message": "Upload recebido. Importação em processamento (assíncrono).",
                     "saved_xlsx": saved_name,
+                    "job_id": job_id,
                 }
-            ), 200
+            ), 202
 
         except Exception as e:
             return jsonify(_error_payload(e, "Falha na ingestão.")), 500
+
+    # ============================================================
+    # ✅ STATUS DO UPLOAD (job do BigQuery)
+    # ============================================================
+    @app.get("/api/upload/status")
+    def api_upload_status():
+        try:
+            job_id = (request.args.get("job_id") or "").strip()
+            if not job_id:
+                return jsonify({"ok": False, "error": "job_id é obrigatório"}), 400
+
+            data = get_bq_job_status(job_id)
+            return jsonify({"ok": True, "data": data}), 200
+        except Exception as e:
+            return jsonify(_error_payload(e, "Falha ao consultar status do upload.")), 500
 
     return app
 
