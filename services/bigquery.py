@@ -9,14 +9,14 @@ from typing import Any, Dict, List, Optional, Tuple
 from google.cloud import bigquery
 from google.api_core.exceptions import GoogleAPICallError, BadRequest, Forbidden, NotFound
 
-# XLSX export
+# XLSX
 from openpyxl import Workbook
 from openpyxl.utils import get_column_letter
 
 logger = logging.getLogger(__name__)
 
 # ============================================================
-# CONFIG
+# CONFIG (ENV + travas)
 # ============================================================
 GCP_PROJECT_ID = os.getenv("GCP_PROJECT_ID", "painel-universidade")
 BQ_DATASET = os.getenv("BQ_DATASET", "modelo_estrela")
@@ -24,7 +24,7 @@ BQ_DATASET = os.getenv("BQ_DATASET", "modelo_estrela")
 BQ_STAGING_TABLE = os.getenv("BQ_STAGING_TABLE", "stg_leads_site")
 BQ_PROCEDURE = os.getenv("BQ_PROCEDURE", "sp_import_star_from_site")
 
-# Painel lê SOMENTE a view
+# ✅ TRAVADO: painel lê SOMENTE essa view
 BQ_VIEW_LEADS = "vw_leads_painel_lite"
 
 DEFAULT_LIMIT = int(os.getenv("BQ_DEFAULT_LIMIT", "200"))
@@ -61,8 +61,9 @@ def _as_list(v: Any) -> List[str]:
 
 
 # ============================================================
-# STAGING SCHEMA (EXATO como você passou)
+# STAGING SCHEMA (como você passou)
 # ============================================================
+# Obs: se isso estiver errado (email/texto/status como FLOAT etc.), me fala que eu ajusto.
 STAGING_SCHEMA: List[bigquery.SchemaField] = [
     bigquery.SchemaField("status_inscricao", "STRING", mode="NULLABLE"),
     bigquery.SchemaField("data_inscricao", "DATETIME", mode="NULLABLE"),
@@ -96,20 +97,22 @@ STAGING_SCHEMA: List[bigquery.SchemaField] = [
 
 def _coerce_df_to_staging_schema(df):
     """
-    - Garante colunas esperadas
-    - Remove colunas extras
-    - Converte para bater com o schema do BigQuery (LoadFromDataFrame)
+    Ajusta o DataFrame para bater com o schema da staging.
+    Evita 400 no load_table_from_dataframe.
     """
     import pandas as pd
 
     df = df.copy()
     df.columns = [str(c).strip() for c in df.columns]
+
     expected_cols = [f.name for f in STAGING_SCHEMA]
 
+    # cria colunas faltantes
     for c in expected_cols:
         if c not in df.columns:
             df[c] = None
 
+    # remove extras
     df = df[expected_cols]
 
     def to_str(x):
@@ -163,6 +166,7 @@ def _coerce_df_to_staging_schema(df):
     for field in STAGING_SCHEMA:
         col = field.name
         t = field.field_type.upper()
+
         if t == "STRING":
             df[col] = df[col].map(to_str)
         elif t == "INTEGER":
@@ -178,11 +182,12 @@ def _coerce_df_to_staging_schema(df):
 
 
 # ============================================================
-# UPLOAD: staging + procedure (async)
+# STAGING + PROCEDURE (upload)  ✅ AGORA ASSÍNCRONO
 # ============================================================
 def load_to_staging(df) -> None:
     client = get_bq_client()
     table_id = f"{GCP_PROJECT_ID}.{BQ_DATASET}.{BQ_STAGING_TABLE}"
+
     try:
         df2 = _coerce_df_to_staging_schema(df)
         job = client.load_table_from_dataframe(
@@ -200,10 +205,14 @@ def load_to_staging(df) -> None:
 
 
 def run_procedure_async() -> str:
+    """
+    Dispara a procedure e retorna o job_id sem bloquear a request.
+    """
     client = get_bq_client()
     sql = f"CALL `{GCP_PROJECT_ID}.{BQ_DATASET}.{BQ_PROCEDURE}`();"
+
     try:
-        job = client.query(sql)  # NÃO espera .result()
+        job = client.query(sql)  # <-- NÃO usa .result()
         return job.job_id
     except (BadRequest, Forbidden, NotFound, GoogleAPICallError) as e:
         logger.exception("BQ run_procedure_async falhou: %s", str(e))
@@ -211,6 +220,11 @@ def run_procedure_async() -> str:
 
 
 def process_upload_dataframe(df) -> str:
+    """
+    1) carrega staging (truncate)
+    2) dispara SP async
+    3) retorna job_id
+    """
     load_to_staging(df)
     return run_procedure_async()
 
@@ -322,11 +336,9 @@ def _apply_filters(sql: str, filters: Dict[str, Any], params: List[Any]) -> str:
 
     if filters.get("nome"):
         sql += " AND LOWER(v.nome) LIKE LOWER(@nome_like)"
-        params.append(
-            bigquery.ScalarQueryParameter("nome_like", "STRING", f"%{str(filters['nome']).strip()}%")
-        )
+        params.append(bigquery.ScalarQueryParameter("nome_like", "STRING", f"%{str(filters['nome']).strip()}%"))
 
-    # matriculado via flag_matriculado
+    # ✅ matriculado: só flag_matriculado
     if filters.get("matriculado") is not None and str(filters.get("matriculado")).strip() != "":
         val = str(filters.get("matriculado")).lower().strip()
         b = True if val in ("true", "1", "sim", "yes") else False if val in ("false", "0", "nao", "não", "no") else None
@@ -448,45 +460,6 @@ def query_options() -> Dict[str, List[str]]:
 
 
 # ============================================================
-# KPIs (simples)
-# ============================================================
-def query_kpis(filters: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    """
-    KPIs básicos: total, matriculados, por_status (top 10)
-    """
-    client = get_bq_client()
-    filters = filters or {}
-
-    base = " " + _base_select_sql()
-    params: List[Any] = []
-    where_sql = _apply_filters("", filters, params)  # devolve " AND ..." (vamos usar a parte)
-
-    # _apply_filters espera sql já com SELECT; então fazemos truque:
-    # chamamos com sql="" e ele concatena " AND ..." => pega esse trecho
-    where_clause = where_sql
-
-    sql_total = f"SELECT COUNT(1) AS total {base}{where_clause}"
-    sql_mat = f"SELECT COUNTIF(IFNULL(v.flag_matriculado,FALSE)) AS matriculados {base}{where_clause}"
-    sql_status = f"""
-      SELECT v.status_inscricao AS status, COUNT(1) AS qtd
-      {base}{where_clause}
-      GROUP BY 1
-      ORDER BY qtd DESC
-      LIMIT 10
-    """
-
-    total = list(client.query(sql_total, job_config=bigquery.QueryJobConfig(query_parameters=params)).result())[0]["total"]
-    matriculados = list(client.query(sql_mat, job_config=bigquery.QueryJobConfig(query_parameters=params)).result())[0]["matriculados"]
-    by_status = [dict(r) for r in client.query(sql_status, job_config=bigquery.QueryJobConfig(query_parameters=params)).result()]
-
-    return {
-        "total": int(total),
-        "matriculados": int(matriculados),
-        "by_status": by_status,
-    }
-
-
-# ============================================================
 # EXPORT (XLSX)
 # ============================================================
 EXPORT_COLUMNS: List[Tuple[str, str]] = [
@@ -535,6 +508,9 @@ def export_leads_rows(
     offset = max(0, int(offset))
     order_dir = "ASC" if str(order_dir).upper() == "ASC" else "DESC"
 
+    if order_by == "data_inscricao_dt":
+        order_by = "data_inscricao"
+
     allowed_order = {
         "data_inscricao": "v.data_inscricao",
         "status": "v.status_inscricao",
@@ -557,8 +533,8 @@ def export_leads_rows(
 
     params: List[Any] = []
     sql = _apply_filters(sql, filters, params)
-    sql += f"\n ORDER BY {order_expr} {order_dir} \n LIMIT @limit OFFSET @offset"
 
+    sql += f"\n ORDER BY {order_expr} {order_dir} \n LIMIT @limit OFFSET @offset"
     params.append(bigquery.ScalarQueryParameter("limit", "INT64", limit))
     params.append(bigquery.ScalarQueryParameter("offset", "INT64", offset))
 
@@ -567,6 +543,9 @@ def export_leads_rows(
 
 
 def rows_to_xlsx(rows: List[Dict[str, Any]], xlsx_path: str, sheet_name: str = "Leads") -> str:
+    """
+    Gera XLSX no disco (Excel não aceita datetime com timezone).
+    """
     from datetime import datetime, date
 
     def _excel_safe(v):
@@ -590,6 +569,23 @@ def rows_to_xlsx(rows: List[Dict[str, Any]], xlsx_path: str, sheet_name: str = "
     for col_idx, header in enumerate(headers, start=1):
         col_letter = get_column_letter(col_idx)
         ws.column_dimensions[col_letter].width = max(12, min(42, len(str(header)) + 6))
+
+    Path(xlsx_path).parent.mkdir(parents=True, exist_ok=True)
+    wb.save(xlsx_path)
+    return xlsx_path
+
+
+def df_to_xlsx(df, xlsx_path: str, sheet_name: str = "Upload") -> str:
+    """
+    Salva uma cópia do upload em XLSX.
+    """
+    wb = Workbook()
+    ws = wb.active
+    ws.title = sheet_name[:31]
+
+    ws.append(list(df.columns))
+    for row in df.itertuples(index=False, name=None):
+        ws.append(list(row))
 
     Path(xlsx_path).parent.mkdir(parents=True, exist_ok=True)
     wb.save(xlsx_path)
