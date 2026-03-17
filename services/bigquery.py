@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 import logging
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -24,12 +25,15 @@ BQ_DATASET = os.getenv("BQ_DATASET", "modelo_estrela")
 BQ_STAGING_TABLE = os.getenv("BQ_STAGING_TABLE", "stg_leads_site")
 BQ_PROCEDURE = os.getenv("BQ_PROCEDURE", "sp_import_star_from_site")
 
-# ✅ TRAVADO: painel lê SOMENTE essa view
+# Painel lê somente essa view
 BQ_VIEW_LEADS = "vw_leads_painel_lite"
 
 DEFAULT_LIMIT = int(os.getenv("BQ_DEFAULT_LIMIT", "200"))
 MAX_LIMIT = int(os.getenv("BQ_MAX_LIMIT", "2000"))
 EXPORT_MAX_ROWS = int(os.getenv("BQ_EXPORT_MAX_ROWS", "50000"))
+
+# colunas que não devem sofrer comportamento numérico
+PHONEISH_COLUMNS = {"cpf", "celular"}
 
 _bq_client: Optional[bigquery.Client] = None
 
@@ -61,9 +65,132 @@ def _as_list(v: Any) -> List[str]:
 
 
 # ============================================================
+# NORMALIZADORES
+# ============================================================
+def _normalize_decimal_string_to_int_string(s: str) -> str:
+    """
+    Converte representações numéricas integrais para string inteira.
+
+    Exemplos:
+      "11974817404.0" -> "11974817404"
+      "5.511944391404e13" -> "55119443914040"
+      "  12345  " -> "12345"
+
+    Se não for número integral, devolve o valor original.
+    """
+    s = str(s).strip()
+    if not s:
+        return s
+
+    try:
+        d = Decimal(s)
+        if d == d.to_integral_value():
+            return str(d.quantize(Decimal("1")))
+        return s
+    except (InvalidOperation, ValueError):
+        return s
+
+
+def _normalize_phoneish_value(x: Any) -> Optional[str]:
+    """
+    Normaliza CPF/celular preservando como texto e removendo '.0' indevido.
+
+    Regras:
+    - None / NaN / vazio -> None
+    - float integral -> string inteira
+    - string numérica integral com .0 / notação científica -> string inteira
+    - demais strings -> trim simples
+    """
+    try:
+        import pandas as pd
+    except Exception:
+        pd = None
+
+    if x is None:
+        return None
+
+    if pd is not None:
+        try:
+            if pd.isna(x):
+                return None
+        except Exception:
+            pass
+
+    # números Python
+    if isinstance(x, int):
+        return str(x)
+
+    if isinstance(x, float):
+        if pd is not None:
+            try:
+                if pd.isna(x):
+                    return None
+            except Exception:
+                pass
+        # se for 11974817404.0 -> 11974817404
+        if x.is_integer():
+            return str(int(x))
+        s = str(x).strip()
+        return s or None
+
+    s = str(x).strip()
+    if not s or s.lower() == "nan":
+        return None
+
+    # corrige:
+    # "11974817404.0" -> "11974817404"
+    # "5.511944391404e13" -> "55119443914040"
+    s2 = _normalize_decimal_string_to_int_string(s)
+
+    return s2 or None
+
+
+def _normalize_generic_string(x: Any) -> Optional[str]:
+    """
+    Converte qualquer valor para STRING segura sem estourar upload.
+    """
+    try:
+        import pandas as pd
+    except Exception:
+        pd = None
+
+    if x is None:
+        return None
+
+    if pd is not None:
+        try:
+            if pd.isna(x):
+                return None
+        except Exception:
+            pass
+
+    s = str(x).strip()
+    if not s or s.lower() == "nan":
+        return None
+    return s
+
+
+def _xlsx_safe_cell_value(key: str, value: Any):
+    """
+    Mantém datas compatíveis com Excel e força CPF/celular como texto.
+    """
+    from datetime import datetime, date
+
+    if key in PHONEISH_COLUMNS:
+        return _normalize_phoneish_value(value)
+
+    if isinstance(value, datetime):
+        return value.replace(tzinfo=None) if value.tzinfo is not None else value
+    if isinstance(value, date):
+        return value
+
+    return value
+
+
+# ============================================================
 # STAGING SCHEMA (BLINDADO)
 # ============================================================
-# ✅ Tudo STRING para não quebrar em CSV/XLSX e deixar a SP parsear
+# Tudo STRING para não quebrar em CSV/XLSX e deixar a SP parsear
 STAGING_SCHEMA: List[bigquery.SchemaField] = [
     bigquery.SchemaField("status_inscricao", "STRING", mode="NULLABLE"),
     bigquery.SchemaField("data_inscricao", "STRING", mode="NULLABLE"),
@@ -98,8 +225,10 @@ STAGING_SCHEMA: List[bigquery.SchemaField] = [
 def _coerce_df_to_staging_schema(df):
     """
     Ajusta o DataFrame para bater com o schema da staging.
-    ✅ Blindado: NÃO converte datas/float/int — manda tudo como STRING.
-    Evita crash do pandas (guess_datetime_format) e 400 no load.
+    Blindado:
+    - manda tudo como STRING;
+    - protege CPF/celular de .0 / float / notação científica;
+    - mantém ordem do schema.
     """
     import pandas as pd
 
@@ -116,25 +245,21 @@ def _coerce_df_to_staging_schema(df):
     # remove extras e mantém ordem
     df = df[expected_cols]
 
-    def to_str(x):
-        if x is None:
-            return None
-        # pandas NaN
-        if isinstance(x, float) and pd.isna(x):
-            return None
-        s = str(x).strip()
-        if not s or s.lower() == "nan":
-            return None
-        return s
-
     for col in expected_cols:
-        df[col] = df[col].map(to_str)
+        if col in PHONEISH_COLUMNS:
+            df[col] = df[col].map(_normalize_phoneish_value)
+        else:
+            df[col] = df[col].map(_normalize_generic_string)
+
+    # reforça dtype object/string-like
+    for col in expected_cols:
+        df[col] = df[col].astype("object")
 
     return df
 
 
 # ============================================================
-# STAGING + PROCEDURE (upload)  ✅ AGORA ASSÍNCRONO
+# STAGING + PROCEDURE (upload)  AGORA ASSÍNCRONO
 # ============================================================
 def load_to_staging(df) -> None:
     client = get_bq_client()
@@ -164,7 +289,7 @@ def run_procedure_async() -> str:
     sql = f"CALL `{GCP_PROJECT_ID}.{BQ_DATASET}.{BQ_PROCEDURE}`();"
 
     try:
-        job = client.query(sql)  # <-- NÃO usa .result()
+        job = client.query(sql)
         return job.job_id
     except (BadRequest, Forbidden, NotFound, GoogleAPICallError) as e:
         logger.exception("BQ run_procedure_async falhou: %s", str(e))
@@ -187,7 +312,7 @@ def get_bq_job_status(job_id: str) -> Dict[str, Any]:
 
     payload: Dict[str, Any] = {
         "job_id": job.job_id,
-        "state": job.state,  # PENDING, RUNNING, DONE
+        "state": job.state,
         "created": job.created.isoformat() if job.created else None,
         "started": job.started.isoformat() if job.started else None,
         "ended": job.ended.isoformat() if job.ended else None,
@@ -273,7 +398,6 @@ def _apply_filters(sql: str, filters: Dict[str, Any], params: List[Any]) -> str:
         sql += " AND v.tipo_disparo IN UNNEST(@tipos_disparo)"
         params.append(bigquery.ArrayQueryParameter("tipos_disparo", "STRING", tipos_disparo))
 
-    # busca direta
     if filters.get("cpf"):
         sql += " AND v.cpf = @cpf"
         params.append(bigquery.ScalarQueryParameter("cpf", "STRING", str(filters["cpf"]).strip()))
@@ -290,7 +414,6 @@ def _apply_filters(sql: str, filters: Dict[str, Any], params: List[Any]) -> str:
         sql += " AND LOWER(v.nome) LIKE LOWER(@nome_like)"
         params.append(bigquery.ScalarQueryParameter("nome_like", "STRING", f"%{str(filters['nome']).strip()}%"))
 
-    # ✅ matriculado: só flag_matriculado
     if filters.get("matriculado") is not None and str(filters.get("matriculado")).strip() != "":
         val = str(filters.get("matriculado")).lower().strip()
         b = True if val in ("true", "1", "sim", "yes") else False if val in ("false", "0", "nao", "não", "no") else None
@@ -298,7 +421,6 @@ def _apply_filters(sql: str, filters: Dict[str, Any], params: List[Any]) -> str:
             sql += " AND IFNULL(v.flag_matriculado, FALSE) = @matriculado"
             params.append(bigquery.ScalarQueryParameter("matriculado", "BOOL", b))
 
-    # datas
     if filters.get("data_ini"):
         sql += " AND v.data_inscricao >= @data_ini"
         params.append(bigquery.ScalarQueryParameter("data_ini", "DATE", filters["data_ini"]))
@@ -496,17 +618,10 @@ def export_leads_rows(
 
 def rows_to_xlsx(rows: List[Dict[str, Any]], xlsx_path: str, sheet_name: str = "Leads") -> str:
     """
-    Gera XLSX no disco (Excel não aceita datetime com timezone).
+    Gera XLSX no disco.
+    - Excel não aceita datetime com timezone
+    - CPF/celular saem como TEXTO para evitar conversão numérica
     """
-    from datetime import datetime, date
-
-    def _excel_safe(v):
-        if isinstance(v, datetime):
-            return v.replace(tzinfo=None) if v.tzinfo is not None else v
-        if isinstance(v, date):
-            return v
-        return v
-
     wb = Workbook()
     ws = wb.active
     ws.title = sheet_name[:31]
@@ -516,7 +631,7 @@ def rows_to_xlsx(rows: List[Dict[str, Any]], xlsx_path: str, sheet_name: str = "
     ws.append(headers)
 
     for r in rows:
-        ws.append([_excel_safe(r.get(k)) for k in keys])
+        ws.append([_xlsx_safe_cell_value(k, r.get(k)) for k in keys])
 
     for col_idx, header in enumerate(headers, start=1):
         col_letter = get_column_letter(col_idx)
@@ -530,14 +645,30 @@ def rows_to_xlsx(rows: List[Dict[str, Any]], xlsx_path: str, sheet_name: str = "
 def df_to_xlsx(df, xlsx_path: str, sheet_name: str = "Upload") -> str:
     """
     Salva uma cópia do upload em XLSX.
+    Mantém CPF/celular como texto quando possível.
     """
     wb = Workbook()
     ws = wb.active
     ws.title = sheet_name[:31]
 
-    ws.append(list(df.columns))
+    headers = [str(c) for c in df.columns]
+    ws.append(headers)
+
+    phoneish_indexes = {idx for idx, col in enumerate(headers) if str(col).strip() in PHONEISH_COLUMNS}
+
     for row in df.itertuples(index=False, name=None):
-        ws.append(list(row))
+        out = []
+        for idx, value in enumerate(row):
+            col_name = headers[idx]
+            if idx in phoneish_indexes or col_name in PHONEISH_COLUMNS:
+                out.append(_normalize_phoneish_value(value))
+            else:
+                out.append(value)
+        ws.append(out)
+
+    for col_idx, header in enumerate(headers, start=1):
+        col_letter = get_column_letter(col_idx)
+        ws.column_dimensions[col_letter].width = max(12, min(42, len(str(header)) + 6))
 
     Path(xlsx_path).parent.mkdir(parents=True, exist_ok=True)
     wb.save(xlsx_path)
