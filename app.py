@@ -170,7 +170,7 @@ def create_app() -> Flask:
     app.config["MAX_CONTENT_LENGTH"] = 30 * 1024 * 1024
     app.secret_key = _env("FLASK_SECRET_KEY", "painel-leads-lite-dev-key")
  
-    asset_version = _env("ASSET_VERSION", "20260225-star-v1")
+    asset_version = _env("ASSET_VERSION", "20260327-auth-v2")
     ui_version = _env("UI_VERSION", f"v{asset_version}")
  
     # pastas locais (mantém XLSX)
