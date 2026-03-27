@@ -6,7 +6,7 @@ on:
     types: [opened, synchronize, reopened, ready_for_review]
   push:
     branches:
-      - "**"
+      - '**'
 
 jobs:
   validate-frontend:
@@ -19,11 +19,45 @@ jobs:
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: '3.11'
+
+      - name: Show repository tree
+        run: |
+          echo "=== ROOT ==="
+          ls -la
+          echo "=== templates ==="
+          ls -la templates || true
+          echo "=== static/css ==="
+          ls -la static/css || true
+          echo "=== static/js ==="
+          ls -la static/js || true
+          echo "=== services ==="
+          ls -la services || true
+
+      - name: Validate required files exist
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          required_files = [
+              'app.py',
+              'services/bigquery.py',
+              'templates/index.html',
+              'static/css/styles.css',
+              'static/js/app.js',
+          ]
+
+          missing = [f for f in required_files if not Path(f).exists()]
+          if missing:
+              raise SystemExit(f'Arquivos obrigatórios não encontrados: {missing}')
+
+          print('Todos os arquivos obrigatórios existem.')
+          PY
 
       - name: Python syntax check
         run: |
           python -m py_compile app.py services/bigquery.py
+          echo "Python syntax check passed."
 
       - name: Validate cache-busting params in template
         run: |
@@ -33,13 +67,16 @@ jobs:
           html = Path('templates/index.html').read_text(encoding='utf-8')
 
           checks = {
-              "css cache-busting": "filename='css/styles.css', v='",
-              "js cache-busting": "filename='js/app.js', v='",
+              'css cache-busting': "filename='css/styles.css', v='",
+              'js cache-busting': "filename='js/app.js', v='",
           }
 
           missing = [name for name, needle in checks.items() if needle not in html]
           if missing:
-              raise SystemExit(f"Missing expected template checks: {', '.join(missing)}")
+              raise SystemExit(
+                  'Template index.html sem os trechos esperados de cache-busting: '
+                  + ', '.join(missing)
+              )
 
           print('Cache-busting checks passed.')
           PY
@@ -58,6 +95,7 @@ jobs:
               '.ts-opt-check',
               '.filters-6',
           ]
+
           js_needles = [
               'renderTable([], { loading: true })',
               'class="table-feedback"',
@@ -69,11 +107,12 @@ jobs:
           missing_js = [n for n in js_needles if n not in js]
 
           if missing_css or missing_js:
-              raise SystemExit(
-                  'Missing guardrail hooks: '
-                  + (f"css={missing_css} " if missing_css else '')
-                  + (f"js={missing_js}" if missing_js else '')
-              )
+              msg = []
+              if missing_css:
+                  msg.append(f'css={missing_css}')
+              if missing_js:
+                  msg.append(f'js={missing_js}')
+              raise SystemExit('Missing guardrail hooks: ' + ' | '.join(msg))
 
           print('Dashboard hook checks passed.')
           PY
