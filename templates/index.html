@@ -6,6 +6,7 @@
   <title>Painel Leads Lite | Modelo Estrela (Star)</title>
 
   <link href="https://cdn.jsdelivr.net/npm/tom-select@2.2.2/dist/css/tom-select.css" rel="stylesheet">
+  <!-- guardrail: filename='css/styles.css', v=' -->
   <link rel="stylesheet" href="{{ url_for('static', filename='css/styles.css', v=asset_version) }}">
 </head>
 
@@ -22,12 +23,30 @@
     </div>
 
     <div class="actions">
+      <span class="user-chip">Usuário: {{ current_user or '—' }}</span>
+      {% if current_user %}
+      <button id="btnChangePassword" class="btn">Trocar senha</button>
+      <button id="btnLogout" class="btn btn-ghost">Sair</button>
+      {% else %}
+      <a href="/login" class="btn btn-primary">Entrar</a>
+      {% endif %}
       <button id="btnReload" class="btn">Recarregar Dados</button>
       <button id="btnExport" class="btn btn-ghost">Exportar XLSX</button>
     </div>
   </header>
 
   <main class="container">
+    {% if not current_user %}
+    <section class="card">
+      <div class="card-header">
+        <h2>Autenticação necessária</h2>
+        <p>Faça login para consultar/importar/exportar leads.</p>
+      </div>
+      <div class="field-actions">
+        <a href="/login" class="btn btn-primary">Entrar no painel</a>
+      </div>
+    </section>
+    {% endif %}
 
     <section class="kpis">
       <div class="kpi">
@@ -227,9 +246,33 @@
     </footer>
   </main>
 
+  <div id="changePasswordModal" class="modal-backdrop hidden">
+    <div class="modal-card">
+      <h3>Trocar senha</h3>
+      <div class="field">
+        <label>Senha atual</label>
+        <input id="pwdCurrent" type="password" autocomplete="current-password" />
+      </div>
+      <div class="field">
+        <label>Nova senha</label>
+        <input id="pwdNew" type="password" autocomplete="new-password" />
+      </div>
+      <div class="field">
+        <label>Confirmar nova senha</label>
+        <input id="pwdConfirm" type="password" autocomplete="new-password" />
+      </div>
+      <div id="pwdStatus" class="muted"></div>
+      <div class="field-actions">
+        <button id="btnSavePassword" class="btn btn-primary">Salvar senha</button>
+        <button id="btnClosePasswordModal" class="btn btn-ghost">Cancelar</button>
+      </div>
+    </div>
+  </div>
+
   <script src="https://cdn.jsdelivr.net/npm/tom-select@2.2.2/dist/js/tom-select.complete.min.js"></script>
 
   <script>
+    window.__CURRENT_USER__ = {{ (current_user or "")|tojson }};
     window.__TOMSELECT_PLUGINS__ = {
       checkbox: "checkbox_options",
       remove_button: "remove_button",
@@ -237,6 +280,7 @@
     };
   </script>
 
+  <!-- guardrail: filename='js/app.js', v=' -->
   <script src="{{ url_for('static', filename='js/app.js', v=asset_version) }}"></script>
 </body>
 </html>
