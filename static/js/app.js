@@ -102,6 +102,10 @@ async function apiGet(path, params = {}) {
   }
 
   if (!res.ok) {
+    if (res.status === 401 && data?.redirect_to) {
+      window.location.href = data.redirect_to;
+      throw new Error("Sessão expirada");
+    }
     const msg =
       data?.error ||
       data?.message ||
@@ -126,6 +130,10 @@ async function apiPostForm(path, formData) {
   }
 
   if (!res.ok) {
+    if (res.status === 401 && data?.redirect_to) {
+      window.location.href = data.redirect_to;
+      throw new Error("Sessão expirada");
+    }
     const msg =
       data?.error ||
       data?.message ||

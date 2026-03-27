@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="pt-br">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Login | Painel Leads Lite</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/styles.css', v=asset_version) }}">
+</head>
+<body>
+  <div class="release-banner">Versão ativa no servidor: {{ ui_version }}</div>
+
+  <main class="auth-shell">
+    <section class="auth-card">
+      <div class="brand auth-brand">
+        <div class="logo">PL</div>
+        <div>
+          <div class="title">Painel Leads Lite</div>
+          <div class="subtitle">Acesso restrito</div>
+        </div>
+      </div>
+
+      <div class="auth-copy">
+        <h1>Entrar no painel</h1>
+        <p>Use suas credenciais para acessar os dados de leads.</p>
+      </div>
+
+      <form id="loginForm" class="auth-form" autocomplete="off">
+        <div class="field">
+          <label for="username">Usuário</label>
+          <input id="username" name="username" placeholder="Digite seu usuário" required />
+        </div>
+
+        <div class="field">
+          <label for="password">Senha</label>
+          <input id="password" name="password" type="password" placeholder="Digite sua senha" required />
+        </div>
+
+        <div id="loginError" class="error auth-error" role="alert" aria-live="polite"></div>
+
+        <button type="submit" class="btn btn-primary auth-submit">Entrar</button>
+      </form>
+    </section>
+  </main>
+
+  <script>
+    const form = document.getElementById('loginForm');
+    const errorEl = document.getElementById('loginError');
+
+    form.addEventListener('submit', async (event) => {
+      event.preventDefault();
+      errorEl.textContent = '';
+
+      const username = document.getElementById('username').value.trim();
+      const password = document.getElementById('password').value;
+
+      try {
+        const res = await fetch('/api/auth/login', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ username, password })
+        });
+
+        const data = await res.json();
+        if (!res.ok || !data?.ok) {
+          errorEl.textContent = data?.error || 'Não foi possível autenticar. Tente novamente.';
+          return;
+        }
+
+        window.location.href = data.redirect_to || '/';
+      } catch {
+        errorEl.textContent = 'Erro de conexão ao tentar autenticar.';
+      }
+    });
+  </script>
+</body>
+</html>
