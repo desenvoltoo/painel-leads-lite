@@ -8,12 +8,14 @@ import os
 import traceback
 import io
 import uuid
+import secrets
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, Any, Tuple
  
 import pandas as pd
-from flask import Flask, render_template, request, jsonify, send_file
+from flask import Flask, render_template, request, jsonify, send_file, redirect, url_for, make_response, g
+from werkzeug.security import check_password_hash
  
 from services.bigquery import (
     query_leads,
@@ -158,23 +160,131 @@ def _read_upload_to_df(file_storage) -> pd.DataFrame:
 def create_app() -> Flask:
     app = Flask(__name__)
     app.config["MAX_CONTENT_LENGTH"] = 30 * 1024 * 1024
- 
+    app.secret_key = _env("FLASK_SECRET_KEY", "painel-leads-lite-dev-secret-change-me")
+
     asset_version = _env("ASSET_VERSION", "20260225-star-v1")
     ui_version = _env("UI_VERSION", f"v{asset_version}")
+    session_ttl_seconds = int(_env("SESSION_TTL_SECONDS", "28800"))
+
+    # Sessão server-side simples (memória do processo)
+    session_store: Dict[str, Dict[str, Any]] = {}
+
+    # Usuários iniciais com senha hasheada (senha padrão: 123456)
+    users = {
+        "matheus": "pbkdf2:sha256:1000000$Ij5ppE2yYdLvAKlF$0d441b0096771e07525df01b224faf57cabedc83b444375cad21e44f9d6b5282",
+        "miguel": "pbkdf2:sha256:1000000$rxyvycWVM3tJCDF0$36a69c69fd09385c4e39fd2c67549f60c9dccc1a68f7a56d0f8e8f00716fc49d",
+    }
  
     # pastas locais (mantém XLSX)
     UPLOAD_DIR = Path(_env("UPLOAD_DIR", "enviados"))
     EXPORT_DIR = Path(_env("EXPORT_DIR", "exportados"))
     UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
     EXPORT_DIR.mkdir(parents=True, exist_ok=True)
- 
+
+    def _is_public_path(path: str) -> bool:
+        if path.startswith("/static/"):
+            return True
+        return path in ("/login", "/logout", "/health", "/api/auth/login")
+
+    def _session_cookie_name() -> str:
+        return _env("SESSION_COOKIE_NAME", "painel_session")
+
+    def _new_session(username: str) -> str:
+        sid = secrets.token_urlsafe(32)
+        session_store[sid] = {
+            "username": username,
+            "created_at": datetime.utcnow().timestamp(),
+            "last_seen": datetime.utcnow().timestamp(),
+        }
+        return sid
+
+    def _cleanup_session_if_expired(sid: str):
+        sess = session_store.get(sid)
+        if not sess:
+            return
+        now = datetime.utcnow().timestamp()
+        if now - float(sess.get("last_seen", 0)) > session_ttl_seconds:
+            session_store.pop(sid, None)
+
+    def _current_user() -> str | None:
+        sid = request.cookies.get(_session_cookie_name())
+        if not sid:
+            return None
+        _cleanup_session_if_expired(sid)
+        sess = session_store.get(sid)
+        if not sess:
+            return None
+        sess["last_seen"] = datetime.utcnow().timestamp()
+        return str(sess.get("username"))
+
+    def _destroy_session():
+        sid = request.cookies.get(_session_cookie_name())
+        if sid:
+            session_store.pop(sid, None)
+
+    @app.before_request
+    def _auth_guard():
+        if _is_public_path(request.path):
+            return None
+
+        user = _current_user()
+        g.current_user = user
+        if user:
+            return None
+
+        if request.path.startswith("/api/"):
+            return jsonify({"ok": False, "error": "Sessão expirada. Faça login novamente.", "redirect_to": "/login"}), 401
+        return redirect(url_for("login"))
+
     @app.get("/")
     def index():
         return render_template(
             "index.html",
             asset_version=asset_version,
             ui_version=ui_version,
+            current_user=getattr(g, "current_user", None),
         )
+
+    @app.get("/login")
+    def login():
+        if _current_user():
+            return redirect(url_for("index"))
+        return render_template(
+            "login.html",
+            asset_version=asset_version,
+            ui_version=ui_version,
+            error=None,
+        )
+
+    @app.post("/api/auth/login")
+    def api_auth_login():
+        payload = request.get_json(silent=True) or {}
+        username = str(payload.get("username") or "").strip().lower()
+        password = str(payload.get("password") or "")
+
+        user_hash = users.get(username)
+        if not user_hash or not check_password_hash(user_hash, password):
+            return jsonify({"ok": False, "error": "Usuário ou senha incorretos. Tente novamente."}), 401
+
+        sid = _new_session(username)
+        resp = make_response(jsonify({"ok": True, "redirect_to": "/"}))
+        resp.set_cookie(
+            _session_cookie_name(),
+            sid,
+            max_age=session_ttl_seconds,
+            httponly=True,
+            secure=_env("COOKIE_SECURE", "false").lower() == "true",
+            samesite="Lax",
+            path="/",
+        )
+        return resp
+
+    @app.post("/logout")
+    def logout():
+        _destroy_session()
+        resp = make_response(redirect(url_for("login")))
+        resp.delete_cookie(_session_cookie_name(), path="/")
+        return resp
  
     @app.get("/health")
     def health():
@@ -340,4 +450,3 @@ if __name__ == "__main__":
     port = int(_env("PORT", "8080"))
     app.run(host="0.0.0.0", port=port, debug=True)
  
-
