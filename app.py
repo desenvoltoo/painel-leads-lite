@@ -176,7 +176,7 @@ def create_app() -> Flask:
     # pastas locais (mantém XLSX)
     UPLOAD_DIR = Path(_env("UPLOAD_DIR", "enviados"))
     EXPORT_DIR = Path(_env("EXPORT_DIR", "exportados"))
-    AUTH_DIR = Path(_env("AUTH_DIR", "auth"))
+    AUTH_DIR = Path(_env("AUTH_DIR", "/tmp/auth"))
     USERS_FILE = AUTH_DIR / "users.json"
     UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
     EXPORT_DIR.mkdir(parents=True, exist_ok=True)
@@ -200,6 +200,10 @@ def create_app() -> Flask:
             json.dumps(users, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
+
+    def _looks_like_password_hash(value: str) -> bool:
+        s = str(value or "")
+        return s.startswith("scrypt:") or s.startswith("pbkdf2:")
 
     @app.before_request
     def _auth_guard():
@@ -248,8 +252,20 @@ def create_app() -> Flask:
             return jsonify({"ok": False, "error": "Usuário e senha são obrigatórios."}), 400
 
         users = _load_users()
-        password_hash = users.get(username)
-        if not password_hash or not check_password_hash(password_hash, password):
+        stored_password = users.get(username)
+        if not stored_password:
+            return jsonify({"ok": False, "error": "Usuário ou senha inválidos."}), 401
+
+        # Compatibilidade/migração: aceita valor legado em texto puro e converte para hash.
+        if _looks_like_password_hash(stored_password):
+            is_valid = check_password_hash(stored_password, password)
+        else:
+            is_valid = stored_password == password
+            if is_valid:
+                users[username] = generate_password_hash(password)
+                _save_users(users)
+
+        if not is_valid:
             return jsonify({"ok": False, "error": "Usuário ou senha inválidos."}), 401
 
         session["username"] = username
@@ -279,8 +295,16 @@ def create_app() -> Flask:
             return jsonify({"ok": False, "error": "A nova senha deve ter no mínimo 6 caracteres."}), 400
 
         users = _load_users()
-        password_hash = users.get(username)
-        if not password_hash or not check_password_hash(password_hash, current_password):
+        stored_password = users.get(username)
+        if not stored_password:
+            return jsonify({"ok": False, "error": "Senha atual inválida."}), 401
+
+        if _looks_like_password_hash(stored_password):
+            is_valid = check_password_hash(stored_password, current_password)
+        else:
+            is_valid = stored_password == current_password
+
+        if not is_valid:
             return jsonify({"ok": False, "error": "Senha atual inválida."}), 401
 
         users[username] = generate_password_hash(new_password)
