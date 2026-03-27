@@ -221,10 +221,12 @@ def create_app() -> Flask:
         if request.path.startswith("/api/"):
             return jsonify({"ok": False, "error": "Não autenticado."}), 401
 
-        return None
+        return redirect(url_for("login_page"))
 
     @app.get("/")
     def index():
+        if not session.get("username"):
+            return redirect(url_for("login_page"))
         return render_template(
             "index.html",
             asset_version=asset_version,
