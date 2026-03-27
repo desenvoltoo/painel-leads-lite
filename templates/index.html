@@ -27,7 +27,7 @@
       <button id="btnChangePassword" class="btn">Trocar senha</button>
       <button id="btnLogout" class="btn btn-ghost">Sair</button>
       {% else %}
-      <button id="btnOpenLogin" class="btn btn-primary">Entrar</button>
+      <a href="/login" class="btn btn-primary">Entrar</a>
       {% endif %}
       <button id="btnReload" class="btn">Recarregar Dados</button>
       <button id="btnExport" class="btn btn-ghost">Exportar XLSX</button>
@@ -42,7 +42,7 @@
         <p>Faça login para consultar/importar/exportar leads.</p>
       </div>
       <div class="field-actions">
-        <button id="btnOpenLoginFromCard" class="btn btn-primary">Entrar no painel</button>
+        <a href="/login" class="btn btn-primary">Entrar no painel</a>
       </div>
     </section>
     {% endif %}
@@ -264,25 +264,6 @@
       <div class="field-actions">
         <button id="btnSavePassword" class="btn btn-primary">Salvar senha</button>
         <button id="btnClosePasswordModal" class="btn btn-ghost">Cancelar</button>
-      </div>
-    </div>
-  </div>
-
-  <div id="loginModal" class="modal-backdrop {% if current_user %}hidden{% endif %}">
-    <div class="modal-card">
-      <h3>Entrar no painel</h3>
-      <div class="field">
-        <label>Usuário</label>
-        <input id="loginUser" placeholder="matheus ou miguel" autocomplete="username" />
-      </div>
-      <div class="field">
-        <label>Senha</label>
-        <input id="loginPass" type="password" placeholder="Digite sua senha" autocomplete="current-password" />
-      </div>
-      <div id="loginStatus" class="muted"></div>
-      <div class="muted">Usuários: matheus e miguel • Senha padrão inicial: 123456</div>
-      <div class="field-actions">
-        <button id="btnLogin" class="btn btn-primary">Entrar</button>
       </div>
     </div>
   </div>
