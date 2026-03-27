@@ -102,7 +102,10 @@ async function apiGet(path, params = {}) {
   }
 
   if (!res.ok) {
-    if (res.status === 401) throw new Error("Não autenticado. Faça login para continuar.");
+    if (res.status === 401) {
+      window.location.href = "/login";
+      throw new Error("Não autenticado. Redirecionando para login...");
+    }
     const msg =
       data?.error ||
       data?.message ||
@@ -127,7 +130,10 @@ async function apiPostForm(path, formData) {
   }
 
   if (!res.ok) {
-    if (res.status === 401) throw new Error("Não autenticado. Faça login para continuar.");
+    if (res.status === 401) {
+      window.location.href = "/login";
+      throw new Error("Não autenticado. Redirecionando para login...");
+    }
     const msg =
       data?.error ||
       data?.message ||
@@ -149,7 +155,10 @@ async function apiPostJson(path, payload = {}) {
 
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {
-    if (res.status === 401) throw new Error("Não autenticado. Faça login para continuar.");
+    if (res.status === 401) {
+      window.location.href = "/login";
+      throw new Error("Não autenticado. Redirecionando para login...");
+    }
     throw new Error(data?.error || `Erro na API (${res.status})`);
   }
   return data;
