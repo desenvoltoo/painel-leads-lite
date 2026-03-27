@@ -10,7 +10,7 @@ import io
 import uuid
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Dict, Any, Tuple
+from typing import Dict, Any, Tuple, Optional
  
 import pandas as pd
 from flask import Flask, render_template, request, jsonify, send_file, redirect, url_for, g, session
@@ -40,6 +40,14 @@ def _required_envs_ok():
         if not _env(k):
             missing.append(k)
     return (len(missing) == 0, missing)
+
+
+def _env_int(name: str, default: int) -> int:
+    raw = _env(name, str(default))
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return default
  
 def _get_filters_from_request() -> Tuple[Dict[str, Any], Dict[str, Any]]:
     def n(v):
@@ -163,7 +171,7 @@ def create_app() -> Flask:
 
     asset_version = _env("ASSET_VERSION", "20260225-star-v1")
     ui_version = _env("UI_VERSION", f"v{asset_version}")
-    session_ttl_seconds = int(_env("SESSION_TTL_SECONDS", "28800"))
+    session_ttl_seconds = _env_int("SESSION_TTL_SECONDS", 28800)
     app.permanent_session_lifetime = timedelta(seconds=session_ttl_seconds)
     app.config["SESSION_COOKIE_HTTPONLY"] = True
     app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
@@ -186,7 +194,7 @@ def create_app() -> Flask:
             return True
         return path in ("/login", "/logout", "/health", "/api/auth/login")
 
-    def _current_user() -> str | None:
+    def _current_user() -> Optional[str]:
         username = session.get("username")
         return str(username) if username else None
 
@@ -204,7 +212,16 @@ def create_app() -> Flask:
             return None
 
         if request.path.startswith("/api/"):
-            return jsonify({"ok": False, "error": "Sessão expirada. Faça login novamente.", "redirect_to": "/login"}), 401
+            return (
+                jsonify(
+                    {
+                        "ok": False,
+                        "error": "Sessão expirada. Faça login novamente.",
+                        "redirect_to": "/login",
+                    }
+                ),
+                401,
+            )
         return redirect(url_for("login"))
 
     @app.get("/")
