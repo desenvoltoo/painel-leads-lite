@@ -32,39 +32,6 @@
     </section>
   </main>
 
-  <script>
-    async function doLogin() {
-      const username = (document.getElementById('loginUser')?.value || '').trim();
-      const password = (document.getElementById('loginPass')?.value || '').trim();
-      const status = document.getElementById('loginStatus');
-
-      status.textContent = 'Autenticando...';
-      status.className = 'muted';
-
-      try {
-        const res = await fetch('/api/login', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ username, password })
-        });
-
-        const data = await res.json();
-        if (!res.ok || !data?.ok) {
-          throw new Error(data?.error || 'Falha no login.');
-        }
-
-        status.textContent = 'Login realizado com sucesso!';
-        window.location.href = '/';
-      } catch (err) {
-        status.textContent = err.message || 'Erro de autenticação.';
-        status.className = 'error';
-      }
-    }
-
-    document.getElementById('btnLogin')?.addEventListener('click', doLogin);
-    document.getElementById('loginPass')?.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter') doLogin();
-    });
-  </script>
+  <script src="{{ url_for('static', filename='js/login.js', v=asset_version) }}"></script>
 </body>
 </html>
