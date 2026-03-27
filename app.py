@@ -8,13 +8,12 @@ import os
 import traceback
 import io
 import uuid
-import secrets
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, Any, Tuple
  
 import pandas as pd
-from flask import Flask, render_template, request, jsonify, send_file, redirect, url_for, make_response, g
+from flask import Flask, render_template, request, jsonify, send_file, redirect, url_for, make_response, g, session
 from werkzeug.security import check_password_hash
  
 from services.bigquery import (
@@ -165,9 +164,16 @@ def create_app() -> Flask:
     asset_version = _env("ASSET_VERSION", "20260225-star-v1")
     ui_version = _env("UI_VERSION", f"v{asset_version}")
     session_ttl_seconds = int(_env("SESSION_TTL_SECONDS", "28800"))
+    cookie_secure = _env("COOKIE_SECURE", "false").lower() == "true"
+    session_cookie_name = _env("SESSION_COOKIE_NAME", "painel_session")
 
-    # Sessão server-side simples (memória do processo)
-    session_store: Dict[str, Dict[str, Any]] = {}
+    app.config.update(
+        SESSION_COOKIE_NAME=session_cookie_name,
+        SESSION_COOKIE_HTTPONLY=True,
+        SESSION_COOKIE_SECURE=cookie_secure,
+        SESSION_COOKIE_SAMESITE="Lax",
+        PERMANENT_SESSION_LIFETIME=session_ttl_seconds,
+    )
 
     # Usuários iniciais com senha hasheada (senha padrão: 123456)
     users = {
@@ -186,41 +192,17 @@ def create_app() -> Flask:
             return True
         return path in ("/login", "/logout", "/health", "/api/auth/login")
 
-    def _session_cookie_name() -> str:
-        return _env("SESSION_COOKIE_NAME", "painel_session")
-
-    def _new_session(username: str) -> str:
-        sid = secrets.token_urlsafe(32)
-        session_store[sid] = {
-            "username": username,
-            "created_at": datetime.utcnow().timestamp(),
-            "last_seen": datetime.utcnow().timestamp(),
-        }
-        return sid
-
-    def _cleanup_session_if_expired(sid: str):
-        sess = session_store.get(sid)
-        if not sess:
-            return
-        now = datetime.utcnow().timestamp()
-        if now - float(sess.get("last_seen", 0)) > session_ttl_seconds:
-            session_store.pop(sid, None)
-
     def _current_user() -> str | None:
-        sid = request.cookies.get(_session_cookie_name())
-        if not sid:
+        username = session.get("username")
+        if not username:
             return None
-        _cleanup_session_if_expired(sid)
-        sess = session_store.get(sid)
-        if not sess:
-            return None
-        sess["last_seen"] = datetime.utcnow().timestamp()
-        return str(sess.get("username"))
+        # renova TTL da sessão em uso normal do painel
+        session.permanent = True
+        session.modified = True
+        return str(username)
 
     def _destroy_session():
-        sid = request.cookies.get(_session_cookie_name())
-        if sid:
-            session_store.pop(sid, None)
+        session.clear()
 
     @app.before_request
     def _auth_guard():
@@ -266,24 +248,17 @@ def create_app() -> Flask:
         if not user_hash or not check_password_hash(user_hash, password):
             return jsonify({"ok": False, "error": "Usuário ou senha incorretos. Tente novamente."}), 401
 
-        sid = _new_session(username)
+        session.clear()
+        session.permanent = True
+        session["username"] = username
         resp = make_response(jsonify({"ok": True, "redirect_to": "/"}))
-        resp.set_cookie(
-            _session_cookie_name(),
-            sid,
-            max_age=session_ttl_seconds,
-            httponly=True,
-            secure=_env("COOKIE_SECURE", "false").lower() == "true",
-            samesite="Lax",
-            path="/",
-        )
         return resp
 
     @app.post("/logout")
     def logout():
         _destroy_session()
         resp = make_response(redirect(url_for("login")))
-        resp.delete_cookie(_session_cookie_name(), path="/")
+        resp.delete_cookie(app.config["SESSION_COOKIE_NAME"], path="/")
         return resp
  
     @app.get("/health")
