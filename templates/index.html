@@ -22,6 +22,9 @@
     </div>
 
     <div class="actions">
+      <span class="user-chip">Usuário: {{ current_user or '—' }}</span>
+      <button id="btnChangePassword" class="btn">Trocar senha</button>
+      <button id="btnLogout" class="btn btn-ghost">Sair</button>
       <button id="btnReload" class="btn">Recarregar Dados</button>
       <button id="btnExport" class="btn btn-ghost">Exportar XLSX</button>
     </div>
@@ -226,6 +229,29 @@
       <span class="build-tag">UI {{ ui_version }}</span>
     </footer>
   </main>
+
+  <div id="changePasswordModal" class="modal-backdrop hidden">
+    <div class="modal-card">
+      <h3>Trocar senha</h3>
+      <div class="field">
+        <label>Senha atual</label>
+        <input id="pwdCurrent" type="password" autocomplete="current-password" />
+      </div>
+      <div class="field">
+        <label>Nova senha</label>
+        <input id="pwdNew" type="password" autocomplete="new-password" />
+      </div>
+      <div class="field">
+        <label>Confirmar nova senha</label>
+        <input id="pwdConfirm" type="password" autocomplete="new-password" />
+      </div>
+      <div id="pwdStatus" class="muted"></div>
+      <div class="field-actions">
+        <button id="btnSavePassword" class="btn btn-primary">Salvar senha</button>
+        <button id="btnClosePasswordModal" class="btn btn-ghost">Cancelar</button>
+      </div>
+    </div>
+  </div>
 
   <script src="https://cdn.jsdelivr.net/npm/tom-select@2.2.2/dist/js/tom-select.complete.min.js"></script>
 

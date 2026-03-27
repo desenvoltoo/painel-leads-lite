@@ -102,6 +102,10 @@ async function apiGet(path, params = {}) {
   }
 
   if (!res.ok) {
+    if (res.status === 401) {
+      window.location.href = "/login";
+      throw new Error("Sessão expirada.");
+    }
     const msg =
       data?.error ||
       data?.message ||
@@ -126,6 +130,10 @@ async function apiPostForm(path, formData) {
   }
 
   if (!res.ok) {
+    if (res.status === 401) {
+      window.location.href = "/login";
+      throw new Error("Sessão expirada.");
+    }
     const msg =
       data?.error ||
       data?.message ||
@@ -134,6 +142,25 @@ async function apiPostForm(path, formData) {
     throw new Error(msg);
   }
 
+  return data;
+}
+
+async function apiPostJson(path, payload = {}) {
+  const url = new URL(path, window.location.origin);
+  const res = await fetch(url.toString(), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    if (res.status === 401) {
+      window.location.href = "/login";
+      throw new Error("Sessão expirada.");
+    }
+    throw new Error(data?.error || `Erro na API (${res.status})`);
+  }
   return data;
 }
 
@@ -476,6 +503,56 @@ function clearFilters() {
   loadLeadsAndKpis();
 }
 
+function openPasswordModal() {
+  $("#changePasswordModal")?.classList.remove("hidden");
+  if ($("#pwdStatus")) {
+    $("#pwdStatus").textContent = "";
+    $("#pwdStatus").className = "muted";
+  }
+}
+
+function closePasswordModal() {
+  $("#changePasswordModal")?.classList.add("hidden");
+  if ($("#pwdCurrent")) $("#pwdCurrent").value = "";
+  if ($("#pwdNew")) $("#pwdNew").value = "";
+  if ($("#pwdConfirm")) $("#pwdConfirm").value = "";
+}
+
+async function doLogout() {
+  await apiPostJson("/api/logout");
+  window.location.href = "/login";
+}
+
+async function doChangePassword() {
+  const current_password = ($("#pwdCurrent")?.value || "").trim();
+  const new_password = ($("#pwdNew")?.value || "").trim();
+  const confirm_password = ($("#pwdConfirm")?.value || "").trim();
+
+  const status = $("#pwdStatus");
+  if (status) {
+    status.textContent = "Salvando nova senha...";
+    status.className = "muted";
+  }
+
+  try {
+    const resp = await apiPostJson("/api/change-password", {
+      current_password,
+      new_password,
+      confirm_password,
+    });
+    if (status) {
+      status.textContent = resp?.message || "Senha alterada.";
+      status.className = "status-ok";
+    }
+    setTimeout(closePasswordModal, 800);
+  } catch (e) {
+    if (status) {
+      status.textContent = e.message || "Falha ao trocar senha.";
+      status.className = "error";
+    }
+  }
+}
+
 /* =========================
    Eventos
 ========================= */
@@ -491,6 +568,10 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   $("#btnUpload")?.addEventListener("click", doUpload);
   $("#btnExport")?.addEventListener("click", exportXlsxServerSide);
+  $("#btnLogout")?.addEventListener("click", doLogout);
+  $("#btnChangePassword")?.addEventListener("click", openPasswordModal);
+  $("#btnClosePasswordModal")?.addEventListener("click", closePasswordModal);
+  $("#btnSavePassword")?.addEventListener("click", doChangePassword);
 
   // busca rápida com debounce (não precisa clicar aplicar)
   $("#fBusca")?.addEventListener("input", loadLeadsAndKpisDebounced);

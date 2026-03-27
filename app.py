@@ -8,12 +8,14 @@ import os
 import traceback
 import io
 import uuid
+import json
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, Any, Tuple
  
 import pandas as pd
-from flask import Flask, render_template, request, jsonify, send_file
+from flask import Flask, render_template, request, jsonify, send_file, session, redirect, url_for, g
+from werkzeug.security import generate_password_hash, check_password_hash
  
 from services.bigquery import (
     query_leads,
@@ -87,6 +89,14 @@ def _error_payload(e: Exception, public_msg: str):
  
 def _stamp() -> str:
     return datetime.now().strftime("%Y%m%d_%H%M%S")
+
+
+def _default_users_payload() -> Dict[str, str]:
+    default_password = "123456"
+    return {
+        "matheus": generate_password_hash(default_password),
+        "miguel": generate_password_hash(default_password),
+    }
  
  
 # ============================================================
@@ -158,6 +168,7 @@ def _read_upload_to_df(file_storage) -> pd.DataFrame:
 def create_app() -> Flask:
     app = Flask(__name__)
     app.config["MAX_CONTENT_LENGTH"] = 30 * 1024 * 1024
+    app.secret_key = _env("FLASK_SECRET_KEY", "painel-leads-lite-dev-key")
  
     asset_version = _env("ASSET_VERSION", "20260225-star-v1")
     ui_version = _env("UI_VERSION", f"v{asset_version}")
@@ -165,16 +176,116 @@ def create_app() -> Flask:
     # pastas locais (mantém XLSX)
     UPLOAD_DIR = Path(_env("UPLOAD_DIR", "enviados"))
     EXPORT_DIR = Path(_env("EXPORT_DIR", "exportados"))
+    AUTH_DIR = Path(_env("AUTH_DIR", "auth"))
+    USERS_FILE = AUTH_DIR / "users.json"
     UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
     EXPORT_DIR.mkdir(parents=True, exist_ok=True)
- 
+    AUTH_DIR.mkdir(parents=True, exist_ok=True)
+
+    def _load_users() -> Dict[str, str]:
+        if not USERS_FILE.exists():
+            payload = _default_users_payload()
+            USERS_FILE.write_text(
+                json.dumps(payload, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            return payload
+        data = json.loads(USERS_FILE.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            raise ValueError("Formato inválido no arquivo de usuários.")
+        return {str(k).strip().lower(): str(v) for k, v in data.items()}
+
+    def _save_users(users: Dict[str, str]) -> None:
+        USERS_FILE.write_text(
+            json.dumps(users, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+
+    @app.before_request
+    def _auth_guard():
+        public_routes = {"/login", "/api/login", "/health"}
+        if request.path.startswith("/static/"):
+            return None
+        if request.path in public_routes:
+            return None
+
+        username = session.get("username")
+        if username:
+            g.current_user = username
+            return None
+
+        if request.path.startswith("/api/"):
+            return jsonify({"ok": False, "error": "Não autenticado."}), 401
+
+        return redirect(url_for("login_page"))
+
     @app.get("/")
     def index():
         return render_template(
             "index.html",
             asset_version=asset_version,
             ui_version=ui_version,
+            current_user=session.get("username"),
         )
+
+    @app.get("/login")
+    def login_page():
+        if session.get("username"):
+            return redirect(url_for("index"))
+        return render_template(
+            "login.html",
+            asset_version=asset_version,
+            ui_version=ui_version,
+        )
+
+    @app.post("/api/login")
+    def api_login():
+        body = request.get_json(silent=True) or {}
+        username = str(body.get("username") or "").strip().lower()
+        password = str(body.get("password") or "")
+
+        if not username or not password:
+            return jsonify({"ok": False, "error": "Usuário e senha são obrigatórios."}), 400
+
+        users = _load_users()
+        password_hash = users.get(username)
+        if not password_hash or not check_password_hash(password_hash, password):
+            return jsonify({"ok": False, "error": "Usuário ou senha inválidos."}), 401
+
+        session["username"] = username
+        return jsonify({"ok": True, "message": "Login realizado com sucesso.", "user": username})
+
+    @app.post("/api/logout")
+    def api_logout():
+        session.clear()
+        return jsonify({"ok": True, "message": "Sessão encerrada."})
+
+    @app.post("/api/change-password")
+    def api_change_password():
+        username = session.get("username")
+        if not username:
+            return jsonify({"ok": False, "error": "Não autenticado."}), 401
+
+        body = request.get_json(silent=True) or {}
+        current_password = str(body.get("current_password") or "")
+        new_password = str(body.get("new_password") or "")
+        confirm_password = str(body.get("confirm_password") or "")
+
+        if not current_password or not new_password or not confirm_password:
+            return jsonify({"ok": False, "error": "Preencha todos os campos de senha."}), 400
+        if new_password != confirm_password:
+            return jsonify({"ok": False, "error": "A confirmação da nova senha não confere."}), 400
+        if len(new_password) < 6:
+            return jsonify({"ok": False, "error": "A nova senha deve ter no mínimo 6 caracteres."}), 400
+
+        users = _load_users()
+        password_hash = users.get(username)
+        if not password_hash or not check_password_hash(password_hash, current_password):
+            return jsonify({"ok": False, "error": "Senha atual inválida."}), 401
+
+        users[username] = generate_password_hash(new_password)
+        _save_users(users)
+        return jsonify({"ok": True, "message": "Senha alterada com sucesso."})
  
     @app.get("/health")
     def health():
@@ -340,4 +451,3 @@ if __name__ == "__main__":
     port = int(_env("PORT", "8080"))
     app.run(host="0.0.0.0", port=port, debug=True)
  
-

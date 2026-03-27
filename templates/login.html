@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="pt-br">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Login | Painel Leads Lite</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/styles.css', v=asset_version) }}">
+</head>
+<body class="auth-body">
+  <main class="auth-page">
+    <section class="auth-card">
+      <h1>Entrar no painel</h1>
+      <p class="muted">Use um dos usuários autorizados para acessar os leads.</p>
+
+      <div class="field">
+        <label for="loginUser">Usuário</label>
+        <input id="loginUser" placeholder="matheus ou miguel" autocomplete="username" />
+      </div>
+
+      <div class="field">
+        <label for="loginPass">Senha</label>
+        <input id="loginPass" type="password" placeholder="Digite sua senha" autocomplete="current-password" />
+      </div>
+
+      <button id="btnLogin" class="btn btn-primary auth-btn">Entrar</button>
+      <div id="loginStatus" class="muted"></div>
+
+      <div class="muted auth-help">
+        Usuários iniciais: <strong>matheus</strong> e <strong>miguel</strong>.<br>
+        Senha padrão inicial: <strong>123456</strong>.
+      </div>
+    </section>
+  </main>
+
+  <script>
+    async function doLogin() {
+      const username = (document.getElementById('loginUser')?.value || '').trim();
+      const password = (document.getElementById('loginPass')?.value || '').trim();
+      const status = document.getElementById('loginStatus');
+
+      status.textContent = 'Autenticando...';
+      status.className = 'muted';
+
+      try {
+        const res = await fetch('/api/login', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ username, password })
+        });
+
+        const data = await res.json();
+        if (!res.ok || !data?.ok) {
+          throw new Error(data?.error || 'Falha no login.');
+        }
+
+        status.textContent = 'Login realizado com sucesso!';
+        window.location.href = '/';
+      } catch (err) {
+        status.textContent = err.message || 'Erro de autenticação.';
+        status.className = 'error';
+      }
+    }
+
+    document.getElementById('btnLogin')?.addEventListener('click', doLogin);
+    document.getElementById('loginPass')?.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') doLogin();
+    });
+  </script>
+</body>
+</html>
