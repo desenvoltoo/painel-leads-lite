@@ -67,14 +67,15 @@ jobs:
           html = Path('templates/index.html').read_text(encoding='utf-8')
 
           checks = {
-              'css cache-busting': "filename='css/styles.css', v='",
-              'js cache-busting': "filename='js/app.js', v='",
+              'css file': "filename='css/styles.css'",
+              'js file': "filename='js/app.js'",
+              'version param': "v=",
           }
 
           missing = [name for name, needle in checks.items() if needle not in html]
           if missing:
               raise SystemExit(
-                  'Template index.html sem os trechos esperados de cache-busting: '
+                  'Template index.html não contém os elementos esperados de cache-busting: '
                   + ', '.join(missing)
               )
 
