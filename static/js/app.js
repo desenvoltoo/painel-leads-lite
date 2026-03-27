@@ -90,7 +90,10 @@ async function apiGet(path, params = {}) {
     url.searchParams.set(k, s);
   });
 
-  const res = await fetch(url.toString(), { cache: "no-store" });
+  const res = await fetch(url.toString(), {
+    cache: "no-store",
+    credentials: "same-origin",
+  });
 
   // tenta entender o corpo sempre (pra erro útil)
   const text = await res.text();
@@ -119,7 +122,11 @@ async function apiGet(path, params = {}) {
 
 async function apiPostForm(path, formData) {
   const url = new URL(path, window.location.origin);
-  const res = await fetch(url.toString(), { method: "POST", body: formData });
+  const res = await fetch(url.toString(), {
+    method: "POST",
+    body: formData,
+    credentials: "same-origin",
+  });
 
   const text = await res.text();
   let data = {};
