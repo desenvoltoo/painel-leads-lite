@@ -207,7 +207,7 @@ def create_app() -> Flask:
 
     @app.before_request
     def _auth_guard():
-        public_routes = {"/login", "/api/login", "/health"}
+        public_routes = {"/", "/login", "/api/login", "/health"}
         if request.path.startswith("/static/"):
             return None
         if request.path in public_routes:
@@ -221,7 +221,7 @@ def create_app() -> Flask:
         if request.path.startswith("/api/"):
             return jsonify({"ok": False, "error": "Não autenticado."}), 401
 
-        return redirect(url_for("login_page"))
+        return None
 
     @app.get("/")
     def index():

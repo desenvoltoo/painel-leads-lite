@@ -102,10 +102,7 @@ async function apiGet(path, params = {}) {
   }
 
   if (!res.ok) {
-    if (res.status === 401) {
-      window.location.href = "/login";
-      throw new Error("Sessão expirada.");
-    }
+    if (res.status === 401) throw new Error("Não autenticado. Faça login para continuar.");
     const msg =
       data?.error ||
       data?.message ||
@@ -130,10 +127,7 @@ async function apiPostForm(path, formData) {
   }
 
   if (!res.ok) {
-    if (res.status === 401) {
-      window.location.href = "/login";
-      throw new Error("Sessão expirada.");
-    }
+    if (res.status === 401) throw new Error("Não autenticado. Faça login para continuar.");
     const msg =
       data?.error ||
       data?.message ||
@@ -155,10 +149,7 @@ async function apiPostJson(path, payload = {}) {
 
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {
-    if (res.status === 401) {
-      window.location.href = "/login";
-      throw new Error("Sessão expirada.");
-    }
+    if (res.status === 401) throw new Error("Não autenticado. Faça login para continuar.");
     throw new Error(data?.error || `Erro na API (${res.status})`);
   }
   return data;
@@ -557,6 +548,11 @@ async function doChangePassword() {
    Eventos
 ========================= */
 document.addEventListener("DOMContentLoaded", async () => {
+  if (!window.__CURRENT_USER__) {
+    setStatus("Faça login para acessar os dados do painel.", "err");
+    return;
+  }
+
   initMultiSelects();
 
   $("#btnApply")?.addEventListener("click", loadLeadsAndKpis);

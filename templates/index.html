@@ -31,6 +31,17 @@
   </header>
 
   <main class="container">
+    {% if not current_user %}
+    <section class="card">
+      <div class="card-header">
+        <h2>Autenticação necessária</h2>
+        <p>Faça login para consultar/importar/exportar leads.</p>
+      </div>
+      <div class="field-actions">
+        <a href="/login" class="btn btn-primary">Entrar no painel</a>
+      </div>
+    </section>
+    {% endif %}
 
     <section class="kpis">
       <div class="kpi">
@@ -256,6 +267,7 @@
   <script src="https://cdn.jsdelivr.net/npm/tom-select@2.2.2/dist/js/tom-select.complete.min.js"></script>
 
   <script>
+    window.__CURRENT_USER__ = {{ (current_user or "")|tojson }};
     window.__TOMSELECT_PLUGINS__ = {
       checkbox: "checkbox_options",
       remove_button: "remove_button",
