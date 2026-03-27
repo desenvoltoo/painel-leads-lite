@@ -76,6 +76,17 @@ body {
 .subtitle { color: var(--text-soft); font-size: 0.85rem; }
 
 .actions { display: flex; gap: 10px; }
+.logout-form { margin: 0; }
+.user-chip {
+  align-self: center;
+  padding: 8px 12px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  color: var(--text-soft);
+  background: rgba(255, 255, 255, 0.03);
+  font-size: 0.82rem;
+  font-weight: 600;
+}
 
 .container {
   max-width: 1320px;
@@ -213,6 +224,11 @@ small,
 }
 
 .btn-ghost { background: rgba(255, 255, 255, 0.02); }
+.btn-danger {
+  border-color: transparent;
+  color: #2a0812;
+  background: linear-gradient(135deg, #ff9eb7, #ff7ea7);
+}
 
 .table-wrap {
   border: 1px solid var(--border);
@@ -255,6 +271,36 @@ th, td {
 
 tbody tr:nth-child(even) { background: rgba(255, 255, 255, 0.015); }
 tbody tr:hover { background: rgba(122, 125, 255, 0.1); }
+
+/* =========================
+   Auth/Login
+========================= */
+.auth-shell {
+  min-height: calc(100vh - 42px);
+  display: grid;
+  place-items: center;
+  padding: 24px;
+}
+
+.auth-card {
+  width: 100%;
+  max-width: 460px;
+  border: 1px solid var(--border);
+  border-radius: 18px;
+  background: var(--card-strong);
+  box-shadow: var(--shadow);
+  padding: 26px;
+}
+
+.auth-brand { margin-bottom: 18px; }
+.auth-copy h1 { margin: 0; font-size: 1.45rem; }
+.auth-copy p { margin: 8px 0 0; color: var(--text-soft); }
+.auth-form { margin-top: 18px; display: grid; gap: 12px; }
+.auth-submit { margin-top: 4px; }
+.auth-error {
+  min-height: 20px;
+  font-size: 0.9rem;
+}
 
 .badge {
   display: inline-block;

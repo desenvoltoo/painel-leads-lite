@@ -8,12 +8,13 @@ import os
 import traceback
 import io
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Dict, Any, Tuple
  
 import pandas as pd
-from flask import Flask, render_template, request, jsonify, send_file
+from flask import Flask, render_template, request, jsonify, send_file, redirect, url_for, g, session
+from werkzeug.security import check_password_hash
  
 from services.bigquery import (
     query_leads,
@@ -158,23 +159,93 @@ def _read_upload_to_df(file_storage) -> pd.DataFrame:
 def create_app() -> Flask:
     app = Flask(__name__)
     app.config["MAX_CONTENT_LENGTH"] = 30 * 1024 * 1024
- 
+    app.secret_key = _env("FLASK_SECRET_KEY", "painel-leads-lite-dev-secret-change-me")
+
     asset_version = _env("ASSET_VERSION", "20260225-star-v1")
     ui_version = _env("UI_VERSION", f"v{asset_version}")
+    session_ttl_seconds = int(_env("SESSION_TTL_SECONDS", "28800"))
+    app.permanent_session_lifetime = timedelta(seconds=session_ttl_seconds)
+    app.config["SESSION_COOKIE_HTTPONLY"] = True
+    app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
+    app.config["SESSION_COOKIE_SECURE"] = _env("COOKIE_SECURE", "false").lower() == "true"
+
+    # Usuários iniciais com senha hasheada (senha padrão: 123456)
+    users = {
+        "matheus": "pbkdf2:sha256:1000000$Ij5ppE2yYdLvAKlF$0d441b0096771e07525df01b224faf57cabedc83b444375cad21e44f9d6b5282",
+        "miguel": "pbkdf2:sha256:1000000$rxyvycWVM3tJCDF0$36a69c69fd09385c4e39fd2c67549f60c9dccc1a68f7a56d0f8e8f00716fc49d",
+    }
  
     # pastas locais (mantém XLSX)
     UPLOAD_DIR = Path(_env("UPLOAD_DIR", "enviados"))
     EXPORT_DIR = Path(_env("EXPORT_DIR", "exportados"))
     UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
     EXPORT_DIR.mkdir(parents=True, exist_ok=True)
- 
+
+    def _is_public_path(path: str) -> bool:
+        if path.startswith("/static/"):
+            return True
+        return path in ("/login", "/logout", "/health", "/api/auth/login")
+
+    def _current_user() -> str | None:
+        username = session.get("username")
+        return str(username) if username else None
+
+    def _destroy_session():
+        session.clear()
+
+    @app.before_request
+    def _auth_guard():
+        if _is_public_path(request.path):
+            return None
+
+        user = _current_user()
+        g.current_user = user
+        if user:
+            return None
+
+        if request.path.startswith("/api/"):
+            return jsonify({"ok": False, "error": "Sessão expirada. Faça login novamente.", "redirect_to": "/login"}), 401
+        return redirect(url_for("login"))
+
     @app.get("/")
     def index():
         return render_template(
             "index.html",
             asset_version=asset_version,
             ui_version=ui_version,
+            current_user=getattr(g, "current_user", None),
         )
+
+    @app.get("/login")
+    def login():
+        if _current_user():
+            return redirect(url_for("index"))
+        return render_template(
+            "login.html",
+            asset_version=asset_version,
+            ui_version=ui_version,
+            error=None,
+        )
+
+    @app.post("/api/auth/login")
+    def api_auth_login():
+        payload = request.get_json(silent=True) or {}
+        username = str(payload.get("username") or "").strip().lower()
+        password = str(payload.get("password") or "")
+
+        user_hash = users.get(username)
+        if not user_hash or not check_password_hash(user_hash, password):
+            return jsonify({"ok": False, "error": "Usuário ou senha incorretos. Tente novamente."}), 401
+
+        session.clear()
+        session.permanent = True
+        session["username"] = username
+        return jsonify({"ok": True, "redirect_to": "/"})
+
+    @app.post("/logout")
+    def logout():
+        _destroy_session()
+        return redirect(url_for("login"))
  
     @app.get("/health")
     def health():
@@ -340,4 +411,3 @@ if __name__ == "__main__":
     port = int(_env("PORT", "8080"))
     app.run(host="0.0.0.0", port=port, debug=True)
  
-
