@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Dict, Any, Tuple
  
 import pandas as pd
-from flask import Flask, render_template, request, jsonify, send_file, session, redirect, url_for, g
+from flask import Flask, render_template, request, jsonify, send_file, session, g
 from werkzeug.security import generate_password_hash, check_password_hash
  
 from services.bigquery import (
@@ -207,7 +207,7 @@ def create_app() -> Flask:
 
     @app.before_request
     def _auth_guard():
-        public_routes = {"/", "/login", "/api/login", "/health"}
+        public_routes = {"/", "/api/login", "/health"}
         if request.path.startswith("/static/"):
             return None
         if request.path in public_routes:
@@ -230,16 +230,6 @@ def create_app() -> Flask:
             asset_version=asset_version,
             ui_version=ui_version,
             current_user=session.get("username"),
-        )
-
-    @app.get("/login")
-    def login_page():
-        if session.get("username"):
-            return redirect(url_for("index"))
-        return render_template(
-            "login.html",
-            asset_version=asset_version,
-            ui_version=ui_version,
         )
 
     @app.post("/api/login")

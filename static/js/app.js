@@ -155,6 +155,29 @@ async function apiPostJson(path, payload = {}) {
   return data;
 }
 
+async function loginFromModal() {
+  const username = ($("#loginUser")?.value || "").trim();
+  const password = ($("#loginPass")?.value || "").trim();
+  const status = $("#loginStatus");
+  if (status) {
+    status.textContent = "Autenticando...";
+    status.className = "muted";
+  }
+  try {
+    await apiPostJson("/api/login", { username, password });
+    window.location.reload();
+  } catch (e) {
+    if (status) {
+      status.textContent = e.message || "Falha no login.";
+      status.className = "error";
+    }
+  }
+}
+
+function openLoginModal() {
+  $("#loginModal")?.classList.remove("hidden");
+}
+
 /* =========================
    TomSelect (multi + checkbox)
 ========================= */
@@ -511,7 +534,8 @@ function closePasswordModal() {
 
 async function doLogout() {
   await apiPostJson("/api/logout");
-  window.location.href = "/login";
+  openLoginModal();
+  window.location.reload();
 }
 
 async function doChangePassword() {
@@ -549,6 +573,13 @@ async function doChangePassword() {
 ========================= */
 document.addEventListener("DOMContentLoaded", async () => {
   if (!window.__CURRENT_USER__) {
+    openLoginModal();
+    $("#btnLogin")?.addEventListener("click", loginFromModal);
+    $("#loginPass")?.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") loginFromModal();
+    });
+    $("#btnOpenLogin")?.addEventListener("click", openLoginModal);
+    $("#btnOpenLoginFromCard")?.addEventListener("click", openLoginModal);
     setStatus("Faça login para acessar os dados do painel.", "err");
     return;
   }
@@ -568,6 +599,8 @@ document.addEventListener("DOMContentLoaded", async () => {
   $("#btnChangePassword")?.addEventListener("click", openPasswordModal);
   $("#btnClosePasswordModal")?.addEventListener("click", closePasswordModal);
   $("#btnSavePassword")?.addEventListener("click", doChangePassword);
+  $("#btnOpenLogin")?.addEventListener("click", openLoginModal);
+  $("#btnOpenLoginFromCard")?.addEventListener("click", openLoginModal);
 
   // busca rápida com debounce (não precisa clicar aplicar)
   $("#fBusca")?.addEventListener("input", loadLeadsAndKpisDebounced);
