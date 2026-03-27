@@ -1,3 +1,4 @@
+// static/js/login.js - autenticação da rota /login
 const loginUserEl = document.getElementById("loginUser");
 const loginPassEl = document.getElementById("loginPass");
 const loginStatusEl = document.getElementById("loginStatus");
