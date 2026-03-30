@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 Painel Leads Lite (Flask + BigQuery)
-Versão: 4.1 - Upload Assíncrono (staging + dispara SP sem bloquear)
+Versão: 4.2 - Fix encoding CSV (chardet)
 """
  
 import os
@@ -92,8 +92,12 @@ def _stamp() -> str:
  
 # ============================================================
 # Upload parsing: CSV/XLSX robusto (separador, encoding)
-# FIX: força cpf/celular como str ANTES do pandas inferir float64,
-#      evitando corrupção de números longos (ex: 55119443914040 -> 55119443914040**0**)
+# FIX v4.2: usa chardet para detectar encoding real do arquivo
+#           antes de passar pro pandas, evitando leitura errada
+#           de arquivos Latin-1 como UTF-8 (causa nomes corrompidos
+#           tipo "Ã‰ryk" em vez de "Éryk")
+# FIX v4.1: força cpf/celular como str ANTES do pandas inferir float64,
+#           evitando corrupção de números longos
 # ============================================================
  
 # colunas que jamais devem ser lidas como número
@@ -110,14 +114,37 @@ def _dtype_map_for_phoneish(columns) -> dict:
         for col in columns
         if str(col).strip().lower() in _PHONEISH_UPLOAD_COLS
     }
- 
- 
+
+
+def _detect_encoding(raw_bytes: bytes) -> str:
+    """
+    Detecta o encoding real do arquivo usando chardet.
+    Retorna 'utf-8' como fallback se chardet não estiver disponível
+    ou não conseguir detectar com confiança.
+    """
+    try:
+        import chardet
+        detected = chardet.detect(raw_bytes)
+        encoding = detected.get("encoding") or "utf-8"
+        confidence = detected.get("confidence") or 0
+        # só usa o encoding detectado se a confiança for razoável
+        if confidence >= 0.7:
+            # normaliza alguns aliases comuns
+            encoding = encoding.lower()
+            if encoding in ("ascii",):
+                return "utf-8"  # ASCII é subconjunto de UTF-8
+            return encoding
+        return "utf-8"
+    except ImportError:
+        return "utf-8"
+
+
 def _read_upload_to_df(file_storage) -> pd.DataFrame:
     filename = (file_storage.filename or "").lower().strip()
     raw = file_storage.read()
  
     # ------------------------------------------------------------------
-    # XLSX
+    # XLSX — encoding não se aplica, openpyxl lida internamente
     # ------------------------------------------------------------------
     if filename.endswith(".xlsx") or filename.endswith(".xls"):
         # 1ª leitura: só cabeçalho para descobrir nomes das colunas
@@ -127,8 +154,10 @@ def _read_upload_to_df(file_storage) -> pd.DataFrame:
         return pd.read_excel(io.BytesIO(raw), dtype=dtype_map)
  
     # ------------------------------------------------------------------
-    # CSV — tenta separadores e encodings em cascata
+    # CSV — detecta encoding correto antes de tentar ler
     # ------------------------------------------------------------------
+    detected_enc = _detect_encoding(raw)
+
     def _read_csv(raw_bytes: bytes, sep: str, encoding: str) -> pd.DataFrame:
         # 1ª leitura: só cabeçalho
         preview = pd.read_csv(
@@ -139,9 +168,16 @@ def _read_upload_to_df(file_storage) -> pd.DataFrame:
         return pd.read_csv(
             io.BytesIO(raw_bytes), sep=sep, encoding=encoding, dtype=dtype_map
         )
- 
+
+    # tenta o encoding detectado primeiro, depois fallbacks em ordem segura
+    # utf-8-sig cobre arquivos CSV exportados pelo Excel (com BOM)
+    encodings_to_try = []
+    for enc in (detected_enc, "utf-8-sig", "utf-8", "latin-1"):
+        if enc not in encodings_to_try:
+            encodings_to_try.append(enc)
+
     for sep in (";", ","):
-        for enc in ("utf-8", "latin-1"):
+        for enc in encodings_to_try:
             try:
                 return _read_csv(raw, sep, enc)
             except Exception:
@@ -378,7 +414,7 @@ def create_app() -> Flask:
             if not (filename.endswith(".csv") or filename.endswith(".xlsx") or filename.endswith(".xls")):
                 return jsonify({"ok": False, "error": "Formato inválido. Envie CSV ou XLSX."}), 400
  
-            # lê df (cpf/celular já chegam como str, sem risco de float64)
+            # lê df (encoding detectado automaticamente, cpf/celular como str)
             df = _read_upload_to_df(f)
  
             # ✅ salva cópia SEMPRE em XLSX
@@ -424,4 +460,3 @@ if __name__ == "__main__":
     app = create_app()
     port = int(_env("PORT", "8080"))
     app.run(host="0.0.0.0", port=port, debug=True)
- 
