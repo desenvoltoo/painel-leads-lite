@@ -64,6 +64,20 @@ def _as_list(v: Any) -> List[str]:
     return [s]
 
 
+def _data_inscricao_order_clause(order_dir: str) -> str:
+    """
+    Ordena mantendo linhas sem data_inscricao no final.
+    - primeiro: quem tem data (NULL por último)
+    - depois: data mais recente/antiga conforme order_dir
+    - por fim: desempate determinístico por data_atualizacao
+    """
+    return f"""
+    CASE WHEN v.data_inscricao IS NULL THEN 1 ELSE 0 END ASC,
+    v.data_inscricao {order_dir},
+    v.data_atualizacao DESC
+    """
+
+
 # ============================================================
 # NORMALIZADORES
 # ============================================================
@@ -454,6 +468,7 @@ def query_leads(
 
     allowed_order = {
         "data_inscricao": "v.data_inscricao",
+        "data_inscricao_dt": "v.data_inscricao",
         "status": "v.status_inscricao",
         "curso": "v.curso",
         "modalidade": "v.modalidade",
@@ -481,7 +496,11 @@ def query_leads(
 
     params: List[Any] = []
     sql = _apply_filters(sql, filters, params)
-    sql += f"\n ORDER BY {order_expr} {order_dir} \n LIMIT @limit OFFSET @offset"
+    if order_by in ("data_inscricao", "data_inscricao_dt"):
+        order_clause = _data_inscricao_order_clause(order_dir)
+    else:
+        order_clause = f"{order_expr} {order_dir}"
+    sql += f"\n ORDER BY {order_clause} \n LIMIT @limit OFFSET @offset"
 
     params.append(bigquery.ScalarQueryParameter("limit", "INT64", limit))
     params.append(bigquery.ScalarQueryParameter("offset", "INT64", offset))
@@ -587,6 +606,7 @@ def export_leads_rows(
 
     allowed_order = {
         "data_inscricao": "v.data_inscricao",
+        "data_inscricao_dt": "v.data_inscricao",
         "status": "v.status_inscricao",
         "curso": "v.curso",
         "modalidade": "v.modalidade",
@@ -608,7 +628,11 @@ def export_leads_rows(
     params: List[Any] = []
     sql = _apply_filters(sql, filters, params)
 
-    sql += f"\n ORDER BY {order_expr} {order_dir} \n LIMIT @limit OFFSET @offset"
+    if order_by in ("data_inscricao", "data_inscricao_dt"):
+        order_clause = _data_inscricao_order_clause(order_dir)
+    else:
+        order_clause = f"{order_expr} {order_dir}"
+    sql += f"\n ORDER BY {order_clause} \n LIMIT @limit OFFSET @offset"
     params.append(bigquery.ScalarQueryParameter("limit", "INT64", limit))
     params.append(bigquery.ScalarQueryParameter("offset", "INT64", offset))
 
