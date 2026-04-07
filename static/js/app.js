@@ -418,7 +418,7 @@ async function doUpload() {
   }
 
   const file = fileInput.files[0];
-  setUploadStatus("Enviando e processando... (staging + procedure)", "ok");
+  setUploadStatus("Enviando e processando... (staging + execução da procedure)", "ok");
 
   try {
     const fd = new FormData();
