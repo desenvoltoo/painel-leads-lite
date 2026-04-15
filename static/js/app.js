@@ -162,7 +162,7 @@ function makeTomSelect(selector) {
   const pluginCheckbox = window.__TOMSELECT_PLUGINS__?.checkbox || "checkbox_options";
   const pluginRemove = window.__TOMSELECT_PLUGINS__?.remove_button || "remove_button";
 
-  return new TomSelect(selector, {
+  const tomSelect = new TomSelect(selector, {
     plugins: [pluginCheckbox, pluginRemove],
     maxItems: null,
     hideSelected: false,
@@ -183,6 +183,45 @@ function makeTomSelect(selector) {
     },
     onChange: () => loadLeadsAndKpisDebounced(),
   });
+
+  addSearchSelectButton(tomSelect);
+  return tomSelect;
+}
+
+function addSearchSelectButton(ts) {
+  if (!ts?.dropdown || !ts.dropdown_content) return;
+  if (ts.dropdown.querySelector(".ts-dropdown-toolbar")) return;
+
+  const toolbar = document.createElement("div");
+  toolbar.className = "ts-dropdown-toolbar";
+
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "ts-dropdown-toolbar-btn";
+  button.textContent = "Selecionar resultados da busca";
+
+  button.addEventListener("mousedown", (ev) => {
+    ev.preventDefault();
+    ev.stopPropagation();
+  });
+
+  button.addEventListener("click", (ev) => {
+    ev.preventDefault();
+    ev.stopPropagation();
+
+    const resultItems = ts.currentResults?.items || [];
+    const valuesToSelect = resultItems
+      .map((item) => item.id)
+      .filter((value) => !ts.items.includes(value));
+
+    if (valuesToSelect.length === 0) return;
+    ts.addItems(valuesToSelect);
+    ts.refreshOptions(false);
+    loadLeadsAndKpisDebounced();
+  });
+
+  toolbar.appendChild(button);
+  ts.dropdown.insertBefore(toolbar, ts.dropdown_content);
 }
 
 function initMultiSelects() {
