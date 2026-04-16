@@ -195,17 +195,36 @@ function addSearchSelectButton(ts) {
   const toolbar = document.createElement("div");
   toolbar.className = "ts-dropdown-toolbar";
 
-  const button = document.createElement("button");
-  button.type = "button";
-  button.className = "ts-dropdown-toolbar-btn";
-  button.textContent = "Selecionar resultados da busca";
+  const deselectButton = document.createElement("button");
+  deselectButton.type = "button";
+  deselectButton.className = "ts-dropdown-toolbar-btn ts-dropdown-toolbar-btn-secondary";
+  deselectButton.textContent = "Deselecionar selecionados";
 
-  button.addEventListener("mousedown", (ev) => {
+  const selectButton = document.createElement("button");
+  selectButton.type = "button";
+  selectButton.className = "ts-dropdown-toolbar-btn";
+  selectButton.textContent = "Selecionar resultados da busca";
+
+  deselectButton.addEventListener("mousedown", (ev) => {
     ev.preventDefault();
     ev.stopPropagation();
   });
 
-  button.addEventListener("click", (ev) => {
+  selectButton.addEventListener("mousedown", (ev) => {
+    ev.preventDefault();
+    ev.stopPropagation();
+  });
+
+  deselectButton.addEventListener("click", (ev) => {
+    ev.preventDefault();
+    ev.stopPropagation();
+    if (!ts.items.length) return;
+    ts.clear(true);
+    ts.refreshOptions(false);
+    loadLeadsAndKpisDebounced();
+  });
+
+  selectButton.addEventListener("click", (ev) => {
     ev.preventDefault();
     ev.stopPropagation();
 
@@ -220,7 +239,8 @@ function addSearchSelectButton(ts) {
     loadLeadsAndKpisDebounced();
   });
 
-  toolbar.appendChild(button);
+  toolbar.appendChild(deselectButton);
+  toolbar.appendChild(selectButton);
   ts.dropdown.insertBefore(toolbar, ts.dropdown_content);
 }
 
