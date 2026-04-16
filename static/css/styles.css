@@ -353,6 +353,12 @@ tbody tr:hover { background: rgba(122, 125, 255, 0.1); }
   background: rgba(6, 12, 28, 0.45);
 }
 
+.ts-dropdown-toolbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
 .ts-dropdown-toolbar-btn {
   border: 1px solid rgba(151, 180, 255, 0.45);
   border-radius: 999px;
@@ -367,6 +373,10 @@ tbody tr:hover { background: rgba(122, 125, 255, 0.1); }
 .ts-dropdown-toolbar-btn:hover {
   border-color: rgba(151, 180, 255, 0.75);
   background: rgba(122, 125, 255, 0.32);
+}
+
+.ts-dropdown-toolbar-btn-clear {
+  background: rgba(255, 255, 255, 0.08);
 }
 
 .ts-opt { display: flex; align-items: center; gap: 8px; }

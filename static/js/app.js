@@ -195,12 +195,24 @@ function addSearchSelectButton(ts) {
   const toolbar = document.createElement("div");
   toolbar.className = "ts-dropdown-toolbar";
 
+  const actions = document.createElement("div");
+  actions.className = "ts-dropdown-toolbar-actions";
+
   const button = document.createElement("button");
   button.type = "button";
   button.className = "ts-dropdown-toolbar-btn";
   button.textContent = "Selecionar resultados da busca";
 
+  const clearButton = document.createElement("button");
+  clearButton.type = "button";
+  clearButton.className = "ts-dropdown-toolbar-btn ts-dropdown-toolbar-btn-clear";
+  clearButton.textContent = "Limpar";
+
   button.addEventListener("mousedown", (ev) => {
+    ev.preventDefault();
+    ev.stopPropagation();
+  });
+  clearButton.addEventListener("mousedown", (ev) => {
     ev.preventDefault();
     ev.stopPropagation();
   });
@@ -220,7 +232,17 @@ function addSearchSelectButton(ts) {
     loadLeadsAndKpisDebounced();
   });
 
-  toolbar.appendChild(button);
+  clearButton.addEventListener("click", (ev) => {
+    ev.preventDefault();
+    ev.stopPropagation();
+    ts.clear(true);
+    ts.refreshOptions(false);
+    loadLeadsAndKpisDebounced();
+  });
+
+  actions.appendChild(button);
+  actions.appendChild(clearButton);
+  toolbar.appendChild(actions);
   ts.dropdown.insertBefore(toolbar, ts.dropdown_content);
 }
 
