@@ -537,7 +537,7 @@ def _distinct_values_from_view(col: str, alias: str) -> List[str]:
 
 def query_options() -> Dict[str, List[str]]:
     return {
-        "status": _distinct_values_from_view("status_inscricao", "status"),
+        "status": _distinct_values_from_view("status", "status"),
         "cursos": _distinct_values_from_view("curso", "curso"),
         "modalidades": _distinct_values_from_view("modalidade", "modalidade"),
         "turnos": _distinct_values_from_view("turno", "turno"),
