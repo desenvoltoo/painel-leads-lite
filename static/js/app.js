@@ -24,6 +24,8 @@ let tsConsultorDisparo, tsConsultorComercial, tsCanal, tsCampanha;
 let tsTipoDisparo, tsTipoNegocio;
 
 const TABLE_COLS = 13;
+const EMPTY_FILTER_TOKEN = "__EMPTY__";
+const EMPTY_FILTER_LABEL = "(Sem preenchimento)";
 
 /* =========================
    Helpers UI
@@ -269,8 +271,10 @@ function fillSelect(ts, values) {
   if (!ts) return;
   ts.clearOptions();
   ts.clear(true);
+  ts.addOption({ value: EMPTY_FILTER_TOKEN, text: EMPTY_FILTER_LABEL });
   (values || []).forEach((v) => {
     const s = String(v);
+    if (!s || s === EMPTY_FILTER_TOKEN) return;
     ts.addOption({ value: s, text: s });
   });
   ts.refreshOptions(false);

@@ -31,6 +31,7 @@ BQ_VIEW_LEADS = "vw_leads_painel_lite"
 DEFAULT_LIMIT = int(os.getenv("BQ_DEFAULT_LIMIT", "200"))
 MAX_LIMIT = int(os.getenv("BQ_MAX_LIMIT", "2000"))
 EXPORT_MAX_ROWS = int(os.getenv("BQ_EXPORT_MAX_ROWS", "50000"))
+EMPTY_FILTER_TOKEN = "__EMPTY__"
 
 # colunas que não devem sofrer comportamento numérico
 PHONEISH_COLUMNS = {"cpf", "celular"}
@@ -364,53 +365,51 @@ def _apply_filters(sql: str, filters: Dict[str, Any], params: List[Any]) -> str:
     consultores_disp = _as_list(filters.get("consultor_disparo")) or _as_list(filters.get("consultor"))
     consultores_com = _as_list(filters.get("consultor_comercial"))
 
-    if cursos:
-        sql += " AND v.curso IN UNNEST(@cursos)"
-        params.append(bigquery.ArrayQueryParameter("cursos", "STRING", cursos))
+    def _add_string_filter(column: str, values: List[str], param_name: str):
+        nonlocal sql
+        if not values:
+            return
 
-    if polos:
-        sql += " AND v.polo IN UNNEST(@polos)"
-        params.append(bigquery.ArrayQueryParameter("polos", "STRING", polos))
+        include_empty = EMPTY_FILTER_TOKEN in values
+        normal_values = [v for v in values if v != EMPTY_FILTER_TOKEN]
 
-    if modalidades:
-        sql += " AND v.modalidade IN UNNEST(@modalidades)"
-        params.append(bigquery.ArrayQueryParameter("modalidades", "STRING", modalidades))
+        clauses: List[str] = []
+        if normal_values:
+            clauses.append(f"{column} IN UNNEST(@{param_name})")
+            params.append(bigquery.ArrayQueryParameter(param_name, "STRING", normal_values))
 
-    if turnos:
-        sql += " AND v.turno IN UNNEST(@turnos)"
-        params.append(bigquery.ArrayQueryParameter("turnos", "STRING", turnos))
+        if include_empty:
+            clauses.append(f"({column} IS NULL OR TRIM(CAST({column} AS STRING)) = '')")
 
-    if canais:
-        sql += " AND v.canal IN UNNEST(@canais)"
-        params.append(bigquery.ArrayQueryParameter("canais", "STRING", canais))
+        if clauses:
+            sql += " AND (" + " OR ".join(clauses) + ")"
 
-    if campanhas:
-        sql += " AND v.campanha IN UNNEST(@campanhas)"
-        params.append(bigquery.ArrayQueryParameter("campanhas", "STRING", campanhas))
-
-    if origens:
-        sql += " AND v.origem IN UNNEST(@origens)"
-        params.append(bigquery.ArrayQueryParameter("origens", "STRING", origens))
-
-    if tipos_negocio:
-        sql += " AND v.tipo_negocio IN UNNEST(@tipos_negocio)"
-        params.append(bigquery.ArrayQueryParameter("tipos_negocio", "STRING", tipos_negocio))
+    _add_string_filter("v.curso", cursos, "cursos")
+    _add_string_filter("v.polo", polos, "polos")
+    _add_string_filter("v.modalidade", modalidades, "modalidades")
+    _add_string_filter("v.turno", turnos, "turnos")
+    _add_string_filter("v.canal", canais, "canais")
+    _add_string_filter("v.campanha", campanhas, "campanhas")
+    _add_string_filter("v.origem", origens, "origens")
+    _add_string_filter("v.tipo_negocio", tipos_negocio, "tipos_negocio")
+    _add_string_filter("v.consultor_disparo", consultores_disp, "consultores_disp")
+    _add_string_filter("v.consultor_comercial", consultores_com, "consultores_com")
+    _add_string_filter("v.tipo_disparo", tipos_disparo, "tipos_disparo")
 
     if status_list:
-        sql += " AND (v.status_inscricao IN UNNEST(@status_list) OR v.status IN UNNEST(@status_list))"
-        params.append(bigquery.ArrayQueryParameter("status_list", "STRING", status_list))
+        include_empty = EMPTY_FILTER_TOKEN in status_list
+        normal_status = [v for v in status_list if v != EMPTY_FILTER_TOKEN]
+        clauses: List[str] = []
 
-    if consultores_disp:
-        sql += " AND v.consultor_disparo IN UNNEST(@consultores_disp)"
-        params.append(bigquery.ArrayQueryParameter("consultores_disp", "STRING", consultores_disp))
+        if normal_status:
+            clauses.append("(v.status_inscricao IN UNNEST(@status_list) OR v.status IN UNNEST(@status_list))")
+            params.append(bigquery.ArrayQueryParameter("status_list", "STRING", normal_status))
 
-    if consultores_com:
-        sql += " AND v.consultor_comercial IN UNNEST(@consultores_com)"
-        params.append(bigquery.ArrayQueryParameter("consultores_com", "STRING", consultores_com))
+        if include_empty:
+            clauses.append("(v.status IS NULL OR TRIM(CAST(v.status AS STRING)) = '')")
 
-    if tipos_disparo:
-        sql += " AND v.tipo_disparo IN UNNEST(@tipos_disparo)"
-        params.append(bigquery.ArrayQueryParameter("tipos_disparo", "STRING", tipos_disparo))
+        if clauses:
+            sql += " AND (" + " OR ".join(clauses) + ")"
 
     if filters.get("cpf"):
         sql += " AND v.cpf = @cpf"
