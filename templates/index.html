@@ -79,6 +79,26 @@
         <p>Seleção múltipla com busca. Filtros já alinhados ao novo Modelo Estrela.</p>
       </div>
 
+      <div class="filters filters-6 saved-filters-bar">
+        <div class="field col-2">
+          <label>Visualização Salva</label>
+          <select id="savedFilterSelect">
+            <option value="">Selecione uma visualização...</option>
+          </select>
+        </div>
+
+        <div class="field col-2">
+          <label>Nome da visualização</label>
+          <input id="savedFilterName" placeholder="Ex.: Leads sem status" />
+        </div>
+
+        <div class="field field-actions col-2">
+          <button id="btnSaveFilterView" class="btn">Salvar Visualização</button>
+          <button id="btnApplyFilterView" class="btn btn-ghost">Carregar Salva</button>
+          <button id="btnDeleteFilterView" class="btn btn-danger">Excluir Salva</button>
+        </div>
+      </div>
+
       <!-- Linha 1 -->
       <div class="filters filters-6">
         <div class="field col-2">

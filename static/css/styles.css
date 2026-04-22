@@ -200,6 +200,10 @@ small,
   flex-wrap: wrap;
 }
 
+.saved-filters-bar {
+  margin-bottom: 12px;
+}
+
 .btn {
   border: 1px solid var(--border);
   border-radius: 10px;
