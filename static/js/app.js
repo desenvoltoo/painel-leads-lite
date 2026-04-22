@@ -24,6 +24,9 @@ let tsConsultorDisparo, tsConsultorComercial, tsCanal, tsCampanha;
 let tsTipoDisparo, tsTipoNegocio;
 
 const TABLE_COLS = 13;
+const EMPTY_FILTER_TOKEN = "__EMPTY__";
+const EMPTY_FILTER_LABEL = "(Sem preenchimento)";
+const SAVED_FILTERS_STORAGE_KEY = "painel_leads_saved_filters_v1";
 
 /* =========================
    Helpers UI
@@ -269,8 +272,10 @@ function fillSelect(ts, values) {
   if (!ts) return;
   ts.clearOptions();
   ts.clear(true);
+  ts.addOption({ value: EMPTY_FILTER_TOKEN, text: EMPTY_FILTER_LABEL });
   (values || []).forEach((v) => {
     const s = String(v);
+    if (!s || s === EMPTY_FILTER_TOKEN) return;
     ts.addOption({ value: s, text: s });
   });
   ts.refreshOptions(false);
@@ -311,6 +316,22 @@ function getMulti(ts) {
   if (Array.isArray(v)) return v;
   if (!v) return [];
   return String(v).split(",").map((s) => s.trim()).filter(Boolean);
+}
+
+function normalizeArrayValues(v) {
+  if (!Array.isArray(v)) return [];
+  return v.map((item) => String(item || "").trim()).filter(Boolean);
+}
+
+function setTomValues(ts, values) {
+  if (!ts) return;
+  const list = normalizeArrayValues(values);
+  list.forEach((v) => {
+    if (!ts.options[v]) {
+      ts.addOption({ value: v, text: v });
+    }
+  });
+  ts.setValue(list, true);
 }
 
 function parseBuscaRapida(txt) {
@@ -377,6 +398,166 @@ function buildLeadsParams() {
     limit,
     ...busca,
   };
+}
+
+function getCurrentFilterState() {
+  return {
+    status: getMulti(tsStatus),
+    curso: getMulti(tsCurso),
+    modalidade: getMulti(tsModalidade),
+    turno: getMulti(tsTurno),
+    polo: getMulti(tsPolo),
+    origem: getMulti(tsOrigem),
+    consultor_disparo: getMulti(tsConsultorDisparo),
+    consultor_comercial: getMulti(tsConsultorComercial),
+    canal: getMulti(tsCanal),
+    campanha: getMulti(tsCampanha),
+    tipo_disparo: getMulti(tsTipoDisparo),
+    tipo_negocio: getMulti(tsTipoNegocio),
+    data_ini: safeDate($("#fIni")?.value || ""),
+    data_fim: safeDate($("#fFim")?.value || ""),
+    matriculado: ($("#fMatriculado")?.value || "").trim(),
+    limit: Number($("#fLimit")?.value || 500) || 500,
+    busca_rapida: ($("#fBusca")?.value || "").trim(),
+  };
+}
+
+function applyFilterState(state = {}) {
+  setTomValues(tsStatus, state.status);
+  setTomValues(tsCurso, state.curso);
+  setTomValues(tsModalidade, state.modalidade);
+  setTomValues(tsTurno, state.turno);
+  setTomValues(tsPolo, state.polo);
+  setTomValues(tsOrigem, state.origem);
+  setTomValues(tsConsultorDisparo, state.consultor_disparo);
+  setTomValues(tsConsultorComercial, state.consultor_comercial);
+  setTomValues(tsCanal, state.canal);
+  setTomValues(tsCampanha, state.campanha);
+  setTomValues(tsTipoDisparo, state.tipo_disparo);
+  setTomValues(tsTipoNegocio, state.tipo_negocio);
+
+  if ($("#fIni")) $("#fIni").value = state.data_ini || "";
+  if ($("#fFim")) $("#fFim").value = state.data_fim || "";
+  if ($("#fMatriculado")) $("#fMatriculado").value = state.matriculado || "";
+  if ($("#fLimit")) $("#fLimit").value = String(state.limit || 500);
+  if ($("#fBusca")) $("#fBusca").value = state.busca_rapida || "";
+}
+
+function readSavedFilters() {
+  try {
+    const raw = window.localStorage.getItem(SAVED_FILTERS_STORAGE_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter((item) => item && typeof item === "object" && item.id && item.name && item.state);
+  } catch {
+    return [];
+  }
+}
+
+function writeSavedFilters(items) {
+  window.localStorage.setItem(SAVED_FILTERS_STORAGE_KEY, JSON.stringify(items || []));
+}
+
+function refreshSavedFiltersSelect(selectedId = "") {
+  const select = $("#savedFilterSelect");
+  if (!select) return;
+  const saved = readSavedFilters();
+
+  select.innerHTML = `<option value="">Selecione uma visualização...</option>`;
+  saved.forEach((item) => {
+    const option = document.createElement("option");
+    option.value = item.id;
+    option.textContent = item.name;
+    select.appendChild(option);
+  });
+
+  if (selectedId) {
+    select.value = selectedId;
+  }
+}
+
+function saveCurrentFilterView() {
+  const name = ($("#savedFilterName")?.value || "").trim();
+  if (!name) {
+    setStatus("Informe um nome para salvar a visualização.", "err");
+    return;
+  }
+
+  const state = getCurrentFilterState();
+  const saved = readSavedFilters();
+  const normalizedName = name.toLowerCase();
+  const existing = saved.find((item) => String(item.name).toLowerCase() === normalizedName);
+
+  if (existing) {
+    const shouldOverwrite = window.confirm(`Já existe uma visualização chamada "${name}". Deseja sobrescrever?`);
+    if (!shouldOverwrite) return;
+    existing.state = state;
+    existing.updated_at = new Date().toISOString();
+    writeSavedFilters(saved);
+    refreshSavedFiltersSelect(existing.id);
+    setStatus(`Visualização "${name}" atualizada com sucesso.`, "ok");
+    return;
+  }
+
+  const newItem = {
+    id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    name,
+    state,
+    created_at: new Date().toISOString(),
+  };
+  saved.unshift(newItem);
+  writeSavedFilters(saved);
+  refreshSavedFiltersSelect(newItem.id);
+  setStatus(`Visualização "${name}" salva com sucesso.`, "ok");
+}
+
+function applySavedFilterView() {
+  const select = $("#savedFilterSelect");
+  const id = (select?.value || "").trim();
+  if (!id) {
+    setStatus("Selecione uma visualização salva para carregar.", "err");
+    return;
+  }
+
+  const saved = readSavedFilters();
+  const selected = saved.find((item) => item.id === id);
+  if (!selected) {
+    setStatus("Visualização não encontrada.", "err");
+    refreshSavedFiltersSelect();
+    return;
+  }
+
+  applyFilterState(selected.state || {});
+  if ($("#savedFilterName")) $("#savedFilterName").value = selected.name || "";
+  loadLeadsAndKpis();
+  setStatus(`Visualização "${selected.name}" carregada.`, "ok");
+}
+
+function deleteSavedFilterView() {
+  const select = $("#savedFilterSelect");
+  const id = (select?.value || "").trim();
+  if (!id) {
+    setStatus("Selecione uma visualização salva para excluir.", "err");
+    return;
+  }
+
+  const saved = readSavedFilters();
+  const selected = saved.find((item) => item.id === id);
+  if (!selected) {
+    setStatus("Visualização não encontrada.", "err");
+    refreshSavedFiltersSelect();
+    return;
+  }
+
+  const shouldDelete = window.confirm(`Excluir a visualização "${selected.name}"?`);
+  if (!shouldDelete) return;
+
+  const filtered = saved.filter((item) => item.id !== id);
+  writeSavedFilters(filtered);
+  refreshSavedFiltersSelect();
+  if ($("#savedFilterName")) $("#savedFilterName").value = "";
+  setStatus(`Visualização "${selected.name}" excluída.`, "ok");
 }
 
 async function loadLeadsAndKpis() {
@@ -556,7 +737,19 @@ function clearFilters() {
 document.addEventListener("DOMContentLoaded", async () => {
   initMultiSelects();
 
+  refreshSavedFiltersSelect();
+
   $("#btnApply")?.addEventListener("click", loadLeadsAndKpis);
+  $("#btnSaveFilterView")?.addEventListener("click", saveCurrentFilterView);
+  $("#btnApplyFilterView")?.addEventListener("click", applySavedFilterView);
+  $("#btnDeleteFilterView")?.addEventListener("click", deleteSavedFilterView);
+  $("#savedFilterSelect")?.addEventListener("change", () => {
+    const select = $("#savedFilterSelect");
+    const selectedId = (select?.value || "").trim();
+    if (!selectedId) return;
+    const selected = readSavedFilters().find((item) => item.id === selectedId);
+    if ($("#savedFilterName")) $("#savedFilterName").value = selected?.name || "";
+  });
   $("#btnReload")?.addEventListener("click", async () => {
     await loadOptions();
     await loadLeadsAndKpis();
