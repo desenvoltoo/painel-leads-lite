@@ -492,6 +492,17 @@ def create_app() -> Flask:
             )
         except Exception as e:
             return jsonify(_error_payload(e, "Erro ao buscar leads no BigQuery.")), 500
+
+    @app.post("/api/leads/search")
+    def api_leads_search():
+        try:
+            payload = request.get_json(silent=True) or {}
+            filters, meta = _get_filters_from_payload(payload)
+            rows = _query_leads_in_batches(filters=filters, meta=meta, batch_size=500)
+            total = query_leads_count(filters=filters)
+            return jsonify({"ok": True, "total": total, "data": rows})
+        except Exception as e:
+            return jsonify(_error_payload(e, "Erro ao buscar leads no BigQuery.")), 500
  
     @app.get("/api/kpis")
     def api_kpis():
@@ -538,6 +549,29 @@ def create_app() -> Flask:
                 top_status = {"status": best, "cnt": status_counts[best]}
 
             return jsonify({"ok": True, "total": total, "top_status": top_status, "partial": True if warnings else False, "warnings": warnings})
+        except Exception as e:
+            return jsonify(_error_payload(e, "Erro ao calcular KPIs.")), 500
+
+    @app.post("/api/kpis/search")
+    def api_kpis_search():
+        try:
+            payload = request.get_json(silent=True) or {}
+            filters, meta = _get_filters_from_payload(payload)
+            meta["limit"] = min(int(meta["limit"]), 5000)
+            rows = _query_leads_in_batches(filters=filters, meta=meta, batch_size=500)
+
+            total = len(rows)
+            status_counts: dict = {}
+            for r in rows:
+                st = r.get("status_inscricao") or r.get("status") or "LEAD"
+                status_counts[st] = status_counts.get(st, 0) + 1
+
+            top_status = None
+            if status_counts:
+                best = max(status_counts, key=status_counts.get)
+                top_status = {"status": best, "cnt": status_counts[best]}
+
+            return jsonify({"ok": True, "total": total, "top_status": top_status})
         except Exception as e:
             return jsonify(_error_payload(e, "Erro ao calcular KPIs.")), 500
  
