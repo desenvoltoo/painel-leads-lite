@@ -3,9 +3,11 @@ from __future__ import annotations
 
 import os
 import logging
+from time import perf_counter
+from concurrent.futures import TimeoutError as FuturesTimeoutError
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 from google.cloud import bigquery
 from google.api_core.exceptions import GoogleAPICallError, BadRequest, Forbidden, NotFound
@@ -29,8 +31,9 @@ BQ_PROCEDURE = os.getenv("BQ_PROCEDURE", "sp_import_star_from_site")
 BQ_VIEW_LEADS = "vw_leads_painel_lite"
 
 DEFAULT_LIMIT = int(os.getenv("BQ_DEFAULT_LIMIT", "200"))
-MAX_LIMIT = int(os.getenv("BQ_MAX_LIMIT", "2000"))
+MAX_LIMIT = int(os.getenv("BQ_MAX_LIMIT", "200000"))  # <= 0 para sem limite
 EXPORT_MAX_ROWS = int(os.getenv("BQ_EXPORT_MAX_ROWS", "50000"))
+QUERY_TIMEOUT_SECONDS = int(os.getenv("BQ_QUERY_TIMEOUT_SECONDS", "180"))
 EMPTY_FILTER_TOKEN = "__EMPTY__"
 
 # colunas que não devem sofrer comportamento numérico
@@ -455,10 +458,33 @@ def query_leads(
     order_by: str = "data_inscricao",
     order_dir: str = "DESC",
 ) -> List[Dict[str, Any]]:
-    client = get_bq_client()
-    filters = filters or {}
+    rows_iter = query_leads_iter(
+        filters=filters,
+        limit=limit,
+        offset=offset,
+        order_by=order_by,
+        order_dir=order_dir,
+    )
+    return list(rows_iter)
 
-    limit = max(1, min(int(limit), MAX_LIMIT))
+
+def _build_leads_query(
+    filters: Optional[Dict[str, Any]] = None,
+    limit: int = DEFAULT_LIMIT,
+    offset: int = 0,
+    order_by: str = "data_inscricao",
+    order_dir: str = "DESC",
+) -> Tuple[str, List[Any], int]:
+    filters = filters or {}
+    requested_limit = max(1, int(limit))
+    effective_limit = requested_limit
+    if MAX_LIMIT > 0 and requested_limit > MAX_LIMIT:
+        logger.warning(
+            "query_leads com limit acima do recomendado requested=%s recommended_max=%s (sem clamp aplicado)",
+            requested_limit,
+            MAX_LIMIT,
+        )
+
     offset = max(0, int(offset))
     order_dir = "ASC" if str(order_dir).upper() == "ASC" else "DESC"
 
@@ -501,11 +527,49 @@ def query_leads(
         order_clause = f"{order_expr} {order_dir}"
     sql += f"\n ORDER BY {order_clause} \n LIMIT @limit OFFSET @offset"
 
-    params.append(bigquery.ScalarQueryParameter("limit", "INT64", limit))
+    params.append(bigquery.ScalarQueryParameter("limit", "INT64", effective_limit))
     params.append(bigquery.ScalarQueryParameter("offset", "INT64", offset))
+    return sql, params, effective_limit
 
-    rows = client.query(sql, job_config=bigquery.QueryJobConfig(query_parameters=params)).result()
-    return [dict(r) for r in rows]
+
+def query_leads_iter(
+    filters: Optional[Dict[str, Any]] = None,
+    limit: int = DEFAULT_LIMIT,
+    offset: int = 0,
+    order_by: str = "data_inscricao",
+    order_dir: str = "DESC",
+) -> Iterator[Dict[str, Any]]:
+    client = get_bq_client()
+    sql, params, effective_limit = _build_leads_query(
+        filters=filters,
+        limit=limit,
+        offset=offset,
+        order_by=order_by,
+        order_dir=order_dir,
+    )
+    t0 = perf_counter()
+    job = client.query(sql, job_config=bigquery.QueryJobConfig(query_parameters=params))
+    try:
+        rows = job.result(timeout=QUERY_TIMEOUT_SECONDS)
+    except FuturesTimeoutError as e:
+        logger.exception(
+            "BQ query_leads timeout job_id=%s limit=%s timeout=%ss",
+            getattr(job, "job_id", None),
+            effective_limit,
+            QUERY_TIMEOUT_SECONDS,
+        )
+        job.cancel()
+        raise TimeoutError(
+            f"Consulta excedeu timeout de {QUERY_TIMEOUT_SECONDS}s para limit={effective_limit}"
+        ) from e
+    logger.info(
+        "BQ query_leads iniciado job_id=%s limit=%s elapsed=%.2fs",
+        getattr(job, "job_id", None),
+        effective_limit,
+        perf_counter() - t0,
+    )
+    for r in rows:
+        yield dict(r)
 
 
 def query_leads_count(filters: Optional[Dict[str, Any]] = None) -> int:
