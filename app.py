@@ -8,16 +8,20 @@ import os
 import traceback
 import io
 import uuid
+import json
+import logging
+from time import perf_counter
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, Any, Tuple
  
 import pandas as pd
-from flask import Flask, render_template, request, jsonify, send_file, redirect, url_for, make_response, g, session
+from flask import Flask, render_template, request, jsonify, send_file, redirect, url_for, make_response, g, session, Response, stream_with_context
 from werkzeug.security import check_password_hash
  
 from services.bigquery import (
     query_leads,
+    query_leads_iter,
     query_leads_count,
     query_options,
     process_upload_dataframe,   # agora retorna job_id (async)
@@ -26,6 +30,8 @@ from services.bigquery import (
     df_to_xlsx,                 # salva cópia do upload
     rows_to_xlsx,               # gera export XLSX no servidor
 )
+
+logger = logging.getLogger(__name__)
  
 # ============================================================
 # HELPERS
@@ -70,8 +76,9 @@ def _get_filters_from_request() -> Tuple[Dict[str, Any], Dict[str, Any]]:
     }
     filters = {k: v for k, v in filters.items() if v is not None and str(v).strip() != ""}
  
+    requested_limit = int(request.args.get("limit") or 500)
     meta = {
-        "limit": int(request.args.get("limit") or 500),
+        "limit": max(1, requested_limit),
         "offset": int(request.args.get("offset") or 0),
         "order_by": n(request.args.get("order_by")) or "data_inscricao",
         "order_dir": n(request.args.get("order_dir")) or "DESC",
@@ -136,7 +143,7 @@ def _get_filters_from_payload(payload: Dict[str, Any]) -> Tuple[Dict[str, Any], 
     return filters, meta
 
 
-def _query_leads_in_batches(filters: Dict[str, Any], meta: Dict[str, Any], batch_size: int = 500):
+def _query_leads_in_batches(filters: Dict[str, Any], meta: Dict[str, Any], batch_size: int | None = None):
     limit = max(1, int(meta.get("limit") or 500))
     offset = max(0, int(meta.get("offset") or 0))
     order_by = meta.get("order_by") or "data_inscricao"
@@ -146,8 +153,10 @@ def _query_leads_in_batches(filters: Dict[str, Any], meta: Dict[str, Any], batch
     current_offset = offset
     all_rows = []
 
+    effective_batch_size = batch_size if batch_size and batch_size > 0 else limit
+
     while remaining > 0:
-        chunk_size = min(batch_size, remaining)
+        chunk_size = min(effective_batch_size, remaining)
         chunk_rows = query_leads(
             filters=filters,
             limit=chunk_size,
@@ -165,6 +174,43 @@ def _query_leads_in_batches(filters: Dict[str, Any], meta: Dict[str, Any], batch
             break
 
     return all_rows
+
+
+def _stream_leads_json(filters: Dict[str, Any], meta: Dict[str, Any], total: int):
+    limit = max(1, int(meta.get("limit") or 500))
+    offset = max(0, int(meta.get("offset") or 0))
+    order_by = meta.get("order_by") or "data_inscricao"
+    order_dir = meta.get("order_dir") or "DESC"
+
+    @stream_with_context
+    def generate():
+        started = perf_counter()
+        yield f'{{"ok":true,"total":{int(total)},"data":['
+        first = True
+        emitted = 0
+        for row in query_leads_iter(
+            filters=filters,
+            limit=limit,
+            offset=offset,
+            order_by=order_by,
+            order_dir=order_dir,
+        ):
+            if not first:
+                yield ","
+            else:
+                first = False
+            yield json.dumps(row, default=str, ensure_ascii=False)
+            emitted += 1
+        yield "]}"
+        logger.info(
+            "stream leads response completed total_sent=%s elapsed=%.2fs limit=%s offset=%s",
+            emitted,
+            perf_counter() - started,
+            limit,
+            offset,
+        )
+
+    return Response(generate(), mimetype="application/json")
  
 def _error_payload(e: Exception, public_msg: str):
     return {
@@ -400,23 +446,53 @@ def create_app() -> Flask:
     @app.get("/api/leads")
     def api_leads():
         try:
+            started = perf_counter()
             filters, meta = _get_filters_from_request()
- 
-            rows = _query_leads_in_batches(filters=filters, meta=meta, batch_size=500)
             total = query_leads_count(filters=filters)
- 
+            stream_mode = str(request.args.get("stream") or "").lower() in ("1", "true", "yes", "sim")
+            if stream_mode:
+                logger.info("api_leads stream_mode=on limit=%s offset=%s", meta.get("limit"), meta.get("offset"))
+                return _stream_leads_json(filters=filters, meta=meta, total=total)
+
+            rows = _query_leads_in_batches(filters=filters, meta=meta, batch_size=int(meta.get("limit") or 0))
+            logger.info(
+                "api_leads done rows=%s total=%s elapsed=%.2fs limit=%s offset=%s",
+                len(rows),
+                total,
+                perf_counter() - started,
+                meta.get("limit"),
+                meta.get("offset"),
+            )
             return jsonify({"ok": True, "total": total, "data": rows})
+        except TimeoutError as e:
+            return jsonify(_error_payload(e, "Timeout ao buscar leads. Tente reduzir filtros/volume ou usar stream=true.")), 504
         except Exception as e:
             return jsonify(_error_payload(e, "Erro ao buscar leads no BigQuery.")), 500
 
     @app.post("/api/leads/search")
     def api_leads_search():
         try:
+            started = perf_counter()
             payload = request.get_json(silent=True) or {}
             filters, meta = _get_filters_from_payload(payload)
-            rows = _query_leads_in_batches(filters=filters, meta=meta, batch_size=500)
             total = query_leads_count(filters=filters)
+            stream_mode = str(payload.get("stream") or "").lower() in ("1", "true", "yes", "sim")
+            if stream_mode:
+                logger.info("api_leads_search stream_mode=on limit=%s offset=%s", meta.get("limit"), meta.get("offset"))
+                return _stream_leads_json(filters=filters, meta=meta, total=total)
+
+            rows = _query_leads_in_batches(filters=filters, meta=meta, batch_size=int(meta.get("limit") or 0))
+            logger.info(
+                "api_leads_search done rows=%s total=%s elapsed=%.2fs limit=%s offset=%s",
+                len(rows),
+                total,
+                perf_counter() - started,
+                meta.get("limit"),
+                meta.get("offset"),
+            )
             return jsonify({"ok": True, "total": total, "data": rows})
+        except TimeoutError as e:
+            return jsonify(_error_payload(e, "Timeout ao buscar leads. Tente reduzir filtros/volume ou usar stream=true.")), 504
         except Exception as e:
             return jsonify(_error_payload(e, "Erro ao buscar leads no BigQuery.")), 500
  
@@ -428,7 +504,7 @@ def create_app() -> Flask:
         try:
             filters, meta = _get_filters_from_request()
             meta["limit"] = min(int(meta["limit"]), 5000)
-            rows = _query_leads_in_batches(filters=filters, meta=meta, batch_size=500)
+            rows = _query_leads_in_batches(filters=filters, meta=meta, batch_size=int(meta["limit"]))
  
             total = len(rows)
             status_counts: dict = {}
@@ -451,7 +527,7 @@ def create_app() -> Flask:
             payload = request.get_json(silent=True) or {}
             filters, meta = _get_filters_from_payload(payload)
             meta["limit"] = min(int(meta["limit"]), 5000)
-            rows = _query_leads_in_batches(filters=filters, meta=meta, batch_size=500)
+            rows = _query_leads_in_batches(filters=filters, meta=meta, batch_size=int(meta["limit"]))
 
             total = len(rows)
             status_counts: dict = {}
