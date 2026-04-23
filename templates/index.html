@@ -171,12 +171,17 @@
           <input id="fLimit" type="number" min="50" step="50" value="500" />
         </div>
 
-        <div class="field field-actions col-2">
+        <div class="field field-actions col-3">
           <button id="btnApply" class="btn btn-primary">Aplicar Filtros</button>
           <button id="btnClear" class="btn btn-ghost">Limpar Tudo</button>
+          <select id="savedFilterSelect">
+            <option value="">Filtros salvos...</option>
+          </select>
+          <button id="btnSaveFilterView" class="btn">Salvar Filtro</button>
+          <button id="btnDeleteFilterView" class="btn btn-danger">Excluir Filtro</button>
         </div>
 
-        <div class="field col-6">
+        <div class="field col-5">
           <label>Busca rápida (Nome / CPF / Celular / Email)</label>
           <input id="fBusca" placeholder="Ex.: Maria / 12345678900 / 11999999999 / email@..." />
           <small class="muted">O painel detecta automaticamente o tipo de busca e envia os parâmetros corretos.</small>
