@@ -136,55 +136,6 @@ def _get_filters_from_payload(payload: Dict[str, Any]) -> Tuple[Dict[str, Any], 
     return filters, meta
 
 
-def _query_leads_chunk_with_fallback(
-    filters: Dict[str, Any],
-    offset: int,
-    limit: int,
-    order_by: str,
-    order_dir: str,
-    min_chunk_size: int = 100,
-):
-    """
-    Tenta buscar um lote. Se falhar, divide o lote em sublotes menores
-    (até min_chunk_size) para reduzir chance de erro por volume.
-    """
-    try:
-        return query_leads(
-            filters=filters,
-            limit=limit,
-            offset=offset,
-            order_by=order_by,
-            order_dir=order_dir,
-        )
-    except Exception:
-        if limit <= min_chunk_size:
-            raise
-
-        left_size = max(min_chunk_size, limit // 2)
-        right_size = limit - left_size
-
-        left_rows = _query_leads_chunk_with_fallback(
-            filters=filters,
-            offset=offset,
-            limit=left_size,
-            order_by=order_by,
-            order_dir=order_dir,
-            min_chunk_size=min_chunk_size,
-        )
-        if len(left_rows) < left_size:
-            return left_rows
-
-        right_rows = _query_leads_chunk_with_fallback(
-            filters=filters,
-            offset=offset + left_size,
-            limit=right_size,
-            order_by=order_by,
-            order_dir=order_dir,
-            min_chunk_size=min_chunk_size,
-        )
-        return left_rows + right_rows
-
-
 def _query_leads_in_batches(filters: Dict[str, Any], meta: Dict[str, Any], batch_size: int = 500):
     limit = max(1, int(meta.get("limit") or 500))
     offset = max(0, int(meta.get("offset") or 0))
@@ -194,24 +145,16 @@ def _query_leads_in_batches(filters: Dict[str, Any], meta: Dict[str, Any], batch
     remaining = limit
     current_offset = offset
     all_rows = []
-    warnings = []
 
     while remaining > 0:
         chunk_size = min(batch_size, remaining)
-        try:
-            chunk_rows = _query_leads_chunk_with_fallback(
-                filters=filters,
-                offset=current_offset,
-                limit=chunk_size,
-                order_by=order_by,
-                order_dir=order_dir,
-            )
-        except Exception as e:
-            warnings.append(
-                f"Falha ao processar lote (offset={current_offset}, limit={chunk_size}): {str(e)}"
-            )
-            break
-
+        chunk_rows = query_leads(
+            filters=filters,
+            limit=chunk_size,
+            offset=current_offset,
+            order_by=order_by,
+            order_dir=order_dir,
+        )
         if not chunk_rows:
             break
         all_rows.extend(chunk_rows)
@@ -221,7 +164,7 @@ def _query_leads_in_batches(filters: Dict[str, Any], meta: Dict[str, Any], batch
         if fetched < chunk_size:
             break
 
-    return all_rows, warnings
+    return all_rows
  
 def _error_payload(e: Exception, public_msg: str):
     return {
@@ -459,37 +402,10 @@ def create_app() -> Flask:
         try:
             filters, meta = _get_filters_from_request()
  
-            rows, warnings = _query_leads_in_batches(filters=filters, meta=meta, batch_size=500)
+            rows = _query_leads_in_batches(filters=filters, meta=meta, batch_size=500)
             total = query_leads_count(filters=filters)
-
-            return jsonify(
-                {
-                    "ok": True,
-                    "total": total,
-                    "data": rows,
-                    "partial": True if warnings else False,
-                    "warnings": warnings,
-                }
-            )
-        except Exception as e:
-            return jsonify(_error_payload(e, "Erro ao buscar leads no BigQuery.")), 500
-
-    @app.post("/api/leads/search")
-    def api_leads_search():
-        try:
-            payload = request.get_json(silent=True) or {}
-            filters, meta = _get_filters_from_payload(payload)
-            rows, warnings = _query_leads_in_batches(filters=filters, meta=meta, batch_size=500)
-            total = query_leads_count(filters=filters)
-            return jsonify(
-                {
-                    "ok": True,
-                    "total": total,
-                    "data": rows,
-                    "partial": True if warnings else False,
-                    "warnings": warnings,
-                }
-            )
+ 
+            return jsonify({"ok": True, "total": total, "data": rows})
         except Exception as e:
             return jsonify(_error_payload(e, "Erro ao buscar leads no BigQuery.")), 500
 
@@ -512,7 +428,7 @@ def create_app() -> Flask:
         try:
             filters, meta = _get_filters_from_request()
             meta["limit"] = min(int(meta["limit"]), 5000)
-            rows, warnings = _query_leads_in_batches(filters=filters, meta=meta, batch_size=500)
+            rows = _query_leads_in_batches(filters=filters, meta=meta, batch_size=500)
  
             total = len(rows)
             status_counts: dict = {}
@@ -525,30 +441,7 @@ def create_app() -> Flask:
                 best = max(status_counts, key=status_counts.get)
                 top_status = {"status": best, "cnt": status_counts[best]}
  
-            return jsonify({"ok": True, "total": total, "top_status": top_status, "partial": True if warnings else False, "warnings": warnings})
-        except Exception as e:
-            return jsonify(_error_payload(e, "Erro ao calcular KPIs.")), 500
-
-    @app.post("/api/kpis/search")
-    def api_kpis_search():
-        try:
-            payload = request.get_json(silent=True) or {}
-            filters, meta = _get_filters_from_payload(payload)
-            meta["limit"] = min(int(meta["limit"]), 5000)
-            rows, warnings = _query_leads_in_batches(filters=filters, meta=meta, batch_size=500)
-
-            total = len(rows)
-            status_counts: dict = {}
-            for r in rows:
-                st = r.get("status_inscricao") or r.get("status") or "LEAD"
-                status_counts[st] = status_counts.get(st, 0) + 1
-
-            top_status = None
-            if status_counts:
-                best = max(status_counts, key=status_counts.get)
-                top_status = {"status": best, "cnt": status_counts[best]}
-
-            return jsonify({"ok": True, "total": total, "top_status": top_status, "partial": True if warnings else False, "warnings": warnings})
+            return jsonify({"ok": True, "total": total, "top_status": top_status})
         except Exception as e:
             return jsonify(_error_payload(e, "Erro ao calcular KPIs.")), 500
 
