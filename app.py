@@ -77,6 +77,94 @@ def _get_filters_from_request() -> Tuple[Dict[str, Any], Dict[str, Any]]:
         "order_dir": n(request.args.get("order_dir")) or "DESC",
     }
     return filters, meta
+
+
+def _get_filters_from_payload(payload: Dict[str, Any]) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    payload = payload or {}
+
+    def n(v):
+        if isinstance(v, list):
+            vals = [str(x).strip() for x in v if str(x).strip()]
+            return vals if vals else None
+        v = (v or "")
+        if not isinstance(v, str):
+            v = str(v)
+        v = v.strip()
+        return v if v else None
+
+    filters = {
+        "status": n(payload.get("status")),
+        "curso": n(payload.get("curso")),
+        "polo": n(payload.get("polo")),
+        "origem": n(payload.get("origem")),
+        "consultor": n(payload.get("consultor")),
+        "consultor_disparo": n(payload.get("consultor_disparo")),
+        "consultor_comercial": n(payload.get("consultor_comercial")),
+        "modalidade": n(payload.get("modalidade")),
+        "turno": n(payload.get("turno")),
+        "canal": n(payload.get("canal")),
+        "campanha": n(payload.get("campanha")),
+        "tipo_disparo": n(payload.get("tipo_disparo")),
+        "tipo_negocio": n(payload.get("tipo_negocio")),
+        "cpf": n(payload.get("cpf")),
+        "celular": n(payload.get("celular")),
+        "email": n(payload.get("email")),
+        "nome": n(payload.get("nome")),
+        "matriculado": n(payload.get("matriculado")),
+        "data_ini": n(payload.get("data_ini")),
+        "data_fim": n(payload.get("data_fim")),
+    }
+    filters = {k: v for k, v in filters.items() if v is not None and str(v).strip() != ""}
+
+    limit_raw = payload.get("limit", 500)
+    offset_raw = payload.get("offset", 0)
+    try:
+        limit = int(limit_raw)
+    except Exception:
+        limit = 500
+    try:
+        offset = int(offset_raw)
+    except Exception:
+        offset = 0
+
+    meta = {
+        "limit": max(1, limit),
+        "offset": max(0, offset),
+        "order_by": n(payload.get("order_by")) or "data_inscricao",
+        "order_dir": n(payload.get("order_dir")) or "DESC",
+    }
+    return filters, meta
+
+
+def _query_leads_in_batches(filters: Dict[str, Any], meta: Dict[str, Any], batch_size: int = 500):
+    limit = max(1, int(meta.get("limit") or 500))
+    offset = max(0, int(meta.get("offset") or 0))
+    order_by = meta.get("order_by") or "data_inscricao"
+    order_dir = meta.get("order_dir") or "DESC"
+
+    remaining = limit
+    current_offset = offset
+    all_rows = []
+
+    while remaining > 0:
+        chunk_size = min(batch_size, remaining)
+        chunk_rows = query_leads(
+            filters=filters,
+            limit=chunk_size,
+            offset=current_offset,
+            order_by=order_by,
+            order_dir=order_dir,
+        )
+        if not chunk_rows:
+            break
+        all_rows.extend(chunk_rows)
+        fetched = len(chunk_rows)
+        current_offset += fetched
+        remaining -= fetched
+        if fetched < chunk_size:
+            break
+
+    return all_rows
  
 def _error_payload(e: Exception, public_msg: str):
     return {
@@ -314,15 +402,20 @@ def create_app() -> Flask:
         try:
             filters, meta = _get_filters_from_request()
  
-            rows = query_leads(
-                filters=filters,
-                limit=meta["limit"],
-                offset=meta["offset"],
-                order_by=meta["order_by"],
-                order_dir=meta["order_dir"],
-            )
+            rows = _query_leads_in_batches(filters=filters, meta=meta, batch_size=500)
             total = query_leads_count(filters=filters)
  
+            return jsonify({"ok": True, "total": total, "data": rows})
+        except Exception as e:
+            return jsonify(_error_payload(e, "Erro ao buscar leads no BigQuery.")), 500
+
+    @app.post("/api/leads/search")
+    def api_leads_search():
+        try:
+            payload = request.get_json(silent=True) or {}
+            filters, meta = _get_filters_from_payload(payload)
+            rows = _query_leads_in_batches(filters=filters, meta=meta, batch_size=500)
+            total = query_leads_count(filters=filters)
             return jsonify({"ok": True, "total": total, "data": rows})
         except Exception as e:
             return jsonify(_error_payload(e, "Erro ao buscar leads no BigQuery.")), 500
@@ -334,13 +427,8 @@ def create_app() -> Flask:
         """
         try:
             filters, meta = _get_filters_from_request()
-            rows = query_leads(
-                filters=filters,
-                limit=min(int(meta["limit"]), 5000),
-                offset=meta["offset"],
-                order_by=meta["order_by"],
-                order_dir=meta["order_dir"],
-            )
+            meta["limit"] = min(int(meta["limit"]), 5000)
+            rows = _query_leads_in_batches(filters=filters, meta=meta, batch_size=500)
  
             total = len(rows)
             status_counts: dict = {}
@@ -353,6 +441,29 @@ def create_app() -> Flask:
                 best = max(status_counts, key=status_counts.get)
                 top_status = {"status": best, "cnt": status_counts[best]}
  
+            return jsonify({"ok": True, "total": total, "top_status": top_status})
+        except Exception as e:
+            return jsonify(_error_payload(e, "Erro ao calcular KPIs.")), 500
+
+    @app.post("/api/kpis/search")
+    def api_kpis_search():
+        try:
+            payload = request.get_json(silent=True) or {}
+            filters, meta = _get_filters_from_payload(payload)
+            meta["limit"] = min(int(meta["limit"]), 5000)
+            rows = _query_leads_in_batches(filters=filters, meta=meta, batch_size=500)
+
+            total = len(rows)
+            status_counts: dict = {}
+            for r in rows:
+                st = r.get("status_inscricao") or r.get("status") or "LEAD"
+                status_counts[st] = status_counts.get(st, 0) + 1
+
+            top_status = None
+            if status_counts:
+                best = max(status_counts, key=status_counts.get)
+                top_status = {"status": best, "cnt": status_counts[best]}
+
             return jsonify({"ok": True, "total": total, "top_status": top_status})
         except Exception as e:
             return jsonify(_error_payload(e, "Erro ao calcular KPIs.")), 500

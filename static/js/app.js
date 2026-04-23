@@ -1,8 +1,8 @@
 // static/js/app.js
 // STAR — compatível com:
 //   GET  /api/options  -> { ok:true, data:{ status:[], cursos:[], modalidades:[], turnos:[], polos:[], origens:[], canais:[], campanhas:[], consultores_disparo:[], consultores_comercial:[], tipos_disparo:[], tipos_negocio:[] } }
-//   GET  /api/leads    -> { ok:true, total:N, data:[...] }
-//   GET  /api/kpis     -> { ok:true, total:N, top_status:{status,cnt} }
+//   POST /api/leads/search -> { ok:true, total:N, data:[...] }
+//   POST /api/kpis/search  -> { ok:true, total:N, top_status:{status,cnt} }
 //   GET  /api/export/xlsx -> XLSX (download)
 //   POST /api/upload   -> { ok:true, message:"..." , saved_xlsx:"..." }
 //
@@ -129,6 +129,39 @@ async function apiPostForm(path, formData) {
   const res = await fetch(url.toString(), {
     method: "POST",
     body: formData,
+    credentials: "same-origin",
+  });
+
+  const text = await res.text();
+  let data = {};
+  try {
+    data = text ? JSON.parse(text) : {};
+  } catch {
+    data = { message: text || "" };
+  }
+
+  if (!res.ok) {
+    if (res.status === 401 && data?.redirect_to) {
+      window.location.href = data.redirect_to;
+      throw new Error("Sessão expirada");
+    }
+    const msg =
+      data?.error ||
+      data?.message ||
+      (typeof data === "string" ? data : "") ||
+      `Erro na API (${res.status})`;
+    throw new Error(msg);
+  }
+
+  return data;
+}
+
+async function apiPostJson(path, payload = {}) {
+  const url = new URL(path, window.location.origin);
+  const res = await fetch(url.toString(), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload || {}),
     credentials: "same-origin",
   });
 
@@ -575,8 +608,8 @@ async function loadLeadsAndKpis() {
 
   try {
     const [leadsResp, kpisResp] = await Promise.all([
-      apiGet("/api/leads", params),
-      apiGet("/api/kpis", params),
+      apiPostJson("/api/leads/search", params),
+      apiPostJson("/api/kpis/search", params),
     ]);
 
     const rows = leadsResp?.data || [];
