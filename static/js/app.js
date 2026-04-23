@@ -619,7 +619,14 @@ async function loadLeadsAndKpis() {
     renderTotals(total, rows.length);
     renderKpis(kpisResp);
 
-    setStatus(`${rows.length} registros carregados.`, "ok");
+    const warnLeads = Array.isArray(leadsResp?.warnings) ? leadsResp.warnings : [];
+    const warnKpis = Array.isArray(kpisResp?.warnings) ? kpisResp.warnings : [];
+    const allWarnings = [...warnLeads, ...warnKpis];
+    if (allWarnings.length) {
+      setStatus(`${rows.length} registros carregados com avisos: ${allWarnings[0]}`, "err");
+    } else {
+      setStatus(`${rows.length} registros carregados.`, "ok");
+    }
   } catch (e) {
     console.error(e);
     setStatus(e.message || "Erro ao consultar leads.", "err");
