@@ -10,6 +10,8 @@ import io
 import uuid
 import json
 import logging
+import csv
+import threading
 from time import perf_counter
 from datetime import datetime
 from pathlib import Path
@@ -27,11 +29,15 @@ from services.bigquery import (
     process_upload_dataframe,   # agora retorna job_id (async)
     get_bq_job_status,          # novo
     export_leads_rows,
+    export_leads_rows_iter,
     df_to_xlsx,                 # salva cópia do upload
     rows_to_xlsx,               # gera export XLSX no servidor
+    EXPORT_COLUMNS,
 )
 
 logger = logging.getLogger(__name__)
+EXPORT_BATCH_JOBS: Dict[str, Dict[str, Any]] = {}
+EXPORT_BATCH_JOBS_LOCK = threading.Lock()
  
 # ============================================================
 # HELPERS
@@ -80,8 +86,8 @@ def _get_filters_from_request() -> Tuple[Dict[str, Any], Dict[str, Any]]:
     meta = {
         "limit": max(1, requested_limit),
         "offset": int(request.args.get("offset") or 0),
-        "order_by": n(request.args.get("order_by")) or "data_inscricao",
-        "order_dir": n(request.args.get("order_dir")) or "DESC",
+        "order_by": n(request.args.get("order_by")) or "data_disparo",
+        "order_dir": n(request.args.get("order_dir")) or "ASC",
     }
     return filters, meta
 
@@ -137,8 +143,8 @@ def _get_filters_from_payload(payload: Dict[str, Any]) -> Tuple[Dict[str, Any], 
     meta = {
         "limit": max(1, limit),
         "offset": max(0, offset),
-        "order_by": n(payload.get("order_by")) or "data_inscricao",
-        "order_dir": n(payload.get("order_dir")) or "DESC",
+        "order_by": n(payload.get("order_by")) or "data_disparo",
+        "order_dir": n(payload.get("order_dir")) or "ASC",
     }
     return filters, meta
 
@@ -222,6 +228,12 @@ def _error_payload(e: Exception, public_msg: str):
  
 def _stamp() -> str:
     return datetime.now().strftime("%Y%m%d_%H%M%S")
+
+
+def _update_export_job(job_id: str, **kwargs):
+    with EXPORT_BATCH_JOBS_LOCK:
+        if job_id in EXPORT_BATCH_JOBS:
+            EXPORT_BATCH_JOBS[job_id].update(kwargs)
  
  
 # ============================================================
@@ -582,6 +594,136 @@ def create_app() -> Flask:
             )
         except Exception as e:
             return jsonify(_error_payload(e, "Erro ao exportar XLSX.")), 500
+
+    def _run_batch_export_job(job_id: str, filters: Dict[str, Any], batch_size: int, out_path: Path):
+        try:
+            total = query_leads_count(filters=filters)
+            total_batches = max(1, (total + batch_size - 1) // batch_size) if total else 0
+            _update_export_job(
+                job_id,
+                status="running",
+                total=total,
+                total_batches=total_batches,
+                current_batch=0,
+                processed=0,
+            )
+
+            with open(out_path, "w", newline="", encoding="utf-8-sig") as csvfile:
+                writer = csv.writer(csvfile, delimiter=";")
+                headers = [label for _, label in EXPORT_COLUMNS]
+                keys = [key for key, _ in EXPORT_COLUMNS]
+                writer.writerow(headers)
+
+                processed = 0
+                for idx, batch in enumerate(
+                    export_leads_rows_iter(
+                        filters=filters,
+                        batch_size=batch_size,
+                        order_by="data_disparo",
+                        order_dir="ASC",
+                    ),
+                    start=1,
+                ):
+                    for row in batch:
+                        writer.writerow([(row.get(k) if row.get(k) is not None else "") for k in keys])
+                    processed += len(batch)
+                    _update_export_job(
+                        job_id,
+                        current_batch=idx,
+                        processed=processed,
+                        message=f"Exportando lote {idx} de {max(total_batches, idx)}",
+                    )
+
+            _update_export_job(
+                job_id,
+                status="done",
+                ended_at=datetime.utcnow().isoformat() + "Z",
+                file_name=out_path.name,
+                file_path=str(out_path),
+                message="Exportação concluída.",
+            )
+        except Exception as e:
+            logger.exception("Falha no export em lote job_id=%s", job_id)
+            _update_export_job(
+                job_id,
+                status="error",
+                ended_at=datetime.utcnow().isoformat() + "Z",
+                message="Falha na exportação em lote.",
+                error=str(e),
+            )
+
+    @app.post("/api/export/batch")
+    def api_export_batch():
+        try:
+            payload = request.get_json(silent=True) or {}
+            filters, _meta = _get_filters_from_payload(payload)
+            batch_size = int(payload.get("batch_size") or 1000)
+            batch_size = max(100, min(batch_size, 5000))
+
+            job_id = uuid.uuid4().hex
+            fname = f"leads_export_batch_{_stamp()}_{job_id[:8]}.csv"
+            out_path = EXPORT_DIR / fname
+
+            with EXPORT_BATCH_JOBS_LOCK:
+                EXPORT_BATCH_JOBS[job_id] = {
+                    "job_id": job_id,
+                    "status": "queued",
+                    "created_at": datetime.utcnow().isoformat() + "Z",
+                    "batch_size": batch_size,
+                    "total": 0,
+                    "processed": 0,
+                    "total_batches": 0,
+                    "current_batch": 0,
+                    "message": "Exportação agendada.",
+                    "file_name": None,
+                    "file_path": None,
+                }
+
+            worker = threading.Thread(
+                target=_run_batch_export_job,
+                args=(job_id, filters, batch_size, out_path),
+                daemon=True,
+            )
+            worker.start()
+
+            return jsonify({"ok": True, "job_id": job_id, "status": "queued"}), 202
+        except Exception as e:
+            return jsonify(_error_payload(e, "Erro ao iniciar exportação em lote.")), 500
+
+    @app.get("/api/export/batch/status")
+    def api_export_batch_status():
+        job_id = (request.args.get("job_id") or "").strip()
+        if not job_id:
+            return jsonify({"ok": False, "error": "job_id é obrigatório"}), 400
+
+        with EXPORT_BATCH_JOBS_LOCK:
+            job = EXPORT_BATCH_JOBS.get(job_id)
+
+        if not job:
+            return jsonify({"ok": False, "error": "job_id não encontrado"}), 404
+
+        return jsonify({"ok": True, "data": job}), 200
+
+    @app.get("/api/export/batch/download")
+    def api_export_batch_download():
+        job_id = (request.args.get("job_id") or "").strip()
+        if not job_id:
+            return jsonify({"ok": False, "error": "job_id é obrigatório"}), 400
+
+        with EXPORT_BATCH_JOBS_LOCK:
+            job = EXPORT_BATCH_JOBS.get(job_id)
+
+        if not job:
+            return jsonify({"ok": False, "error": "job_id não encontrado"}), 404
+        if job.get("status") != "done" or not job.get("file_path"):
+            return jsonify({"ok": False, "error": "Arquivo ainda não está pronto"}), 409
+
+        return send_file(
+            job["file_path"],
+            as_attachment=True,
+            download_name=job.get("file_name") or "leads_export_batch.csv",
+            mimetype="text/csv",
+        )
  
     # ============================================================
     # ✅ UPLOAD (CSV/XLSX) + salva cópia XLSX em enviados/

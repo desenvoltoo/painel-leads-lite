@@ -25,6 +25,7 @@
       <span class="user-chip">Usuário: {{ current_user or "—" }}</span>
       <button id="btnReload" class="btn">Recarregar Dados</button>
       <button id="btnExport" class="btn btn-ghost">Exportar XLSX</button>
+      <button id="btnBatchExport" class="btn btn-primary">Exportar em lote</button>
       <form action="{{ url_for('logout') }}" method="post" class="logout-form">
         <button type="submit" class="btn btn-danger">Sair</button>
       </form>
@@ -226,7 +227,29 @@
       </div>
 
       <div class="muted section-total">
-        <span>Total retornado: </span><strong id="lblTotal">—</strong>
+        <span id="lblRange">Mostrando 0-0 de 0 leads</span>
+        <strong id="lblTotal">—</strong>
+      </div>
+
+      <div class="pagination-bar">
+        <button id="btnPrevPage" class="btn btn-ghost">Página anterior</button>
+        <span class="muted" id="lblPage">Página 1</span>
+        <button id="btnNextPage" class="btn btn-ghost">Próxima página</button>
+      </div>
+
+      <div class="loading-row" id="searchLoading" hidden>
+        <div class="spinner"></div>
+        <span>Buscando leads...</span>
+      </div>
+
+      <div class="export-progress" id="exportProgress" hidden>
+        <div class="export-progress-head">
+          <strong>Exportação em lote</strong>
+          <span id="exportProgressText">Aguardando...</span>
+        </div>
+        <div class="progress-track">
+          <div class="progress-bar" id="exportProgressBar"></div>
+        </div>
       </div>
     </section>
 

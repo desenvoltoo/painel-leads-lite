@@ -28,6 +28,10 @@ const EMPTY_FILTER_TOKEN = "__EMPTY__";
 const EMPTY_FILTER_LABEL = "(Sem preenchimento)";
 const SAVED_FILTERS_STORAGE_KEY = "painel_leads_saved_filters_v1";
 const MAX_SAVED_FILTERS = 5;
+let currentPage = 1;
+let totalLeads = 0;
+let isLoadingLeads = false;
+let activeExportJobId = null;
 
 /* =========================
    Helpers UI
@@ -44,6 +48,22 @@ function setUploadStatus(msg, type = "ok") {
   if (!el) return;
   el.textContent = msg;
   el.className = type === "err" ? "error" : "muted";
+}
+
+function setSearchLoading(loading) {
+  const row = $("#searchLoading");
+  if (!row) return;
+  row.hidden = !loading;
+}
+
+function setExportProgress({ visible, text = "", progress = 0 }) {
+  const box = $("#exportProgress");
+  const label = $("#exportProgressText");
+  const bar = $("#exportProgressBar");
+  if (!box || !label || !bar) return;
+  box.hidden = !visible;
+  label.textContent = text;
+  bar.style.width = `${Math.max(0, Math.min(100, progress))}%`;
 }
 
 function escapeHtml(str) {
@@ -218,7 +238,10 @@ function makeTomSelect(selector) {
       `,
       item: (data, escape) => `<div>${escape(data.text)}</div>`,
     },
-    onChange: () => loadLeadsAndKpisDebounced(),
+    onChange: () => {
+      currentPage = 1;
+      loadLeadsAndKpisDebounced();
+    },
   });
 
   addSearchSelectButton(tomSelect);
@@ -410,6 +433,7 @@ function buildLeadsParams() {
   const data_fim = safeDate($("#fFim")?.value || "");
   const matriculado = ($("#fMatriculado")?.value || "").trim(); // "" | "true" | "false"
   const limit = Number($("#fLimit")?.value || 500) || 500;
+  const offset = Math.max(0, (currentPage - 1) * limit);
 
   const busca = parseBuscaRapida($("#fBusca")?.value);
 
@@ -430,6 +454,9 @@ function buildLeadsParams() {
     data_ini,
     data_fim,
     limit,
+    offset,
+    order_by: "data_disparo",
+    order_dir: "ASC",
     ...busca,
   };
 }
@@ -601,8 +628,11 @@ function deleteSavedFilterView() {
 }
 
 async function loadLeadsAndKpis() {
+  if (isLoadingLeads) return;
+  isLoadingLeads = true;
   setStatus("Consultando BigQuery...", "ok");
   renderTable([], { loading: true });
+  setSearchLoading(true);
 
   const params = buildLeadsParams();
 
@@ -614,6 +644,7 @@ async function loadLeadsAndKpis() {
 
     const rows = leadsResp?.data || [];
     const total = leadsResp?.total ?? rows.length;
+    totalLeads = Number(total) || 0;
 
     renderTable(rows);
     renderTotals(total, rows.length);
@@ -625,6 +656,9 @@ async function loadLeadsAndKpis() {
     setStatus(e.message || "Erro ao consultar leads.", "err");
     renderTable([]);
     renderTotals(0, 0);
+  } finally {
+    isLoadingLeads = false;
+    setSearchLoading(false);
   }
 }
 
@@ -639,6 +673,13 @@ const loadLeadsAndKpisDebounced = (() => {
 function renderTotals(total, shown) {
   if ($("#kpiCount")) $("#kpiCount").textContent = total ?? 0;
   if ($("#lblTotal")) $("#lblTotal").textContent = `${shown} / ${total ?? shown}`;
+  const limit = Number($("#fLimit")?.value || 500) || 500;
+  const start = total > 0 ? ((currentPage - 1) * limit) + 1 : 0;
+  const end = total > 0 ? start + shown - 1 : 0;
+  if ($("#lblRange")) $("#lblRange").textContent = `Mostrando ${start}-${Math.max(end, 0)} de ${total ?? 0} leads`;
+  if ($("#lblPage")) $("#lblPage").textContent = `Página ${currentPage}`;
+  if ($("#btnPrevPage")) $("#btnPrevPage").disabled = currentPage <= 1;
+  if ($("#btnNextPage")) $("#btnNextPage").disabled = end >= (total ?? 0);
 }
 
 function renderTable(rows, { loading = false } = {}) {
@@ -742,6 +783,53 @@ function exportXlsxServerSide() {
   window.location.href = url.toString();
 }
 
+async function startBatchExport() {
+  const payload = { ...buildLeadsParams(), batch_size: 1000 };
+  delete payload.limit;
+  delete payload.offset;
+
+  try {
+    setExportProgress({ visible: true, text: "Iniciando exportação...", progress: 5 });
+    const resp = await apiPostJson("/api/export/batch", payload);
+    activeExportJobId = resp?.job_id;
+    if (!activeExportJobId) throw new Error("Job não retornado pela API.");
+    pollBatchExportStatus();
+  } catch (e) {
+    setExportProgress({ visible: true, text: `Falha ao iniciar exportação: ${e.message}`, progress: 0 });
+  }
+}
+
+async function pollBatchExportStatus() {
+  if (!activeExportJobId) return;
+
+  const timer = setInterval(async () => {
+    try {
+      const resp = await apiGet("/api/export/batch/status", { job_id: activeExportJobId });
+      const data = resp?.data || {};
+      const total = Number(data.total || 0);
+      const processed = Number(data.processed || 0);
+      const pct = total > 0 ? Math.round((processed / total) * 100) : 10;
+      const msg = data.message || "Processando...";
+      setExportProgress({ visible: true, text: `${msg} (${processed}/${total})`, progress: pct });
+
+      if (data.status === "done") {
+        clearInterval(timer);
+        setExportProgress({ visible: true, text: "Concluído. Baixando arquivo...", progress: 100 });
+        window.location.href = `/api/export/batch/download?job_id=${encodeURIComponent(activeExportJobId)}`;
+        activeExportJobId = null;
+      } else if (data.status === "error") {
+        clearInterval(timer);
+        setExportProgress({ visible: true, text: data.error || "Falha no processamento.", progress: 0 });
+        activeExportJobId = null;
+      }
+    } catch (e) {
+      clearInterval(timer);
+      setExportProgress({ visible: true, text: `Erro ao consultar progresso: ${e.message}`, progress: 0 });
+      activeExportJobId = null;
+    }
+  }, 1500);
+}
+
 /* =========================
    Limpar
 ========================= */
@@ -768,6 +856,7 @@ function clearFilters() {
   if ($("#fLimit")) $("#fLimit").value = "500";
   if ($("#fBusca")) $("#fBusca").value = "";
 
+  currentPage = 1;
   loadLeadsAndKpis();
 }
 
@@ -779,7 +868,10 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   refreshSavedFiltersSelect();
 
-  $("#btnApply")?.addEventListener("click", loadLeadsAndKpis);
+  $("#btnApply")?.addEventListener("click", () => {
+    currentPage = 1;
+    loadLeadsAndKpis();
+  });
   $("#btnSaveFilterView")?.addEventListener("click", saveCurrentFilterView);
   $("#btnDeleteFilterView")?.addEventListener("click", deleteSavedFilterView);
   $("#savedFilterSelect")?.addEventListener("change", () => {
@@ -796,9 +888,39 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   $("#btnUpload")?.addEventListener("click", doUpload);
   $("#btnExport")?.addEventListener("click", exportXlsxServerSide);
+  $("#btnBatchExport")?.addEventListener("click", startBatchExport);
+  $("#btnPrevPage")?.addEventListener("click", () => {
+    if (currentPage <= 1) return;
+    currentPage -= 1;
+    loadLeadsAndKpis();
+  });
+  $("#btnNextPage")?.addEventListener("click", () => {
+    const limit = Number($("#fLimit")?.value || 500) || 500;
+    if ((currentPage * limit) >= totalLeads) return;
+    currentPage += 1;
+    loadLeadsAndKpis();
+  });
 
-  // busca rápida com debounce (não precisa clicar aplicar)
-  $("#fBusca")?.addEventListener("input", loadLeadsAndKpisDebounced);
+  $("#fIni")?.addEventListener("change", () => {
+    currentPage = 1;
+    loadLeadsAndKpisDebounced();
+  });
+  $("#fFim")?.addEventListener("change", () => {
+    currentPage = 1;
+    loadLeadsAndKpisDebounced();
+  });
+  $("#fMatriculado")?.addEventListener("change", () => {
+    currentPage = 1;
+    loadLeadsAndKpisDebounced();
+  });
+  $("#fLimit")?.addEventListener("change", () => {
+    currentPage = 1;
+    loadLeadsAndKpisDebounced();
+  });
+  $("#fBusca")?.addEventListener("input", () => {
+    currentPage = 1;
+    loadLeadsAndKpisDebounced();
+  });
 
   await loadOptions();
   await loadLeadsAndKpis();

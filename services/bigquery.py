@@ -82,6 +82,21 @@ def _data_inscricao_order_clause(order_dir: str) -> str:
     """
 
 
+def _data_disparo_priority_order_clause() -> str:
+    """
+    Regra de ordenação exigida pelo painel/export:
+    1) data_disparo vazia (NULL ou string vazia) primeiro
+    2) depois registros com data_disparo preenchida, da mais antiga para a mais recente
+    3) desempate determinístico por data_inscricao e data_atualizacao
+    """
+    return """
+    CASE WHEN v.data_disparo IS NULL OR TRIM(CAST(v.data_disparo AS STRING)) = '' THEN 0 ELSE 1 END ASC,
+    SAFE_CAST(v.data_disparo AS DATE) ASC NULLS LAST,
+    v.data_inscricao ASC NULLS LAST,
+    v.data_atualizacao DESC
+    """
+
+
 # ============================================================
 # NORMALIZADORES
 # ============================================================
@@ -494,6 +509,7 @@ def _build_leads_query(
     allowed_order = {
         "data_inscricao": "v.data_inscricao",
         "data_inscricao_dt": "v.data_inscricao",
+        "data_disparo": "v.data_disparo",
         "status": "v.status_inscricao",
         "curso": "v.curso",
         "modalidade": "v.modalidade",
@@ -521,7 +537,9 @@ def _build_leads_query(
 
     params: List[Any] = []
     sql = _apply_filters(sql, filters, params)
-    if order_by in ("data_inscricao", "data_inscricao_dt"):
+    if order_by == "data_disparo":
+        order_clause = _data_disparo_priority_order_clause()
+    elif order_by in ("data_inscricao", "data_inscricao_dt"):
         order_clause = _data_inscricao_order_clause(order_dir)
     else:
         order_clause = f"{order_expr} {order_dir}"
@@ -653,8 +671,8 @@ def export_leads_rows(
     filters: Optional[Dict[str, Any]] = None,
     limit: int = EXPORT_MAX_ROWS,
     offset: int = 0,
-    order_by: str = "data_inscricao",
-    order_dir: str = "DESC",
+    order_by: str = "data_disparo",
+    order_dir: str = "ASC",
 ) -> List[Dict[str, Any]]:
     client = get_bq_client()
     filters = filters or {}
@@ -669,6 +687,7 @@ def export_leads_rows(
     allowed_order = {
         "data_inscricao": "v.data_inscricao",
         "data_inscricao_dt": "v.data_inscricao",
+        "data_disparo": "v.data_disparo",
         "status": "v.status_inscricao",
         "curso": "v.curso",
         "modalidade": "v.modalidade",
@@ -690,7 +709,9 @@ def export_leads_rows(
     params: List[Any] = []
     sql = _apply_filters(sql, filters, params)
 
-    if order_by in ("data_inscricao", "data_inscricao_dt"):
+    if order_by == "data_disparo":
+        order_clause = _data_disparo_priority_order_clause()
+    elif order_by in ("data_inscricao", "data_inscricao_dt"):
         order_clause = _data_inscricao_order_clause(order_dir)
     else:
         order_clause = f"{order_expr} {order_dir}"
@@ -700,6 +721,35 @@ def export_leads_rows(
 
     rows = client.query(sql, job_config=bigquery.QueryJobConfig(query_parameters=params)).result()
     return [dict(r) for r in rows]
+
+
+def export_leads_rows_iter(
+    filters: Optional[Dict[str, Any]] = None,
+    batch_size: int = 1000,
+    order_by: str = "data_disparo",
+    order_dir: str = "ASC",
+) -> Iterator[List[Dict[str, Any]]]:
+    """
+    Itera exportação paginada para evitar alto consumo de memória.
+    """
+    offset = 0
+    size = max(1, int(batch_size))
+
+    while True:
+        rows = export_leads_rows(
+            filters=filters,
+            limit=size,
+            offset=offset,
+            order_by=order_by,
+            order_dir=order_dir,
+        )
+        if not rows:
+            break
+        yield rows
+        fetched = len(rows)
+        offset += fetched
+        if fetched < size:
+            break
 
 
 def rows_to_xlsx(rows: List[Dict[str, Any]], xlsx_path: str, sheet_name: str = "Leads") -> str:
