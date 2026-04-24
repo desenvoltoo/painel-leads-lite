@@ -26,7 +26,7 @@ from services.bigquery import (
     query_leads_iter,
     query_leads_count,
     query_options,
-    process_upload_dataframe,   # agora retorna job_id (async)
+    process_upload_dataframe,   # retorna job_id da SP executada no upload
     get_bq_job_status,          # novo
     export_leads_rows,
     export_leads_rows_iter,
@@ -727,7 +727,7 @@ def create_app() -> Flask:
  
     # ============================================================
     # ✅ UPLOAD (CSV/XLSX) + salva cópia XLSX em enviados/
-    # ✅ AGORA ASSÍNCRONO: retorna job_id e NÃO trava request
+    # ✅ EXECUTA SP A CADA IMPORTAÇÃO E AGUARDA CONCLUSÃO
     # ============================================================
     @app.post("/api/upload")
     def api_upload():
@@ -751,18 +751,18 @@ def create_app() -> Flask:
             saved_path = str(UPLOAD_DIR / saved_name)
             df_to_xlsx(df, saved_path, sheet_name="Upload")
  
-            # ✅ staging + dispara SP async (retorna job_id)
+            # ✅ staging + dispara SP (retorna job_id)
             job_id = process_upload_dataframe(df)
- 
-            # 202 Accepted (processando)
+
+            # 200 OK (SP executada)
             return jsonify(
                 {
                     "ok": True,
-                    "message": "Upload recebido. Importação em processamento (assíncrono).",
+                    "message": "Upload importado com sucesso e procedure executada.",
                     "saved_xlsx": saved_name,
                     "job_id": job_id,
                 }
-            ), 202
+            ), 200
  
         except Exception as e:
             return jsonify(_error_payload(e, "Falha na ingestão.")), 500
