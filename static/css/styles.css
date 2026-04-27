@@ -257,6 +257,15 @@ small,
   flex-wrap: wrap;
 }
 
+.filters-actions-row {
+  margin-top: 2px;
+}
+
+.field-actions-inline select {
+  width: 220px;
+  min-width: 180px;
+}
+
 .btn {
   border: 1px solid var(--border);
   border-radius: 10px;
@@ -484,6 +493,10 @@ tbody tr:hover { background: rgba(122, 125, 255, 0.1); }
   .container { padding: 14px; }
   .filters { grid-template-columns: repeat(2, minmax(0, 1fr)) !important; }
   .field, .field-actions { grid-column: span 2 !important; }
+  .field-actions-inline select {
+    width: 100%;
+    min-width: 0;
+  }
   .pagination-bar { justify-content: flex-start; }
 }
 
