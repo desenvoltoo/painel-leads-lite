@@ -8,6 +8,7 @@ import os
 import traceback
 import io
 import uuid
+import mimetypes
 import json
 import logging
 import csv
@@ -27,6 +28,8 @@ from services.bigquery import (
     query_leads_count,
     query_options,
     process_upload_dataframe,   # agora retorna job_id (async)
+    process_gcs_upload,
+    generate_gcs_signed_upload,
     get_bq_job_status,          # novo
     export_leads_rows,
     export_leads_rows_iter,
@@ -39,6 +42,15 @@ logger = logging.getLogger(__name__)
 EXPORT_BATCH_JOBS: Dict[str, Dict[str, Any]] = {}
 EXPORT_BATCH_JOBS_LOCK = threading.Lock()
  
+
+
+ALLOWED_UPLOAD_EXTENSIONS = {".csv", ".xlsx", ".xls"}
+
+
+def _validate_upload_filename(filename: str) -> bool:
+    ext = Path(filename or "").suffix.lower()
+    return ext in ALLOWED_UPLOAD_EXTENSIONS
+
 # ============================================================
 # HELPERS
 # ============================================================
@@ -729,47 +741,35 @@ def create_app() -> Flask:
     # ✅ UPLOAD (CSV/XLSX) + salva cópia XLSX em enviados/
     # ✅ AGORA ASSÍNCRONO: retorna job_id e NÃO trava request
     # ============================================================
+    @app.get("/api/upload-url")
+    def api_upload_url():
+        filename = (request.args.get("filename") or "").strip()
+        if not filename:
+            return jsonify({"ok": False, "error": "filename é obrigatório."}), 400
+        if not _validate_upload_filename(filename):
+            return jsonify({"ok": False, "error": "Formato inválido. Envie CSV ou XLSX."}), 400
+
+        source = (request.args.get("source") or "manual").strip() or "manual"
+        payload = generate_gcs_signed_upload(filename=filename, source_tag=source)
+        return jsonify({"ok": True, "data": payload}), 200
+
+    @app.post("/api/process-upload")
+    def api_process_upload():
+        payload = request.get_json(silent=True) or {}
+        object_name = (payload.get("object_name") or "").strip()
+        if not object_name:
+            return jsonify({"ok": False, "error": "object_name é obrigatório."}), 400
+
+        try:
+            result = process_gcs_upload(object_name)
+            return jsonify({"ok": True, **result}), 202
+        except Exception as e:
+            return jsonify(_error_payload(e, "Falha na ingestão via GCS.")), 500
+
     @app.post("/api/upload")
     def api_upload():
-        if "file" not in request.files:
-            return jsonify({"ok": False, "error": "Arquivo não encontrado."}), 400
- 
-        f = request.files["file"]
-        if not f.filename:
-            return jsonify({"ok": False, "error": "Nome de arquivo vazio."}), 400
- 
-        try:
-            filename = (f.filename or "").lower()
-            if not (filename.endswith(".csv") or filename.endswith(".xlsx") or filename.endswith(".xls")):
-                return jsonify({"ok": False, "error": "Formato inválido. Envie CSV ou XLSX."}), 400
- 
-            # lê df (encoding detectado automaticamente, cpf/celular como str)
-            df = _read_upload_to_df(f)
- 
-            # ✅ salva cópia SEMPRE em XLSX
-            saved_name = f"upload_{_stamp()}_{uuid.uuid4().hex[:6]}.xlsx"
-            saved_path = str(UPLOAD_DIR / saved_name)
-            df_to_xlsx(df, saved_path, sheet_name="Upload")
- 
-            # ✅ staging + dispara SP async (retorna job_id)
-            job_id = process_upload_dataframe(df)
- 
-            # 202 Accepted (processando)
-            return jsonify(
-                {
-                    "ok": True,
-                    "message": "Upload recebido. Importação em processamento (assíncrono).",
-                    "saved_xlsx": saved_name,
-                    "job_id": job_id,
-                }
-            ), 202
- 
-        except Exception as e:
-            return jsonify(_error_payload(e, "Falha na ingestão.")), 500
- 
-    # ============================================================
-    # ✅ STATUS DO UPLOAD (job do BigQuery)
-    # ============================================================
+        return jsonify({"ok": False, "error": "Endpoint legado. Use /api/upload-url + /api/process-upload."}), 410
+
     @app.get("/api/upload/status")
     def api_upload_status():
         try:
