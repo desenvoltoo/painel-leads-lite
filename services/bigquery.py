@@ -78,7 +78,8 @@ def _get_upload_bucket():
 def generate_gcs_signed_upload(filename: str, source_tag: str = "manual") -> Dict[str, str]:
     bucket = _get_upload_bucket()
     safe_name = Path(filename).name
-    object_name = f"{GCS_UPLOAD_PREFIX.strip('/')}/{source_tag}/{uuid.uuid4().hex}_{safe_name}"
+    safe_source = (source_tag or "manual").replace("/", "_").replace("\\", "_")
+    object_name = f"{GCS_UPLOAD_PREFIX.strip('/')}/{safe_source}/{uuid.uuid4().hex}_{safe_name}"
     blob = bucket.blob(object_name)
     signed_url = blob.generate_signed_url(version="v4", expiration=timedelta(minutes=15), method="PUT", content_type="application/octet-stream")
     return {"upload_url": signed_url, "object_name": object_name, "bucket": bucket.name}
@@ -92,7 +93,13 @@ def _xlsx_blob_to_dataframe(blob) -> Any:
     wb = load_workbook(BytesIO(payload), data_only=True, read_only=True)
     ws = wb.active
     rows = ws.iter_rows(values_only=True)
-    headers = [str(c).strip() if c is not None else "" for c in next(rows)]
+    try:
+        first_row = next(rows)
+    except StopIteration:
+        raise RuntimeError("Arquivo XLSX está vazio.")
+    headers = [str(c).strip() if c is not None else "" for c in first_row]
+    if not any(headers):
+        raise RuntimeError("Cabeçalho do XLSX não encontrado.")
     data = []
     for r in rows:
         data.append({headers[i]: r[i] if i < len(r) else None for i in range(len(headers))})

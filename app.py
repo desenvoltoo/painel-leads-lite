@@ -27,13 +27,11 @@ from services.bigquery import (
     query_leads_iter,
     query_leads_count,
     query_options,
-    process_upload_dataframe,   # agora retorna job_id (async)
     process_gcs_upload,
     generate_gcs_signed_upload,
     get_bq_job_status,          # novo
     export_leads_rows,
     export_leads_rows_iter,
-    df_to_xlsx,                 # salva cópia do upload
     rows_to_xlsx,               # gera export XLSX no servidor
     EXPORT_COLUMNS,
 )
@@ -749,9 +747,12 @@ def create_app() -> Flask:
         if not _validate_upload_filename(filename):
             return jsonify({"ok": False, "error": "Formato inválido. Envie CSV ou XLSX."}), 400
 
-        source = (request.args.get("source") or "manual").strip() or "manual"
-        payload = generate_gcs_signed_upload(filename=filename, source_tag=source)
-        return jsonify({"ok": True, "data": payload}), 200
+        try:
+            source = (request.args.get("source") or "manual").strip() or "manual"
+            payload = generate_gcs_signed_upload(filename=filename, source_tag=source)
+            return jsonify({"ok": True, "data": payload}), 200
+        except Exception as e:
+            return jsonify(_error_payload(e, "Falha ao gerar URL de upload.")), 500
 
     @app.post("/api/process-upload")
     def api_process_upload():
