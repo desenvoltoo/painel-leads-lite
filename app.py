@@ -752,7 +752,13 @@ def create_app() -> Flask:
             payload = generate_gcs_signed_upload(filename=filename, source_tag=source)
             return jsonify({"ok": True, "data": payload}), 200
         except Exception as e:
-            return jsonify(_error_payload(e, "Falha ao gerar URL de upload.")), 500
+            logger.exception("Falha ao gerar signed URL de upload: %s", e)
+            return jsonify(
+                _error_payload(
+                    e,
+                    f"Falha ao gerar URL de upload: {e}",
+                )
+            ), 500
 
     @app.post("/api/process-upload")
     def api_process_upload():

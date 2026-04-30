@@ -81,7 +81,18 @@ def generate_gcs_signed_upload(filename: str, source_tag: str = "manual") -> Dic
     safe_source = (source_tag or "manual").replace("/", "_").replace("\\", "_")
     object_name = f"{GCS_UPLOAD_PREFIX.strip('/')}/{safe_source}/{uuid.uuid4().hex}_{safe_name}"
     blob = bucket.blob(object_name)
-    signed_url = blob.generate_signed_url(version="v4", expiration=timedelta(minutes=15), method="PUT", content_type="application/octet-stream")
+    try:
+        signed_url = blob.generate_signed_url(
+            version="v4",
+            expiration=timedelta(minutes=15),
+            method="PUT",
+            content_type="application/octet-stream",
+        )
+    except Exception as e:
+        raise RuntimeError(
+            "Não foi possível assinar URL do GCS. "
+            "Verifique GCS_UPLOAD_BUCKET e permissões da Service Account para assinar URLs."
+        ) from e
     return {"upload_url": signed_url, "object_name": object_name, "bucket": bucket.name}
 
 
