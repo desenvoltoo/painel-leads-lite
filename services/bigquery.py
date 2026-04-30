@@ -314,29 +314,30 @@ def load_to_staging(df) -> None:
         raise RuntimeError(f"Erro ao carregar staging ({table_id}): {e}") from e
 
 
-def run_procedure_async() -> str:
+def run_procedure() -> str:
     """
-    Dispara a procedure e retorna o job_id sem bloquear a request.
+    Dispara a procedure e aguarda conclusão para garantir execução em todo upload.
     """
     client = get_bq_client()
     sql = f"CALL `{GCP_PROJECT_ID}.{BQ_DATASET}.{BQ_PROCEDURE}`();"
 
     try:
         job = client.query(sql)
+        job.result()
         return job.job_id
     except (BadRequest, Forbidden, NotFound, GoogleAPICallError) as e:
-        logger.exception("BQ run_procedure_async falhou: %s", str(e))
+        logger.exception("BQ run_procedure falhou: %s", str(e))
         raise RuntimeError(f"Erro ao disparar procedure ({BQ_PROCEDURE}): {e}") from e
 
 
 def process_upload_dataframe(df) -> str:
     """
     1) carrega staging (truncate)
-    2) dispara SP async
+    2) dispara SP e aguarda conclusão
     3) retorna job_id
     """
     load_to_staging(df)
-    return run_procedure_async()
+    return run_procedure()
 
 
 def get_bq_job_status(job_id: str) -> Dict[str, Any]:
