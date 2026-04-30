@@ -8,6 +8,7 @@ import os
 import traceback
 import io
 import uuid
+import mimetypes
 import json
 import logging
 import csv
