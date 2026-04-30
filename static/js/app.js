@@ -4,7 +4,8 @@
 //   POST /api/leads/search -> { ok:true, total:N, data:[...] }
 //   POST /api/kpis/search  -> { ok:true, total:N, top_status:{status,cnt} }
 //   GET  /api/export/xlsx -> XLSX (download)
-//   POST /api/upload   -> { ok:true, message:"..." , saved_xlsx:"..." }
+//   GET  /api/upload-url -> signed URL GCS
+//   POST /api/process-upload -> processa no BigQuery
 //
 // HTML (ids):
 // upload: #uploadFile #btnUpload #uploadStatus #uploadSource
@@ -731,6 +732,27 @@ function renderKpis(k) {
 /* =========================
    Upload
 ========================= */
+function uploadFileToSignedUrl(uploadUrl, file) {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open("PUT", uploadUrl, true);
+    xhr.setRequestHeader("Content-Type", "application/octet-stream");
+
+    xhr.upload.onprogress = (evt) => {
+      if (!evt.lengthComputable) return;
+      const pct = Math.round((evt.loaded / evt.total) * 100);
+      setUploadStatus(`Upload para GCS: ${pct}%`, "ok");
+    };
+
+    xhr.onload = () => {
+      if (xhr.status >= 200 && xhr.status < 300) resolve(true);
+      else reject(new Error(`Falha no upload para GCS (${xhr.status})`));
+    };
+    xhr.onerror = () => reject(new Error("Erro de rede ao enviar para GCS."));
+    xhr.send(file);
+  });
+}
+
 async function doUpload() {
   const fileInput = $("#uploadFile");
   if (!fileInput || !fileInput.files || fileInput.files.length === 0) {
@@ -739,17 +761,20 @@ async function doUpload() {
   }
 
   const file = fileInput.files[0];
-  setUploadStatus("Enviando e processando... (staging + procedure)", "ok");
+  const source = ($("#uploadSource")?.value || "manual").trim() || "manual";
 
   try {
-    const fd = new FormData();
-    fd.append("file", file);
+    setUploadStatus("Solicitando URL de upload...", "ok");
+    const signed = await apiGet("/api/upload-url", { filename: file.name, source });
+    const uploadUrl = signed?.data?.upload_url;
+    const objectName = signed?.data?.object_name;
+    if (!uploadUrl || !objectName) throw new Error("URL assinada inválida.");
 
-    const src = ($("#uploadSource")?.value || "").trim();
-    if (src) fd.append("source", src);
+    await uploadFileToSignedUrl(uploadUrl, file);
+    setUploadStatus("Upload concluído. Processando no BigQuery...", "ok");
 
-    const resp = await apiPostForm("/api/upload", fd);
-    setUploadStatus(resp?.message || "Processado com sucesso!", "ok");
+    const resp = await apiPostJson("/api/process-upload", { object_name: objectName });
+    setUploadStatus(resp?.message || "Processamento iniciado com sucesso!", "ok");
 
     await loadOptions();
     await loadLeadsAndKpis();

@@ -7,9 +7,12 @@ from time import perf_counter
 from concurrent.futures import TimeoutError as FuturesTimeoutError
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
+from io import BytesIO, StringIO
+from datetime import timedelta
+import uuid
 from typing import Any, Dict, Iterator, List, Optional, Tuple
 
-from google.cloud import bigquery
+from google.cloud import bigquery, storage
 from google.api_core.exceptions import GoogleAPICallError, BadRequest, Forbidden, NotFound
 
 # XLSX
@@ -40,6 +43,7 @@ EMPTY_FILTER_TOKEN = "__EMPTY__"
 PHONEISH_COLUMNS = {"cpf", "celular"}
 
 _bq_client: Optional[bigquery.Client] = None
+_storage_client: Optional[storage.Client] = None
 
 
 def get_bq_client() -> bigquery.Client:
@@ -52,6 +56,91 @@ def get_bq_client() -> bigquery.Client:
 def _tbl(name: str) -> str:
     return f"`{GCP_PROJECT_ID}.{BQ_DATASET}.{name}`"
 
+
+
+GCS_UPLOAD_BUCKET = os.getenv("GCS_UPLOAD_BUCKET", "")
+GCS_UPLOAD_PREFIX = os.getenv("GCS_UPLOAD_PREFIX", "uploads")
+
+
+def get_storage_client() -> storage.Client:
+    global _storage_client
+    if _storage_client is None:
+        _storage_client = storage.Client(project=GCP_PROJECT_ID)
+    return _storage_client
+
+
+def _get_upload_bucket():
+    if not GCS_UPLOAD_BUCKET:
+        raise RuntimeError("Defina GCS_UPLOAD_BUCKET no ambiente.")
+    return get_storage_client().bucket(GCS_UPLOAD_BUCKET)
+
+
+def generate_gcs_signed_upload(filename: str, source_tag: str = "manual") -> Dict[str, str]:
+    bucket = _get_upload_bucket()
+    safe_name = Path(filename).name
+    safe_source = (source_tag or "manual").replace("/", "_").replace("\\", "_")
+    object_name = f"{GCS_UPLOAD_PREFIX.strip('/')}/{safe_source}/{uuid.uuid4().hex}_{safe_name}"
+    blob = bucket.blob(object_name)
+    signed_url = blob.generate_signed_url(version="v4", expiration=timedelta(minutes=15), method="PUT", content_type="application/octet-stream")
+    return {"upload_url": signed_url, "object_name": object_name, "bucket": bucket.name}
+
+
+def _xlsx_blob_to_dataframe(blob) -> Any:
+    from openpyxl import load_workbook
+    import pandas as pd
+
+    payload = blob.download_as_bytes()
+    wb = load_workbook(BytesIO(payload), data_only=True, read_only=True)
+    ws = wb.active
+    rows = ws.iter_rows(values_only=True)
+    try:
+        first_row = next(rows)
+    except StopIteration:
+        raise RuntimeError("Arquivo XLSX está vazio.")
+    headers = [str(c).strip() if c is not None else "" for c in first_row]
+    if not any(headers):
+        raise RuntimeError("Cabeçalho do XLSX não encontrado.")
+    data = []
+    for r in rows:
+        data.append({headers[i]: r[i] if i < len(r) else None for i in range(len(headers))})
+    return pd.DataFrame(data)
+
+
+def _load_dataframe_to_staging_via_gcs(df) -> None:
+    client = get_bq_client()
+    bucket = _get_upload_bucket()
+    table_id = f"{GCP_PROJECT_ID}.{BQ_DATASET}.{BQ_STAGING_TABLE}"
+    df2 = _coerce_df_to_staging_schema(df)
+
+    temp_name = f"{GCS_UPLOAD_PREFIX.strip('/')}/tmp/staging_{uuid.uuid4().hex}.csv"
+    tmp_blob = bucket.blob(temp_name)
+    csv_buf = StringIO()
+    df2.to_csv(csv_buf, index=False)
+    tmp_blob.upload_from_string(csv_buf.getvalue(), content_type="text/csv")
+
+    uri = f"gs://{bucket.name}/{temp_name}"
+    job = client.load_table_from_uri(uri, table_id, job_config=bigquery.LoadJobConfig(schema=STAGING_SCHEMA, source_format=bigquery.SourceFormat.CSV, skip_leading_rows=1, write_disposition=bigquery.WriteDisposition.WRITE_TRUNCATE))
+    job.result()
+    tmp_blob.delete()
+
+
+def process_gcs_upload(object_name: str) -> Dict[str, Any]:
+    bucket = _get_upload_bucket()
+    blob = bucket.blob(object_name)
+    if not blob.exists():
+        raise RuntimeError(f"Arquivo não encontrado no GCS: {object_name}")
+
+    suffix = Path(object_name).suffix.lower()
+    if suffix in {".xlsx", ".xls"}:
+        df = _xlsx_blob_to_dataframe(blob)
+    else:
+        import pandas as pd
+        df = pd.read_csv(BytesIO(blob.download_as_bytes()), dtype=str)
+
+    _load_dataframe_to_staging_via_gcs(df)
+    job_id = run_procedure_async()
+    blob.delete()
+    return {"message": "Upload processado com sucesso.", "job_id": job_id}
 
 def _as_list(v: Any) -> List[str]:
     if v is None:
