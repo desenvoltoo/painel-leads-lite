@@ -58,7 +58,13 @@ def _tbl(name: str) -> str:
 
 
 
-GCS_UPLOAD_BUCKET = os.getenv("GCS_UPLOAD_BUCKET", "")
+GCS_UPLOAD_BUCKET = (
+    os.getenv("GCS_UPLOAD_BUCKET")
+    or os.getenv("GCS_BUCKET")
+    or os.getenv("CLOUD_STORAGE_BUCKET")
+    or os.getenv("UPLOAD_BUCKET")
+    or f"{GCP_PROJECT_ID}.appspot.com"
+)
 GCS_UPLOAD_PREFIX = os.getenv("GCS_UPLOAD_PREFIX", "uploads")
 
 
@@ -72,7 +78,13 @@ def get_storage_client() -> storage.Client:
 def _get_upload_bucket():
     if not GCS_UPLOAD_BUCKET:
         raise RuntimeError("Defina GCS_UPLOAD_BUCKET no ambiente.")
-    return get_storage_client().bucket(GCS_UPLOAD_BUCKET)
+    bucket = get_storage_client().bucket(GCS_UPLOAD_BUCKET)
+    if not bucket.exists():
+        raise RuntimeError(
+            f"Bucket de upload não encontrado: {GCS_UPLOAD_BUCKET}. "
+            "Defina GCS_UPLOAD_BUCKET (ou GCS_BUCKET/CLOUD_STORAGE_BUCKET/UPLOAD_BUCKET) com um bucket existente."
+        )
+    return bucket
 
 
 def generate_gcs_signed_upload(filename: str, source_tag: str = "manual") -> Dict[str, str]:
