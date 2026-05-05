@@ -1,18 +1,18 @@
 // static/js/app.js
 // STAR — compatível com:
-//   GET  /api/options  -> { ok:true, data:{ status:[], cursos:[], modalidades:[], turnos:[], polos:[], origens:[], canais:[], campanhas:[], consultores_disparo:[], consultores_comercial:[], tipos_disparo:[], tipos_negocio:[] } }
-//   POST /api/leads/search -> { ok:true, total:N, data:[...] }
-//   POST /api/kpis/search  -> { ok:true, total:N, top_status:{status,cnt} }
-//   GET  /api/export/xlsx -> XLSX (download)
-//   GET  /api/upload-url -> signed URL GCS
-//   POST /api/process-upload -> processa no BigQuery
+//    GET  /api/options  -> { ok:true, data:{ status:[], cursos:[], modalidades:[], turnos:[], polos:[], origens:[], canais:[], campanhas:[], consultores_disparo:[], consultores_comercial:[], tipos_disparo:[], tipos_negocio:[] } }
+//    POST /api/leads/search -> { ok:true, total:N, data:[...] }
+//    POST /api/kpis/search  -> { ok:true, total:N, top_status:{status,cnt} }
+//    GET  /api/export/xlsx -> XLSX (download)
+//    GET  /api/upload-url -> signed URL GCS
+//    POST /api/process-upload -> processa no BigQuery
 //
 // HTML (ids):
 // upload: #uploadFile #btnUpload #uploadStatus #uploadSource
 // filtros: #fStatus #fCurso #fModalidade #fTurno #fPolo #fOrigem
-//          #fConsultorDisparo #fConsultorComercial #fCanal #fCampanha
-//          #fTipoDisparo #fTipoNegocio
-//          #fIni #fFim #fMatriculado #fLimit #fBusca
+//           #fConsultorDisparo #fConsultorComercial #fCanal #fCampanha
+//           #fTipoDisparo #fTipoNegocio
+//           #fIni #fFim #fMatriculado #fLimit #fBusca
 // ações: #btnApply #btnClear #btnReload #btnExport
 // kpis: #kpiCount #kpiTopStatus
 // tabela: #tbl tbody
@@ -237,7 +237,7 @@ function makeTomSelect(selector) {
           <span class="ts-opt-text">${escape(data.text)}</span>
         </div>
       `,
-      item: (data, escape) => `<div>${escape(data.text)}</div>`,
+      item: (data, escape) => `<div class="ts-particle">${escape(data.text)}</div>`,
     },
     onChange: () => {
       currentPage = 1;
