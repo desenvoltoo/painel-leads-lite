@@ -1,236 +1,36 @@
-/* ============================================================
-   VARIÁVEIS E TEMA (DRACULA TECH)
-   ============================================================ */
 :root {
-  --bg: #060912;
-  --bg-soft: #0f1629;
-  --card: rgba(15, 23, 41, 0.84);
-  --card-strong: rgba(19, 30, 54, 0.92);
-  --text: #eef3ff;
-  --text-soft: #9fb0d9;
-  --border: rgba(151, 180, 255, 0.22);
-  --accent: #63a3ff;
-  --accent-2: #7a7dff;
-  --danger: #ff7c9d;
-  --success: #5ee3a0;
-  --shadow: 0 14px 34px rgba(1, 5, 16, 0.55);
-  --purple-glow: rgba(189, 147, 249, 0.3);
+    --dracula-bg: #282a36;
+    --dracula-current: #44475a;
+    --dracula-fg: #f8f8f2;
+    --dracula-comment: #6272a4;
+    --dracula-purple: #bd93f9;
 }
 
-/* ============================================================
-   RESET E BASE
-   ============================================================ */
-* { box-sizing: border-box; }
-html { overflow-y: scroll; }
-
-body {
-  margin: 0;
-  min-height: 100vh;
-  color: var(--text);
-  font-family: Inter, "Segoe UI", Roboto, sans-serif;
-  background:
-    radial-gradient(1200px 700px at -10% -20%, rgba(86, 126, 255, 0.35) 0%, rgba(86, 126, 255, 0) 60%),
-    radial-gradient(1000px 600px at 105% 0%, rgba(114, 69, 255, 0.3) 0%, rgba(114, 69, 255, 0) 55%),
-    linear-gradient(180deg, #060912 0%, #090f1d 100%);
-  background-attachment: fixed;
+.filters-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr); /* 3 colunas conforme imagem_e71297.jpg */
+    gap: 1.2rem;
 }
 
-/* Camada das Partículas */
-#particles-js {
-  position: fixed;
-  top: 0; left: 0; width: 100%; height: 100%;
-  z-index: 0; pointer-events: none;
-}
-
-/* Garante que o conteúdo fique sobre as partículas */
-.container, .topbar, .release-banner { position: relative; z-index: 10; }
-
-/* ============================================================
-   HEADER E NAVEGAÇÃO
-   ============================================================ */
-.release-banner {
-  position: sticky; top: 0; z-index: 60;
-  width: 100%; padding: 9px 14px;
-  text-align: center; font-size: 0.85rem; font-weight: 700;
-  color: #041024;
-  background: linear-gradient(90deg, #7de3ff 0%, #8eb3ff 52%, #95a2ff 100%);
-  border-bottom: 1px solid rgba(3, 16, 37, 0.2);
-}
-
-.topbar {
-  position: sticky; top: 38px; z-index: 40;
-  display: flex; justify-content: space-between; align-items: center;
-  gap: 18px; padding: 14px 24px;
-  border-bottom: 1px solid rgba(99, 163, 255, 0.3);
-  background: rgba(6, 10, 21, 0.72);
-  backdrop-filter: blur(10px);
-  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.4);
-}
-
-.brand { display: flex; align-items: center; gap: 12px; }
-.logo {
-  width: 40px; height: 40px; border-radius: 12px;
-  display: grid; place-items: center; font-weight: 800;
-  color: #061328;
-  background: linear-gradient(140deg, #98c7ff, #7b80ff);
-  box-shadow: 0 6px 16px rgba(97, 156, 255, 0.45);
-}
-
-.title { font-weight: 700; }
-.subtitle { color: var(--text-soft); font-size: 0.85rem; }
-
-.actions { display: flex; gap: 10px; align-items: center; }
-.user-chip {
-  padding: 8px 12px; border-radius: 999px;
-  border: 1px solid var(--border);
-  color: var(--text-soft); background: rgba(255, 255, 255, 0.03);
-  font-size: 0.82rem; font-weight: 600;
-}
-
-/* ============================================================
-   COMPONENTES DE EXPORTAÇÃO (UNIFICADO)
-   ============================================================ */
-.export-container { position: relative; display: inline-block; }
-
-.export-dropdown {
-  display: none;
-  position: absolute;
-  top: calc(100% + 8px); right: 0;
-  width: 290px;
-  background: var(--card-strong);
-  border: 1px solid var(--border);
-  border-radius: 12px;
-  box-shadow: 0 10px 30px rgba(0,0,0,0.6);
-  z-index: 1000;
-  overflow: hidden;
-  backdrop-filter: blur(12px);
-}
-
-.export-dropdown.active { display: block; animation: slideIn 0.2s ease-out; }
-
-.dropdown-item {
-  display: flex; align-items: center;
-  padding: 12px 16px; cursor: pointer;
-  border-bottom: 1px solid rgba(151, 180, 255, 0.1);
-  transition: background 0.2s;
-}
-
-.dropdown-item:hover { background: rgba(99, 163, 255, 0.15); }
-.dropdown-item:last-child { border-bottom: none; }
-
-.item-icon { font-size: 1.3rem; margin-right: 12px; }
-.item-text strong { display: block; font-size: 0.88rem; color: var(--accent); }
-.item-text small { font-size: 0.72rem; color: var(--text-soft); }
-
-/* ============================================================
-   LAYOUT E CARDS
-   ============================================================ */
-.container {
-  max-width: 1320px; margin: 0 auto;
-  padding: 24px 12px; display: grid; gap: 18px;
-}
-
-.kpis { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; }
-
-.kpi, .card {
-  border: 1px solid var(--border); border-radius: 16px;
-  background: var(--card); box-shadow: var(--shadow);
-}
-
-.kpi { padding: 16px; position: relative; overflow: hidden; }
-.kpi-label { color: var(--text-soft); text-transform: uppercase; font-size: 0.78rem; }
-.kpi-value { margin-top: 8px; font-size: 2rem; font-weight: 800; }
-.kpi-value-small { font-size: 1.2rem; }
-
-.card { padding: 18px; background: var(--card-strong); }
-.card-header h2 { margin: 0; font-size: 1.15rem; }
-.card-header p { margin: 8px 0 16px; color: var(--text-soft); }
-
-/* ============================================================
-   SISTEMA DE FILTROS E TOOLBAR
-   ============================================================ */
-.filters { display: grid; gap: 12px; }
-.filters-6 { grid-template-columns: repeat(6, 1fr); }
-.col-1 { grid-column: span 1; }
-
-.field { display: flex; flex-direction: column; gap: 6px; }
-.field label { font-size: 0.85rem; color: var(--text-soft); }
-
-.filters-row-compact {
-  display: flex; gap: 12px; margin-top: 15px; flex-wrap: wrap;
-}
-
-.field-search { flex: 2; min-width: 250px; }
-.field-limit { width: 100px; }
-
-/* Barra de Ações Compacta */
-.filter-toolbar {
-  display: flex; justify-content: space-between; align-items: center;
-  margin-top: 18px; padding-top: 15px;
-  border-top: 1px solid var(--border); gap: 15px;
-}
-
-.toolbar-left, .toolbar-right { display: flex; gap: 10px; align-items: center; }
-
-/* ============================================================
-   BOTÕES E INPUTS
-   ============================================================ */
-.btn {
-  border: 1px solid var(--border); border-radius: 10px;
-  padding: 10px 14px; font-weight: 650; color: var(--text);
-  background: rgba(255, 255, 255, 0.05); cursor: pointer;
-  transition: all 0.2s ease;
+.bottom-controls-grid {
+    display: grid;
+    grid-template-columns: 1.5fr 1fr 1.5fr; /* Divisão proporcional do rodapé */
+    gap: 2rem;
+    margin-top: 1.5rem;
+    padding-top: 1.5rem;
+    border-top: 1px solid var(--dracula-current);
 }
 
 .btn-primary {
-  border-color: transparent; color: #05122b;
-  background: linear-gradient(135deg, #8cc0ff, #7d86ff);
+    background: var(--dracula-purple);
+    color: var(--dracula-bg);
+    border-radius: 8px;
+    padding: 10px;
+    font-weight: bold;
+    transition: 0.3s;
 }
 
-.btn-glow { box-shadow: 0 0 8px rgba(99, 163, 255, 0.2); }
-.btn-glow:hover { box-shadow: 0 0 15px rgba(99, 163, 255, 0.5); transform: translateY(-1px); }
-
-.btn-ghost { background: transparent; border: 1px solid #6272a4; }
-.btn-danger { background: linear-gradient(135deg, #ff9eb7, #ff7ea7); color: #2a0812; border: none; }
-.btn-danger-ghost { color: var(--danger); border-color: rgba(255, 124, 157, 0.2); background: rgba(255, 124, 157, 0.05); }
-
-.btn-sm { padding: 6px 12px; font-size: 0.8rem; }
-
-input, select, .ts-control {
-  width: 100%; min-height: 42px; padding: 10px 12px;
-  color: var(--text); border: 1px solid var(--border) !important;
-  border-radius: 11px !important; background: rgba(6, 12, 28, 0.74) !important;
-  outline: none;
-}
-
-/* ============================================================
-   TABELA E PAGINAÇÃO
-   ============================================================ */
-.table-wrap { border: 1px solid var(--border); border-radius: 12px; overflow: auto; }
-table { width: 100%; min-width: 960px; border-collapse: collapse; table-layout: fixed; }
-thead th { 
-  position: sticky; top: 0; z-index: 1; text-align: left;
-  font-size: 0.77rem; text-transform: uppercase;
-  color: #b5c5e8; background: #111c36; padding: 12px;
-}
-td { padding: 10px 12px; border-bottom: 1px solid rgba(151, 180, 255, 0.1); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-
-.pagination-bar {
-  margin-top: 15px; display: flex; align-items: center;
-  justify-content: flex-end; gap: 15px;
-}
-
-/* ============================================================
-   ANIMAÇÕES E MEDIA QUERIES
-   ============================================================ */
-@keyframes slideIn {
-  from { opacity: 0; transform: translateY(-5px); }
-  to { opacity: 1; transform: translateY(0); }
-}
-
-@media (max-width: 1100px) {
-  .kpis { grid-template-columns: 1fr; }
-  .filters-6 { grid-template-columns: repeat(2, 1fr); }
-  .filter-toolbar { flex-direction: column; align-items: stretch; }
-  .toolbar-left, .toolbar-right { justify-content: center; }
+.btn-primary:hover {
+    box-shadow: 0 0 15px var(--dracula-purple);
+    filter: brightness(1.1);
 }
