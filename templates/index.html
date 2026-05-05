@@ -1,110 +1,275 @@
-<!-- Filtros Dinâmicos -->
-<div class="card filters-container">
-    <div class="card-header">
+<!doctype html>
+<html lang="pt-br">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Painel Leads Lite | Modelo Estrela (Star)</title>
+
+  <link href="https://cdn.jsdelivr.net/npm/tom-select@2.2.2/dist/css/tom-select.css" rel="stylesheet">
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/styles.css', v=asset_version) }}"> 
+</head>
+
+<body>
+  <div class="release-banner">Versão ativa no servidor: {{ ui_version }}</div>
+
+  <header class="topbar">
+    <div class="brand">
+      <div class="logo">PL</div>
+      <div>
+        <div class="title">Painel Leads Lite</div>
+        <div class="subtitle">Modelo Estrela • BigQuery</div>
+      </div>
+    </div>
+
+    <div class="actions">
+      <span class="user-chip">Usuário: {{ current_user or "—" }}</span>
+      <button id="btnReload" class="btn">Recarregar Dados</button>
+      <button id="btnExport" class="btn btn-ghost">Exportar XLSX</button>
+      <button id="btnBatchExport" class="btn btn-primary">Exportar em lote</button>
+      <form action="{{ url_for('logout') }}" method="post" class="logout-form">
+        <button type="submit" class="btn btn-danger">Sair</button>
+      </form>
+    </div>
+  </header>
+
+  <main class="container">
+
+    <section class="kpis">
+      <div class="kpi">
+        <div class="kpi-label">Total de Leads</div>
+        <div class="kpi-value" id="kpiCount">—</div>
+      </div>
+      <div class="kpi">
+        <div class="kpi-label">Status Predominante</div>
+        <div class="kpi-value" id="kpiTopStatus">—</div>
+      </div>
+      <div class="kpi">
+        <div class="kpi-label">Base de Dados</div>
+        <div class="kpi-value kpi-value-small">Star Schema</div>
+      </div>
+    </section>
+
+    <section class="card">
+      <div class="card-header">
+        <h2>Importar Planilha</h2>
+        <p>O arquivo será processado por uma <strong>Stored Procedure</strong> e distribuído para as dimensões + fato.</p>
+      </div>
+
+      <div class="filters filters-6">
+        <div class="field col-4">
+          <label>Arquivo (CSV ou XLSX)</label>
+          <input id="uploadFile" type="file" accept=".csv,.xlsx,.xls" />
+        </div>
+
+        <div class="field col-2">
+          <label>Tag de Lote (Opcional)</label>
+          <input id="uploadSource" placeholder="Ex: Lote_Fevereiro" />
+          <small class="muted">Obs.: tag reservada para auditoria/versões futuras.</small>
+        </div>
+
+        <div class="field field-actions col-6">
+          <button id="btnUpload" class="btn btn-primary">Processar no BigQuery</button>
+          <span id="uploadStatus" class="muted"></span>
+        </div>
+      </div>
+    </section>
+
+    <section class="card">
+      <div class="card-header">
         <h2>Filtros Dinâmicos</h2>
         <p>Seleção múltipla com busca. Filtros já alinhados ao novo Modelo Estrela.</p>
-    </div>
+      </div>
 
-    <div class="filters-grid">
-        <!-- Linha 1 -->
-        <div class="filter-group">
-            <label for="fStatus">Status (Multi)</label>
-            <select id="fStatus" multiple placeholder="Todos os status..."></select>
-        </div>
-        <div class="filter-group">
-            <label for="fCurso">Cursos (Multi)</label>
-            <select id="fCurso" multiple placeholder="Todos os cursos..."></select>
-        </div>
-        <div class="filter-group">
-            <label for="fModalidade">Modalidade (Multi)</label>
-            <select id="fModalidade" multiple placeholder="Todas as modalidades..."></select>
+      <!-- Linha 1 -->
+      <div class="filters filters-6">
+        <div class="field col-2">
+          <label>Status (Multi)</label>
+          <select id="fStatus" multiple placeholder="Todos os status..."></select>
         </div>
 
-        <!-- Linha 2 -->
-        <div class="filter-group">
-            <label for="fTurno">Turno (Multi)</label>
-            <select id="fTurno" multiple placeholder="Todos os turnos..."></select>
-        </div>
-        <div class="filter-group">
-            <label for="fPolo">Polos (Multi)</label>
-            <select id="fPolo" multiple placeholder="Todos os polos..."></select>
-        </div>
-        <div class="filter-group">
-            <label for="fOrigem">Origem (Multi)</label>
-            <select id="fOrigem" multiple placeholder="Todas as origens..."></select>
+        <div class="field col-2">
+          <label>Cursos (Multi)</label>
+          <select id="fCurso" multiple placeholder="Todos os cursos..."></select>
         </div>
 
-        <!-- Linha 3 -->
-        <div class="filter-group">
-            <label for="fConsultorDisparo">Consultor Disparo (Multi)</label>
-            <select id="fConsultorDisparo" multiple placeholder="Todos os consultores..."></select>
-        </div>
-        <div class="filter-group">
-            <label for="fConsultorComercial">Consultor Comercial (Multi)</label>
-            <select id="fConsultorComercial" multiple placeholder="Todos os consultores..."></select>
-        </div>
-        <div class="filter-group">
-            <label for="fCanal">Canal (Multi)</label>
-            <select id="fCanal" multiple placeholder="Todos os canais..."></select>
+        <div class="field col-2">
+          <label>Modalidade (Multi)</label>
+          <select id="fModalidade" multiple placeholder="Todas as modalidades..."></select>
         </div>
 
-        <!-- Linha 4 -->
-        <div class="filter-group">
-            <label for="fCampanha">Campanha (Multi)</label>
-            <select id="fCampanha" multiple placeholder="Todas as campanhas..."></select>
-        </div>
-        <div class="filter-group">
-            <label for="fTipoDisparo">Tipo Disparo (Multi)</label>
-            <select id="fTipoDisparo" multiple placeholder="Todos os tipos..."></select>
-        </div>
-        <div class="filter-group">
-            <label for="fTipoNegocio">Tipo Negócio (Multi)</label>
-            <select id="fTipoNegocio" multiple placeholder="Todos os tipos..."></select>
-        </div>
-    </div>
-
-    <!-- Controles de Rodapé e Busca Rápida -->
-    <div class="bottom-controls-grid">
-        <!-- Bloco de Data e Limite -->
-        <div class="date-and-options">
-            <div class="filter-group">
-                <label>Data Inicial</label>
-                <input type="date" id="fIni">
-            </div>
-            <div class="filter-group">
-                <label>Data Final</label>
-                <input type="date" id="fFim">
-            </div>
-            <div class="filter-group">
-                <label>Matriculado</label>
-                <select id="fMatriculado">
-                    <option value="">Todos</option>
-                    <option value="true">Sim</option>
-                    <option value="false">Não</option>
-                </select>
-            </div>
-            <div class="filter-group">
-                <label>Limite</label>
-                <input type="number" id="fLimit" value="500">
-            </div>
+        <div class="field col-2">
+          <label>Turno (Multi)</label>
+          <select id="fTurno" multiple placeholder="Todos os turnos..."></select>
         </div>
 
-        <!-- Bloco de Ações e Filtros Salvos -->
-        <div class="action-buttons-group">
-            <button id="btnApply" class="btn-primary">Aplicar Filtros</button>
-            <button id="btnClear" class="btn-secondary">Limpar Tudo</button>
-            
-            <div class="saved-filters-area">
-                <select id="fSaved" class="select-saved" placeholder="Filtros salvos..."></select>
-                <button id="btnSaveFilter" class="btn-text">Salvar Filtro</button>
-            </div>
+        <div class="field col-2">
+          <label>Polos (Multi)</label>
+          <select id="fPolo" multiple placeholder="Todos os polos..."></select>
         </div>
 
-        <!-- Bloco de Busca Rápida -->
-        <div class="quick-search-area">
-            <label for="fBusca">Busca rápida (Nome / CPF / Celular / Email)</label>
-            <input type="text" id="fBusca" placeholder="Ex.: Maria / 12345678900 /">
-            <p class="helper-text">O painel detecta automaticamente o tipo de busca e envia os parâmetros corretos.</p>
+        <div class="field col-2">
+          <label>Origem (Multi)</label>
+          <select id="fOrigem" multiple placeholder="Todas as origens..."></select>
         </div>
-    </div>
-</div>
+      </div>
+
+      <!-- Linha 2 -->
+      <div class="filters filters-6">
+        <div class="field col-2">
+          <label>Consultor Disparo (Multi)</label>
+          <select id="fConsultorDisparo" multiple placeholder="Todos os consultores..."></select>
+        </div>
+
+        <div class="field col-2">
+          <label>Consultor Comercial (Multi)</label>
+          <select id="fConsultorComercial" multiple placeholder="Todos os consultores..."></select>
+        </div>
+
+        <div class="field col-2">
+          <label>Canal (Multi)</label>
+          <select id="fCanal" multiple placeholder="Todos os canais..."></select>
+        </div>
+
+        <div class="field col-2">
+          <label>Campanha (Multi)</label>
+          <select id="fCampanha" multiple placeholder="Todas as campanhas..."></select>
+        </div>
+
+        <div class="field col-2">
+          <label>Tipo Disparo (Multi)</label>
+          <select id="fTipoDisparo" multiple placeholder="Todos os tipos..."></select>
+        </div>
+
+        <div class="field col-2">
+          <label>Tipo Negócio (Multi)</label>
+          <select id="fTipoNegocio" multiple placeholder="Todos os tipos..."></select>
+        </div>
+      </div>
+
+      <!-- Linha 3 -->
+      <div class="filters filters-6">
+        <div class="field col-1">
+          <label>Data Inicial</label>
+          <input id="fIni" type="date" />
+        </div>
+
+        <div class="field col-1">
+          <label>Data Final</label>
+          <input id="fFim" type="date" />
+        </div>
+
+        <div class="field col-1">
+          <label>Matriculado</label>
+          <select id="fMatriculado">
+            <option value="">Todos</option>
+            <option value="true">Sim</option>
+            <option value="false">Não</option>
+          </select>
+        </div>
+
+        <div class="field col-1">
+          <label>Limite</label>
+          <input id="fLimit" type="number" min="50" step="50" value="500" />
+        </div>
+
+        <div class="field field-actions col-3">
+          <button id="btnApply" class="btn btn-primary">Aplicar Filtros</button>
+          <button id="btnClear" class="btn btn-ghost">Limpar Tudo</button>
+          <select id="savedFilterSelect">
+            <option value="">Filtros salvos...</option>
+          </select>
+          <button id="btnSaveFilterView" class="btn">Salvar Filtro</button>
+          <button id="btnDeleteFilterView" class="btn btn-danger">Excluir Filtro</button>
+        </div>
+
+        <div class="field col-5">
+          <label>Busca rápida (Nome / CPF / Celular / Email)</label>
+          <input id="fBusca" placeholder="Ex.: Maria / 12345678900 / 11999999999 / email@..." />
+          <small class="muted">O painel detecta automaticamente o tipo de busca e envia os parâmetros corretos.</small>
+        </div>
+      </div>
+
+      <div class="muted section-hint">
+        Dica: use o campo de busca dentro do dropdown para achar opções rápido e clique em
+        <strong>Selecionar resultados da busca</strong> para marcar tudo de uma vez.
+      </div>
+    </section>
+
+    <section class="card">
+      <div class="card-header">
+        <h2>Leads Consolidados</h2>
+        <p id="statusLine">Aguardando consulta...</p>
+      </div>
+
+      <div class="table-wrap">
+        <table id="tbl">
+          <thead>
+            <tr>
+              <th>Data Inscrição</th>
+              <th>Candidato</th>
+              <th>CPF</th>
+              <th>Celular</th>
+              <th>Origem</th>
+              <th>Polo</th>
+              <th>Curso</th>
+              <th>Modalidade</th>
+              <th>Status (Inscrição)</th>
+              <th>Matriculado</th>
+              <th>Consultor Disparo</th>
+              <th>Campanha</th>
+              <th>Canal</th>
+            </tr>
+          </thead>
+          <tbody>
+            <!-- preenchido via JS -->
+          </tbody>
+        </table>
+      </div>
+
+      <div class="muted section-total">
+        <span id="lblRange">Mostrando 0-0 de 0 leads</span>
+        <strong id="lblTotal">—</strong>
+      </div>
+
+      <div class="pagination-bar">
+        <button id="btnPrevPage" class="btn btn-ghost">Página anterior</button>
+        <span class="muted" id="lblPage">Página 1</span>
+        <button id="btnNextPage" class="btn btn-ghost">Próxima página</button>
+      </div>
+
+      <div class="loading-row" id="searchLoading" hidden>
+        <div class="spinner"></div>
+        <span>Buscando leads...</span>
+      </div>
+
+      <div class="export-progress" id="exportProgress" hidden>
+        <div class="export-progress-head">
+          <strong>Exportação em lote</strong>
+          <span id="exportProgressText">Aguardando...</span>
+        </div>
+        <div class="progress-track">
+          <div class="progress-bar" id="exportProgressBar"></div>
+        </div>
+      </div>
+    </section>
+
+    <footer class="footer">
+      <span>© Painel Leads Lite - Engenharia de Dados</span>
+      <span class="muted">Infra: BigQuery + Modelo Estrela</span>
+      <span class="build-tag">UI {{ ui_version }}</span>
+    </footer>
+  </main>
+
+  <script src="https://cdn.jsdelivr.net/npm/tom-select@2.2.2/dist/js/tom-select.complete.min.js"></script>
+
+  <script>
+    window.__TOMSELECT_PLUGINS__ = {
+      checkbox: "checkbox_options",
+      remove_button: "remove_button",
+      clear_button: "clear_button"
+    };
+  </script>
+
+  <script src="{{ url_for('static', filename='js/app.js', v=asset_version) }}"></script>
+</body>
+</html>
