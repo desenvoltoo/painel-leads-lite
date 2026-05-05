@@ -27,6 +27,18 @@ body {
     radial-gradient(1200px 700px at -10% -20%, rgba(86, 126, 255, 0.35) 0%, rgba(86, 126, 255, 0) 60%),
     radial-gradient(1000px 600px at 105% 0%, rgba(114, 69, 255, 0.3) 0%, rgba(114, 69, 255, 0) 55%),
     linear-gradient(180deg, #060912 0%, #090f1d 100%);
+  background-attachment: fixed; /* Garante que o gradiente e as partículas fiquem fixos */
+}
+
+/* Camada das Partículas: Escopo Adicionado */
+#particles-js {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  z-index: 0; /* Fica atrás de todo o conteúdo */
+  pointer-events: none; /* Não interfere nos cliques dos botões/filtros */
 }
 
 .release-banner {
@@ -56,6 +68,12 @@ body {
   border-bottom: 1px solid var(--border);
   background: rgba(6, 10, 21, 0.72);
   backdrop-filter: blur(10px);
+}
+
+/* Garante que o conteúdo principal fique sobre as partículas */
+.container, .topbar, .release-banner {
+  position: relative;
+  z-index: 10;
 }
 
 .brand { display: flex; align-items: center; gap: 12px; }
@@ -309,7 +327,7 @@ table {
   width: 100%;
   min-width: 960px;
   border-collapse: collapse;
-  table-layout: fixed;   /* ✅ trava as colunas */
+  table-layout: fixed;   /* trava as colunas */
 }
 
 thead th {
@@ -327,9 +345,9 @@ thead th {
 th, td {
   padding: 10px 12px;
   border-bottom: 1px solid rgba(151, 180, 255, 0.16);
-  white-space: nowrap;        /* ✅ evita “crescer” linha/coluna */
-  overflow: hidden;           /* ✅ corta excesso */
-  text-overflow: ellipsis;    /* ✅ ... */
+  white-space: nowrap;        /* evita crescer linha/coluna */
+  overflow: hidden;           /* corta excesso */
+  text-overflow: ellipsis;    /* ... */
 }
 
 tbody tr:nth-child(even) { background: rgba(255, 255, 255, 0.015); }
@@ -381,7 +399,6 @@ tbody tr:hover { background: rgba(122, 125, 255, 0.1); }
   flex-wrap: wrap;
   margin: 4px 0 14px;
 }
-
 
 .build-tag {
   display: inline-block;
