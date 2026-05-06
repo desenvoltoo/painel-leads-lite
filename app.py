@@ -28,6 +28,7 @@ from services.bigquery import (
     query_leads_count,
     query_options,
     process_gcs_upload,
+    process_upload_dataframe,
     generate_gcs_signed_upload,
     get_bq_job_status,          # novo
     export_leads_rows,
@@ -332,12 +333,20 @@ def _read_upload_to_df(file_storage) -> pd.DataFrame:
         if enc not in encodings_to_try:
             encodings_to_try.append(enc)
 
+    best_df = None
     for sep in (";", ","):
         for enc in encodings_to_try:
             try:
-                return _read_csv(raw, sep, enc)
+                df = _read_csv(raw, sep, enc)
+                if len(df.columns) > 1:
+                    return df
+                if best_df is None:
+                    best_df = df
             except Exception:
                 continue
+
+    if best_df is not None:
+        return best_df
  
     raise ValueError(
         "Não foi possível ler o arquivo. "
@@ -775,7 +784,27 @@ def create_app() -> Flask:
 
     @app.post("/api/upload")
     def api_upload():
-        return jsonify({"ok": False, "error": "Endpoint legado. Use /api/upload-url + /api/process-upload."}), 410
+        if "file" not in request.files:
+            return jsonify({"ok": False, "error": "Nenhum arquivo enviado."}), 400
+
+        file_storage = request.files["file"]
+        filename = (file_storage.filename or "").strip()
+        if not filename:
+            return jsonify({"ok": False, "error": "Nome do arquivo é obrigatório."}), 400
+        if not _validate_upload_filename(filename):
+            return jsonify({"ok": False, "error": "Formato inválido. Envie CSV ou XLSX."}), 400
+
+        try:
+            df = _read_upload_to_df(file_storage)
+            job_id = process_upload_dataframe(df)
+            return jsonify({
+                "ok": True,
+                "message": "Upload recebido. Processamento iniciado no BigQuery.",
+                "job_id": job_id,
+            }), 202
+        except Exception as e:
+            logger.exception("Falha no upload direto: %s", e)
+            return jsonify(_error_payload(e, "Falha ao processar upload.")), 500
 
     @app.get("/api/upload/status")
     def api_upload_status():

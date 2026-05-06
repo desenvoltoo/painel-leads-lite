@@ -4,7 +4,7 @@
 //   POST /api/leads/search -> { ok:true, total:N, data:[...] }
 //   POST /api/kpis/search  -> { ok:true, total:N, top_status:{status,cnt} }
 //   GET  /api/export/xlsx -> XLSX (download)
-//   POST /api/upload   -> { ok:true, message:"..." , saved_xlsx:"..." }
+//   GET  /api/upload-url + PUT signed URL + POST /api/process-upload
 //
 // HTML (ids):
 // upload: #uploadFile #btnUpload #uploadStatus #uploadSource
@@ -731,6 +731,60 @@ function renderKpis(k) {
 /* =========================
    Upload
 ========================= */
+async function uploadDirectToServer(file, source) {
+  const fd = new FormData();
+  fd.append("file", file);
+  if (source) fd.append("source", source);
+  return apiPostForm("/api/upload", fd);
+}
+
+async function uploadViaSignedUrl(file, source) {
+  const signed = await apiGet("/api/upload-url", { filename: file.name, source });
+  const info = signed?.data;
+  if (!info?.upload_url || !info?.object_name) {
+    throw new Error("URL assinada não retornada pela API.");
+  }
+
+  setUploadStatus("Enviando arquivo para o storage...", "ok");
+  const putResp = await fetch(info.upload_url, {
+    method: "PUT",
+    headers: { "Content-Type": "application/octet-stream" },
+    body: file,
+  });
+  if (!putResp.ok) {
+    throw new Error(`Falha ao enviar arquivo ao storage (${putResp.status}).`);
+  }
+
+  setUploadStatus("Arquivo enviado. Iniciando processamento no BigQuery...", "ok");
+  return apiPostJson("/api/process-upload", { object_name: info.object_name });
+}
+
+async function pollUploadStatus(jobId) {
+  if (!jobId) return;
+
+  const maxAttempts = 80;
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    const resp = await apiGet("/api/upload/status", { job_id: jobId });
+    const data = resp?.data || {};
+
+    if (data.ok === false) {
+      throw new Error(data?.error?.message || data?.error || "Falha no job do BigQuery.");
+    }
+
+    if (data.state === "DONE") {
+      setUploadStatus("Processamento concluído. Atualizando painel...", "ok");
+      await loadOptions();
+      await loadLeadsAndKpis();
+      return;
+    }
+
+    setUploadStatus(`Processando no BigQuery... (${attempt}/${maxAttempts})`, "ok");
+    await new Promise((resolve) => setTimeout(resolve, 1500));
+  }
+
+  setUploadStatus("Upload iniciado. O processamento ainda está em andamento; atualize o painel em instantes.", "ok");
+}
+
 async function doUpload() {
   const fileInput = $("#uploadFile");
   if (!fileInput || !fileInput.files || fileInput.files.length === 0) {
@@ -739,20 +793,28 @@ async function doUpload() {
   }
 
   const file = fileInput.files[0];
-  setUploadStatus("Enviando e processando... (staging + procedure)", "ok");
+  const source = ($("#uploadSource")?.value || "").trim();
+  const validExtension = /\.(csv|xlsx|xls)$/i.test(file.name || "");
+  if (!validExtension) {
+    setUploadStatus("Formato inválido. Envie CSV ou XLSX.", "err");
+    return;
+  }
+
+  setUploadStatus("Preparando upload...", "ok");
 
   try {
-    const fd = new FormData();
-    fd.append("file", file);
+    let resp;
+    try {
+      resp = await uploadViaSignedUrl(file, source);
+    } catch (signedError) {
+      console.warn("Upload via URL assinada falhou; usando envio direto.", signedError);
+      setUploadStatus("Upload direto pelo servidor...", "ok");
+      resp = await uploadDirectToServer(file, source);
+    }
 
-    const src = ($("#uploadSource")?.value || "").trim();
-    if (src) fd.append("source", src);
-
-    const resp = await apiPostForm("/api/upload", fd);
-    setUploadStatus(resp?.message || "Processado com sucesso!", "ok");
-
-    await loadOptions();
-    await loadLeadsAndKpis();
+    const jobId = resp?.job_id;
+    setUploadStatus(resp?.message || "Upload recebido. Processando...", "ok");
+    await pollUploadStatus(jobId);
   } catch (e) {
     console.error(e);
     setUploadStatus(e.message || "Erro no upload.", "err");
