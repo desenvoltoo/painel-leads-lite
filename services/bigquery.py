@@ -23,6 +23,8 @@ from google.api_core.exceptions import (
     TooManyRequests,
 )
 from google.cloud import bigquery, storage
+from google.auth import default
+from google.auth.iam_credentials import IAMCredentialsSigner   # <-- NOVO IMPORT
 
 # XLSX
 from openpyxl import Workbook
@@ -472,6 +474,8 @@ def generate_gcs_signed_upload(filename: str, source_tag: str = "manual") -> Dic
     """
     Gera signed URL PUT para upload direto ao GCS pelo cliente.
     Expiração controlada por GCS_SIGNED_URL_EXPIRY_MINUTES (padrão 30).
+    Usa IAMCredentialsSigner para funcionar com qualquer Service Account,
+    inclusive a padrão do Compute Engine ou outras sem chave privada local.
     """
     bucket = _get_upload_bucket()
     safe_name = Path(filename).name
@@ -479,14 +483,24 @@ def generate_gcs_signed_upload(filename: str, source_tag: str = "manual") -> Dic
     object_name = f"{GCS_UPLOAD_PREFIX.strip('/')}/{safe_source}/{uuid.uuid4().hex}_{safe_name}"
     blob = bucket.blob(object_name)
 
+    # Obtém as credenciais padrão do ambiente (Cloud Run fornece)
+    credentials, project = default()
+
+    # Cria um signer baseado em IAM (não precisa de chave privada)
+    signer = IAMCredentialsSigner(credentials)
+
     try:
         signed_url = blob.generate_signed_url(
             version="v4",
             expiration=timedelta(minutes=GCS_SIGNED_URL_EXPIRY_MINUTES),
             method="PUT",
             content_type="application/octet-stream",
+            credentials=credentials,               # força uso das credenciais atuais
+            service_account_email=credentials.service_account_email,  # email da SA atual
+            signer=signer,                         # delega assinatura para IAM
         )
     except Exception as exc:
+        logger.exception("Falha ao gerar signed URL para %s", object_name)
         raise RuntimeError(
             "Não foi possível assinar URL do GCS. "
             "Verifique GCS_UPLOAD_BUCKET e permissões da Service Account para assinar URLs."
