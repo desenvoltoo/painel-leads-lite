@@ -96,6 +96,49 @@ def generate_gcs_signed_upload(filename: str, source_tag: str = "manual") -> Dic
     return {"upload_url": signed_url, "object_name": object_name, "bucket": bucket.name}
 
 
+
+def _detect_csv_encoding(raw_bytes: bytes) -> str:
+    try:
+        import chardet
+
+        detected = chardet.detect(raw_bytes)
+        encoding = (detected.get("encoding") or "utf-8").lower()
+        confidence = detected.get("confidence") or 0
+        if confidence >= 0.7:
+            return "utf-8" if encoding == "ascii" else encoding
+    except ImportError:
+        pass
+    return "utf-8"
+
+
+def _csv_blob_to_dataframe(blob) -> Any:
+    import pandas as pd
+
+    payload = blob.download_as_bytes()
+    detected_enc = _detect_csv_encoding(payload)
+    encodings_to_try: List[str] = []
+    for enc in (detected_enc, "utf-8-sig", "utf-8", "latin-1"):
+        if enc not in encodings_to_try:
+            encodings_to_try.append(enc)
+
+    last_error: Optional[Exception] = None
+    best_df = None
+    for sep in (";", ","):
+        for enc in encodings_to_try:
+            try:
+                df = pd.read_csv(BytesIO(payload), sep=sep, encoding=enc, dtype=str)
+                if len(df.columns) > 1:
+                    return df
+                if best_df is None:
+                    best_df = df
+            except Exception as exc:
+                last_error = exc
+
+    if best_df is not None:
+        return best_df
+
+    raise RuntimeError("Não foi possível ler o CSV enviado via GCS.") from last_error
+
 def _xlsx_blob_to_dataframe(blob) -> Any:
     from openpyxl import load_workbook
     import pandas as pd
@@ -145,8 +188,7 @@ def process_gcs_upload(object_name: str) -> Dict[str, Any]:
     if suffix in {".xlsx", ".xls"}:
         df = _xlsx_blob_to_dataframe(blob)
     else:
-        import pandas as pd
-        df = pd.read_csv(BytesIO(blob.download_as_bytes()), dtype=str)
+        df = _csv_blob_to_dataframe(blob)
 
     _load_dataframe_to_staging_via_gcs(df)
     job_id = run_procedure_async()
