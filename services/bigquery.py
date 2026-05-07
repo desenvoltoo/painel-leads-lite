@@ -3,12 +3,26 @@ from __future__ import annotations
 
 import os
 import logging
+import threading
+import time
+import uuid
+from concurrent.futures import TimeoutError as FuturesTimeoutError
 from decimal import Decimal, InvalidOperation
+from datetime import timedelta
+from io import BytesIO, StringIO
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from time import perf_counter
+from typing import Any, Dict, Iterator, List, Optional, Tuple
 
-from google.cloud import bigquery
-from google.api_core.exceptions import GoogleAPICallError, BadRequest, Forbidden, NotFound
+from google.cloud import bigquery, storage
+from google.api_core.exceptions import (
+    GoogleAPICallError,
+    BadRequest,
+    Forbidden,
+    NotFound,
+    ServiceUnavailable,
+    TooManyRequests,
+)
 
 # XLSX
 from openpyxl import Workbook
@@ -31,18 +45,76 @@ BQ_VIEW_LEADS = "vw_leads_painel_lite"
 DEFAULT_LIMIT = int(os.getenv("BQ_DEFAULT_LIMIT", "200"))
 MAX_LIMIT = int(os.getenv("BQ_MAX_LIMIT", "2000"))
 EXPORT_MAX_ROWS = int(os.getenv("BQ_EXPORT_MAX_ROWS", "50000"))
+QUERY_TIMEOUT_SECONDS = int(os.getenv("BQ_QUERY_TIMEOUT_SECONDS", "180"))
+
+# GCS upload
+GCS_UPLOAD_BUCKET = os.getenv("GCS_UPLOAD_BUCKET", "")
+GCS_UPLOAD_PREFIX = os.getenv("GCS_UPLOAD_PREFIX", "uploads")
+GCS_SIGNED_URL_EXPIRY_MINUTES = int(os.getenv("GCS_SIGNED_URL_EXPIRY_MINUTES", "30"))
+MAX_FILE_SIZE_BYTES = int(os.getenv("GCS_MAX_FILE_SIZE_BYTES", str(50 * 1024 * 1024)))
+ALLOWED_EXTENSIONS = {".csv", ".xlsx", ".xls"}
+
+# Retry
+RETRY_MAX_ATTEMPTS = int(os.getenv("BQ_RETRY_MAX_ATTEMPTS", "3"))
+RETRY_BASE_DELAY_S = float(os.getenv("BQ_RETRY_BASE_DELAY_S", "2.0"))
+RETRY_MAX_DELAY_S = float(os.getenv("BQ_RETRY_MAX_DELAY_S", "30.0"))
 
 # colunas que não devem sofrer comportamento numérico
 PHONEISH_COLUMNS = {"cpf", "celular"}
 
-_bq_client: Optional[bigquery.Client] = None
+# ============================================================
+# CLIENTES THREAD-SAFE
+# Cada thread mantém sua própria instância, evitando condições
+# de corrida em ambientes multi-thread (FastAPI / Gunicorn).
+# ============================================================
+_thread_local = threading.local()
 
 
 def get_bq_client() -> bigquery.Client:
-    global _bq_client
-    if _bq_client is None:
-        _bq_client = bigquery.Client(project=GCP_PROJECT_ID)
-    return _bq_client
+    if not getattr(_thread_local, "bq_client", None):
+        _thread_local.bq_client = bigquery.Client(project=GCP_PROJECT_ID)
+    return _thread_local.bq_client
+
+
+def get_storage_client() -> storage.Client:
+    if not getattr(_thread_local, "storage_client", None):
+        _thread_local.storage_client = storage.Client(project=GCP_PROJECT_ID)
+    return _thread_local.storage_client
+
+
+def _get_upload_bucket() -> storage.Bucket:
+    if not GCS_UPLOAD_BUCKET:
+        raise RuntimeError("Defina GCS_UPLOAD_BUCKET no ambiente.")
+    return get_storage_client().bucket(GCS_UPLOAD_BUCKET)
+
+
+# ============================================================
+# RETRY COM BACKOFF EXPONENCIAL
+# Erros fatais (BadRequest, Forbidden, NotFound) não são retriados.
+# ============================================================
+_RETRYABLE_EXCEPTIONS = (ServiceUnavailable, TooManyRequests, GoogleAPICallError)
+
+
+def _with_retry(fn, *args, operation_name: str = "operação", **kwargs) -> Any:
+    delay = RETRY_BASE_DELAY_S
+    last_exc: Optional[Exception] = None
+    for attempt in range(1, RETRY_MAX_ATTEMPTS + 1):
+        try:
+            return fn(*args, **kwargs)
+        except (BadRequest, Forbidden, NotFound) as exc:
+            logger.error("Erro fatal em '%s' (tentativa %d/%d): %s", operation_name, attempt, RETRY_MAX_ATTEMPTS, exc)
+            raise RuntimeError(f"Erro fatal em {operation_name}: {exc}") from exc
+        except _RETRYABLE_EXCEPTIONS as exc:
+            last_exc = exc
+            if attempt == RETRY_MAX_ATTEMPTS:
+                break
+            logger.warning("Erro transitório em '%s' (tentativa %d/%d), aguardando %.1fs: %s", operation_name, attempt, RETRY_MAX_ATTEMPTS, delay, exc)
+            time.sleep(delay)
+            delay = min(delay * 2, RETRY_MAX_DELAY_S)
+        except Exception as exc:
+            logger.exception("Erro inesperado em '%s': %s", operation_name, exc)
+            raise
+    raise RuntimeError(f"'{operation_name}' falhou após {RETRY_MAX_ATTEMPTS} tentativas.") from last_exc
 
 
 def _tbl(name: str) -> str:
@@ -278,9 +350,9 @@ def _coerce_df_to_staging_schema(df):
 def load_to_staging(df) -> None:
     client = get_bq_client()
     table_id = f"{GCP_PROJECT_ID}.{BQ_DATASET}.{BQ_STAGING_TABLE}"
+    df2 = _coerce_df_to_staging_schema(df)
 
-    try:
-        df2 = _coerce_df_to_staging_schema(df)
+    def _do_load():
         job = client.load_table_from_dataframe(
             df2,
             table_id,
@@ -290,24 +362,22 @@ def load_to_staging(df) -> None:
             ),
         )
         job.result()
-    except (BadRequest, Forbidden, NotFound, GoogleAPICallError) as e:
-        logger.exception("BQ load_to_staging falhou: %s", str(e))
-        raise RuntimeError(f"Erro ao carregar staging ({table_id}): {e}") from e
+        logger.info("BQ load_table_from_dataframe concluído: job_id=%s", job.job_id)
+
+    _with_retry(_do_load, operation_name=f"load_to_staging → {table_id}")
 
 
 def run_procedure_async() -> str:
-    """
-    Dispara a procedure e retorna o job_id sem bloquear a request.
-    """
+    """Dispara a procedure e retorna o job_id sem bloquear a request."""
     client = get_bq_client()
     sql = f"CALL `{GCP_PROJECT_ID}.{BQ_DATASET}.{BQ_PROCEDURE}`();"
 
-    try:
+    def _do_call():
         job = client.query(sql)
+        logger.info("Procedure disparada: job_id=%s procedure=%s", job.job_id, BQ_PROCEDURE)
         return job.job_id
-    except (BadRequest, Forbidden, NotFound, GoogleAPICallError) as e:
-        logger.exception("BQ run_procedure_async falhou: %s", str(e))
-        raise RuntimeError(f"Erro ao disparar procedure ({BQ_PROCEDURE}): {e}") from e
+
+    return _with_retry(_do_call, operation_name=f"run_procedure_async ({BQ_PROCEDURE})")
 
 
 def process_upload_dataframe(df) -> str:
@@ -318,6 +388,204 @@ def process_upload_dataframe(df) -> str:
     """
     load_to_staging(df)
     return run_procedure_async()
+
+
+# ============================================================
+# SIGNED URL + PROCESS GCS UPLOAD
+# ============================================================
+def _detect_csv_encoding(raw_bytes: bytes) -> str:
+    try:
+        import chardet
+        detected = chardet.detect(raw_bytes)
+        encoding = (detected.get("encoding") or "utf-8").lower()
+        confidence = detected.get("confidence") or 0
+        if confidence >= 0.7:
+            return "utf-8" if encoding == "ascii" else encoding
+    except ImportError:
+        pass
+    return "utf-8"
+
+
+def _csv_blob_to_dataframe(blob) -> Any:
+    import pandas as pd
+
+    payload = blob.download_as_bytes()
+    detected_enc = _detect_csv_encoding(payload)
+    encodings_to_try: List[str] = []
+    for enc in (detected_enc, "utf-8-sig", "utf-8", "latin-1"):
+        if enc not in encodings_to_try:
+            encodings_to_try.append(enc)
+
+    last_error: Optional[Exception] = None
+    best_df = None
+    for sep in (";", ","):
+        for enc in encodings_to_try:
+            try:
+                df = pd.read_csv(BytesIO(payload), sep=sep, encoding=enc, dtype=str)
+                if len(df.columns) > 1:
+                    return df
+                if best_df is None:
+                    best_df = df
+            except Exception as exc:
+                last_error = exc
+
+    if best_df is not None:
+        return best_df
+    raise RuntimeError("Não foi possível ler o CSV enviado via GCS.") from last_error
+
+
+def _xlsx_blob_to_dataframe(blob) -> Any:
+    from openpyxl import load_workbook
+    import pandas as pd
+
+    payload = blob.download_as_bytes()
+    wb = load_workbook(BytesIO(payload), data_only=True, read_only=True)
+    ws = wb.active
+    rows = ws.iter_rows(values_only=True)
+    try:
+        first_row = next(rows)
+    except StopIteration:
+        raise RuntimeError("Arquivo XLSX está vazio.")
+    headers = [str(c).strip() if c is not None else "" for c in first_row]
+    if not any(headers):
+        raise RuntimeError("Cabeçalho do XLSX não encontrado.")
+    data = [{headers[i]: r[i] if i < len(r) else None for i in range(len(headers))} for r in rows]
+    return pd.DataFrame(data)
+
+
+def _validate_blob(blob: storage.Blob, object_name: str) -> None:
+    """Valida extensão e tamanho antes de qualquer processamento pesado."""
+    blob.reload()
+    suffix = Path(object_name).suffix.lower()
+    if suffix not in ALLOWED_EXTENSIONS:
+        raise ValueError(f"Extensão '{suffix}' não suportada. Use: {', '.join(sorted(ALLOWED_EXTENSIONS))}.")
+    size = blob.size or 0
+    if size == 0:
+        raise ValueError("O arquivo enviado está vazio.")
+    if size > MAX_FILE_SIZE_BYTES:
+        mb = MAX_FILE_SIZE_BYTES // (1024 * 1024)
+        raise ValueError(f"O arquivo excede o limite de {mb} MB ({size / (1024 * 1024):.1f} MB recebidos).")
+    logger.info("Arquivo validado: object=%s ext=%s size_bytes=%d", object_name, suffix, size)
+
+
+def _upload_df_to_gcs_temp(df, bucket: storage.Bucket) -> str:
+    temp_name = f"{GCS_UPLOAD_PREFIX.strip('/')}/tmp/staging_{uuid.uuid4().hex}.csv"
+    blob = bucket.blob(temp_name)
+    csv_bytes = df.to_csv(index=False).encode("utf-8")
+
+    def _do_upload():
+        blob.upload_from_string(csv_bytes, content_type="text/csv")
+
+    _with_retry(_do_upload, operation_name="upload CSV temporário para GCS")
+    logger.info("CSV temporário enviado: gs://%s/%s (%d bytes)", bucket.name, temp_name, len(csv_bytes))
+    return temp_name
+
+
+def _load_gcs_csv_to_staging(bucket: storage.Bucket, temp_name: str) -> None:
+    client = get_bq_client()
+    table_id = f"{GCP_PROJECT_ID}.{BQ_DATASET}.{BQ_STAGING_TABLE}"
+    uri = f"gs://{bucket.name}/{temp_name}"
+
+    def _do_load():
+        job = client.load_table_from_uri(
+            uri, table_id,
+            job_config=bigquery.LoadJobConfig(
+                schema=STAGING_SCHEMA,
+                source_format=bigquery.SourceFormat.CSV,
+                skip_leading_rows=1,
+                write_disposition=bigquery.WriteDisposition.WRITE_TRUNCATE,
+            ),
+        )
+        job.result()
+        logger.info("BQ Load Job concluído: job_id=%s tabela=%s", job.job_id, table_id)
+
+    _with_retry(_do_load, operation_name=f"BQ load_table_from_uri → {table_id}")
+
+
+def _load_dataframe_to_staging_via_gcs(df) -> None:
+    """Coerção → upload CSV temp no GCS → BQ load job → limpeza garantida."""
+    bucket = _get_upload_bucket()
+    df2 = _coerce_df_to_staging_schema(df)
+    temp_name = _upload_df_to_gcs_temp(df2, bucket)
+    try:
+        _load_gcs_csv_to_staging(bucket, temp_name)
+    finally:
+        try:
+            bucket.blob(temp_name).delete()
+            logger.debug("Blob temporário removido: %s", temp_name)
+        except Exception as exc:
+            logger.warning("Falha ao remover blob temporário '%s': %s", temp_name, exc)
+
+
+def generate_gcs_signed_upload(filename: str, source_tag: str = "manual") -> Dict[str, str]:
+    """
+    Gera signed URL PUT para upload direto ao GCS pelo cliente.
+    Expiração controlada por GCS_SIGNED_URL_EXPIRY_MINUTES (padrão 30).
+    """
+    bucket = _get_upload_bucket()
+    safe_name = Path(filename).name
+    safe_source = (source_tag or "manual").replace("/", "_").replace("\\", "_")
+    object_name = f"{GCS_UPLOAD_PREFIX.strip('/')}/{safe_source}/{uuid.uuid4().hex}_{safe_name}"
+    blob = bucket.blob(object_name)
+
+    try:
+        signed_url = blob.generate_signed_url(
+            version="v4",
+            expiration=timedelta(minutes=GCS_SIGNED_URL_EXPIRY_MINUTES),
+            method="PUT",
+            content_type="application/octet-stream",
+        )
+    except Exception as exc:
+        raise RuntimeError(
+            "Não foi possível assinar URL do GCS. "
+            "Verifique GCS_UPLOAD_BUCKET e permissões da Service Account para assinar URLs."
+        ) from exc
+
+    logger.info("Signed URL gerado: object=%s expiry_min=%d", object_name, GCS_SIGNED_URL_EXPIRY_MINUTES)
+    return {
+        "upload_url": signed_url,
+        "object_name": object_name,
+        "bucket": bucket.name,
+        "expires_in_minutes": GCS_SIGNED_URL_EXPIRY_MINUTES,
+    }
+
+
+def process_gcs_upload(object_name: str) -> Dict[str, Any]:
+    """
+    Processa arquivo já presente no GCS:
+      1. Valida extensão e tamanho (falha rápido)
+      2. Lê CSV ou XLSX como DataFrame
+      3. Carrega na staging via GCS (com retry e limpeza garantida)
+      4. Dispara a procedure de forma assíncrona
+      5. Remove o blob original (melhor esforço)
+    """
+    bucket = _get_upload_bucket()
+    blob = bucket.blob(object_name)
+
+    if not blob.exists():
+        raise FileNotFoundError(f"Arquivo não encontrado no GCS: {object_name}")
+
+    _validate_blob(blob, object_name)
+
+    suffix = Path(object_name).suffix.lower()
+    try:
+        df = _xlsx_blob_to_dataframe(blob) if suffix in {".xlsx", ".xls"} else _csv_blob_to_dataframe(blob)
+    except Exception as exc:
+        logger.exception("Falha ao ler arquivo '%s': %s", object_name, exc)
+        raise RuntimeError(f"Não foi possível ler o arquivo: {exc}") from exc
+
+    logger.info("Arquivo lido: object=%s linhas=%d colunas=%d", object_name, len(df), len(df.columns))
+
+    _load_dataframe_to_staging_via_gcs(df)
+    job_id = run_procedure_async()
+
+    try:
+        blob.delete()
+        logger.info("Blob original removido: %s", object_name)
+    except Exception as exc:
+        logger.warning("Não foi possível remover blob original '%s': %s", object_name, exc)
+
+    return {"message": "Upload processado com sucesso.", "job_id": job_id, "rows_read": len(df)}
 
 
 def get_bq_job_status(job_id: str) -> Dict[str, Any]:
@@ -456,6 +724,16 @@ def query_leads(
     order_by: str = "data_inscricao",
     order_dir: str = "DESC",
 ) -> List[Dict[str, Any]]:
+    return list(query_leads_iter(filters=filters, limit=limit, offset=offset, order_by=order_by, order_dir=order_dir))
+
+
+def query_leads_iter(
+    filters: Optional[Dict[str, Any]] = None,
+    limit: int = DEFAULT_LIMIT,
+    offset: int = 0,
+    order_by: str = "data_inscricao",
+    order_dir: str = "DESC",
+) -> Iterator[Dict[str, Any]]:
     client = get_bq_client()
     filters = filters or {}
 
@@ -505,8 +783,17 @@ def query_leads(
     params.append(bigquery.ScalarQueryParameter("limit", "INT64", limit))
     params.append(bigquery.ScalarQueryParameter("offset", "INT64", offset))
 
-    rows = client.query(sql, job_config=bigquery.QueryJobConfig(query_parameters=params)).result()
-    return [dict(r) for r in rows]
+    t0 = perf_counter()
+    job = client.query(sql, job_config=bigquery.QueryJobConfig(query_parameters=params))
+    try:
+        rows = job.result(timeout=QUERY_TIMEOUT_SECONDS)
+    except FuturesTimeoutError as exc:
+        logger.exception("BQ query_leads_iter timeout job_id=%s", getattr(job, "job_id", None))
+        job.cancel()
+        raise TimeoutError(f"Consulta excedeu timeout de {QUERY_TIMEOUT_SECONDS}s") from exc
+    logger.info("BQ query_leads_iter concluído job_id=%s elapsed=%.2fs", getattr(job, "job_id", None), perf_counter() - t0)
+    for r in rows:
+        yield dict(r)
 
 
 def query_leads_count(filters: Optional[Dict[str, Any]] = None) -> int:
@@ -637,6 +924,26 @@ def export_leads_rows(
 
     rows = client.query(sql, job_config=bigquery.QueryJobConfig(query_parameters=params)).result()
     return [dict(r) for r in rows]
+
+
+def export_leads_rows_iter(
+    filters: Optional[Dict[str, Any]] = None,
+    batch_size: int = 1000,
+    order_by: str = "data_inscricao",
+    order_dir: str = "DESC",
+) -> Iterator[List[Dict[str, Any]]]:
+    """Itera exportação paginada para evitar alto consumo de memória."""
+    offset = 0
+    size = max(1, int(batch_size))
+    while True:
+        rows = export_leads_rows(filters=filters, limit=size, offset=offset, order_by=order_by, order_dir=order_dir)
+        if not rows:
+            break
+        yield rows
+        fetched = len(rows)
+        offset += fetched
+        if fetched < size:
+            break
 
 
 def rows_to_xlsx(rows: List[Dict[str, Any]], xlsx_path: str, sheet_name: str = "Leads") -> str:
