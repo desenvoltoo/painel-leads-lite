@@ -24,7 +24,7 @@ from google.api_core.exceptions import (
 )
 from google.cloud import bigquery, storage
 from google.auth import default
-from google.auth.iam_credentials import IAMCredentialsSigner   # <-- NOVO IMPORT
+from google.auth.transport.requests import Request
 
 # XLSX
 from openpyxl import Workbook
@@ -474,8 +474,8 @@ def generate_gcs_signed_upload(filename: str, source_tag: str = "manual") -> Dic
     """
     Gera signed URL PUT para upload direto ao GCS pelo cliente.
     Expiração controlada por GCS_SIGNED_URL_EXPIRY_MINUTES (padrão 30).
-    Usa IAMCredentialsSigner para funcionar com qualquer Service Account,
-    inclusive a padrão do Compute Engine ou outras sem chave privada local.
+    Usa access token + service_account_email para funcionar no Cloud Run
+    sem depender de chave privada local nem de módulo inexistente.
     """
     bucket = _get_upload_bucket()
     safe_name = Path(filename).name
@@ -483,11 +483,22 @@ def generate_gcs_signed_upload(filename: str, source_tag: str = "manual") -> Dic
     object_name = f"{GCS_UPLOAD_PREFIX.strip('/')}/{safe_source}/{uuid.uuid4().hex}_{safe_name}"
     blob = bucket.blob(object_name)
 
-    # Obtém as credenciais padrão do ambiente (Cloud Run fornece)
-    credentials, project = default()
+    # Obtém as credenciais padrão do ambiente (Cloud Run fornece) e força refresh
+    # para termos um access_token utilizável pelo helper de signed URL.
+    credentials, _project = default(
+        scopes=["https://www.googleapis.com/auth/cloud-platform"]
+    )
+    credentials.refresh(Request())
 
-    # Cria um signer baseado em IAM (não precisa de chave privada)
-    signer = IAMCredentialsSigner(credentials)
+    service_account_email = (
+        os.getenv("GCS_SIGNING_SERVICE_ACCOUNT")
+        or getattr(credentials, "service_account_email", None)
+    )
+    if not service_account_email:
+        raise RuntimeError(
+            "Não foi possível identificar o e-mail da Service Account para assinar URL. "
+            "Defina GCS_SIGNING_SERVICE_ACCOUNT no ambiente do Cloud Run."
+        )
 
     try:
         signed_url = blob.generate_signed_url(
@@ -495,15 +506,15 @@ def generate_gcs_signed_upload(filename: str, source_tag: str = "manual") -> Dic
             expiration=timedelta(minutes=GCS_SIGNED_URL_EXPIRY_MINUTES),
             method="PUT",
             content_type="application/octet-stream",
-            credentials=credentials,               # força uso das credenciais atuais
-            service_account_email=credentials.service_account_email,  # email da SA atual
-            signer=signer,                         # delega assinatura para IAM
+            service_account_email=service_account_email,
+            access_token=credentials.token,
         )
     except Exception as exc:
         logger.exception("Falha ao gerar signed URL para %s", object_name)
         raise RuntimeError(
             "Não foi possível assinar URL do GCS. "
-            "Verifique GCS_UPLOAD_BUCKET e permissões da Service Account para assinar URLs."
+            "Verifique GCS_UPLOAD_BUCKET, GCS_SIGNING_SERVICE_ACCOUNT e a permissão "
+            "iam.serviceAccounts.signBlob da Service Account."
         ) from exc
 
     logger.info(
