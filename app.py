@@ -5,10 +5,8 @@ Versão: 4.2 - Fix encoding CSV (chardet)
 """
  
 import os
-import traceback
 import io
 import uuid
-import mimetypes
 import json
 import logging
 import csv
@@ -21,6 +19,7 @@ from typing import Dict, Any, Tuple
 import pandas as pd
 from flask import Flask, render_template, request, jsonify, send_file, redirect, url_for, make_response, g, session, Response, stream_with_context
 from werkzeug.security import check_password_hash
+from startup_diagnostics import build_error_payload, env_bool, env_int
  
 from services.bigquery import (
     query_leads,
@@ -230,12 +229,12 @@ def _stream_leads_json(filters: Dict[str, Any], meta: Dict[str, Any], total: int
     return Response(generate(), mimetype="application/json")
  
 def _error_payload(e: Exception, public_msg: str):
-    return {
-        "ok": False,
-        "error": public_msg,
-        "details": str(e),
-        "trace": traceback.format_exc(limit=3),
-    }
+    return build_error_payload(
+        e,
+        public_message=public_msg,
+        phase="request",
+        include_trace=True,
+    )
  
 def _stamp() -> str:
     return datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -364,8 +363,8 @@ def create_app() -> Flask:
 
     asset_version = _env("ASSET_VERSION", "20260225-star-v1")
     ui_version = _env("UI_VERSION", f"v{asset_version}")
-    session_ttl_seconds = int(_env("SESSION_TTL_SECONDS", "28800"))
-    cookie_secure = _env("COOKIE_SECURE", "false").lower() == "true"
+    session_ttl_seconds = env_int("SESSION_TTL_SECONDS", 28800, minimum=60)
+    cookie_secure = env_bool("COOKIE_SECURE", False)
     session_cookie_name = _env("SESSION_COOKIE_NAME", "painel_session")
 
     app.config.update(
