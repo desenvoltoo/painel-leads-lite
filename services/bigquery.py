@@ -1,30 +1,14 @@
 # services/bigquery.py
-from __future__ import annotations 
+from __future__ import annotations
 
-import logging
 import os
-import time
-import threading
-import uuid
-from concurrent.futures import TimeoutError as FuturesTimeoutError
-from datetime import timedelta
+import logging
 from decimal import Decimal, InvalidOperation
-from io import BytesIO, StringIO
 from pathlib import Path
-from time import perf_counter
-from typing import Any, Dict, Iterator, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
-from google.api_core.exceptions import (
-    BadRequest,
-    Forbidden,
-    GoogleAPICallError,
-    NotFound,
-    ServiceUnavailable,
-    TooManyRequests,
-)
-from google.cloud import bigquery, storage
-from google.auth import default
-from google.auth.transport.requests import Request
+from google.cloud import bigquery
+from google.api_core.exceptions import GoogleAPICallError, BadRequest, Forbidden, NotFound
 
 # XLSX
 from openpyxl import Workbook
@@ -33,7 +17,7 @@ from openpyxl.utils import get_column_letter
 logger = logging.getLogger(__name__)
 
 # ============================================================
-# CONFIG (ENV)
+# CONFIG (ENV + travas)
 # ============================================================
 GCP_PROJECT_ID = os.getenv("GCP_PROJECT_ID", "painel-universidade")
 BQ_DATASET = os.getenv("BQ_DATASET", "modelo_estrela")
@@ -41,109 +25,77 @@ BQ_DATASET = os.getenv("BQ_DATASET", "modelo_estrela")
 BQ_STAGING_TABLE = os.getenv("BQ_STAGING_TABLE", "stg_leads_site")
 BQ_PROCEDURE = os.getenv("BQ_PROCEDURE", "sp_import_star_from_site")
 
+# Painel lê somente essa view
 BQ_VIEW_LEADS = "vw_leads_painel_lite"
 
 DEFAULT_LIMIT = int(os.getenv("BQ_DEFAULT_LIMIT", "200"))
-MAX_LIMIT = int(os.getenv("BQ_MAX_LIMIT", "200000"))
+MAX_LIMIT = int(os.getenv("BQ_MAX_LIMIT", "2000"))
 EXPORT_MAX_ROWS = int(os.getenv("BQ_EXPORT_MAX_ROWS", "50000"))
-QUERY_TIMEOUT_SECONDS = int(os.getenv("BQ_QUERY_TIMEOUT_SECONDS", "180"))
-EMPTY_FILTER_TOKEN = "__EMPTY__"
-
-# Importação — expiração do signed URL (era fixo em 15; agora configurável, padrão 30)
-GCS_SIGNED_URL_EXPIRY_MINUTES = int(os.getenv("GCS_SIGNED_URL_EXPIRY_MINUTES", "30"))
-
-# Importação — retry
-RETRY_MAX_ATTEMPTS = int(os.getenv("BQ_RETRY_MAX_ATTEMPTS", "3"))
-RETRY_BASE_DELAY_S = float(os.getenv("BQ_RETRY_BASE_DELAY_S", "2.0"))
-RETRY_MAX_DELAY_S = float(os.getenv("BQ_RETRY_MAX_DELAY_S", "30.0"))
-
-# Importação — validação de arquivo
-MAX_FILE_SIZE_BYTES = int(os.getenv("GCS_MAX_FILE_SIZE_BYTES", str(50 * 1024 * 1024)))  # 50 MB
-ALLOWED_EXTENSIONS = {".csv", ".xlsx", ".xls"}
-
-GCS_UPLOAD_BUCKET = os.getenv("GCS_UPLOAD_BUCKET", "")
-GCS_UPLOAD_PREFIX = os.getenv("GCS_UPLOAD_PREFIX", "uploads")
 
 # colunas que não devem sofrer comportamento numérico
 PHONEISH_COLUMNS = {"cpf", "celular"}
 
-
-# ============================================================
-# CLIENTES THREAD-SAFE
-# Cada thread mantém sua própria instância, evitando condições
-# de corrida em ambientes multi-thread (FastAPI / Gunicorn).
-# ============================================================
-_thread_local = threading.local()
+_bq_client: Optional[bigquery.Client] = None
 
 
 def get_bq_client() -> bigquery.Client:
-    if not getattr(_thread_local, "bq_client", None):
-        _thread_local.bq_client = bigquery.Client(project=GCP_PROJECT_ID)
-    return _thread_local.bq_client
-
-
-def get_storage_client() -> storage.Client:
-    if not getattr(_thread_local, "storage_client", None):
-        _thread_local.storage_client = storage.Client(project=GCP_PROJECT_ID)
-    return _thread_local.storage_client
+    global _bq_client
+    if _bq_client is None:
+        _bq_client = bigquery.Client(project=GCP_PROJECT_ID)
+    return _bq_client
 
 
 def _tbl(name: str) -> str:
     return f"`{GCP_PROJECT_ID}.{BQ_DATASET}.{name}`"
 
 
-def _get_upload_bucket() -> storage.Bucket:
-    if not GCS_UPLOAD_BUCKET:
-        raise RuntimeError("Defina GCS_UPLOAD_BUCKET no ambiente.")
-    return get_storage_client().bucket(GCS_UPLOAD_BUCKET)
+def _as_list(v: Any) -> List[str]:
+    if v is None:
+        return []
+    if isinstance(v, (list, tuple)):
+        return [str(x).strip() for x in v if str(x).strip()]
+    s = str(v).strip()
+    if not s:
+        return []
+    if "||" in s:
+        return [p.strip() for p in s.split("||") if p.strip()]
+    if "," in s:
+        return [p.strip() for p in s.split(",") if p.strip()]
+    return [s]
 
 
-# ============================================================
-# RETRY COM BACKOFF EXPONENCIAL
-# Erros fatais (BadRequest, Forbidden, NotFound) não são retriados.
-# ============================================================
-_RETRYABLE_EXCEPTIONS = (ServiceUnavailable, TooManyRequests, GoogleAPICallError)
-
-
-def _with_retry(fn, *args, operation_name: str = "operação", **kwargs) -> Any:
-    delay = RETRY_BASE_DELAY_S
-    last_exc: Optional[Exception] = None
-
-    for attempt in range(1, RETRY_MAX_ATTEMPTS + 1):
-        try:
-            return fn(*args, **kwargs)
-        except (BadRequest, Forbidden, NotFound) as exc:
-            logger.error(
-                "Erro fatal em '%s' (tentativa %d/%d): %s",
-                operation_name, attempt, RETRY_MAX_ATTEMPTS, exc,
-            )
-            raise RuntimeError(f"Erro fatal em {operation_name}: {exc}") from exc
-        except _RETRYABLE_EXCEPTIONS as exc:
-            last_exc = exc
-            if attempt == RETRY_MAX_ATTEMPTS:
-                break
-            logger.warning(
-                "Erro transitório em '%s' (tentativa %d/%d), aguardando %.1fs: %s",
-                operation_name, attempt, RETRY_MAX_ATTEMPTS, delay, exc,
-            )
-            time.sleep(delay)
-            delay = min(delay * 2, RETRY_MAX_DELAY_S)
-        except Exception as exc:
-            logger.exception("Erro inesperado em '%s': %s", operation_name, exc)
-            raise
-
-    raise RuntimeError(
-        f"'{operation_name}' falhou após {RETRY_MAX_ATTEMPTS} tentativas."
-    ) from last_exc
+def _data_inscricao_order_clause(order_dir: str) -> str:
+    """
+    Ordena mantendo linhas sem data_inscricao no final.
+    - primeiro: quem tem data (NULL por último)
+    - depois: data mais recente/antiga conforme order_dir
+    - por fim: desempate determinístico por data_atualizacao
+    """
+    return f"""
+    CASE WHEN v.data_inscricao IS NULL THEN 1 ELSE 0 END ASC,
+    v.data_inscricao {order_dir},
+    v.data_atualizacao DESC
+    """
 
 
 # ============================================================
 # NORMALIZADORES
 # ============================================================
 def _normalize_decimal_string_to_int_string(s: str) -> str:
+    """
+    Converte representações numéricas integrais para string inteira.
+
+    Exemplos:
+      "11974817404.0" -> "11974817404"
+      "5.511944391404e13" -> "55119443914040"
+      "  12345  " -> "12345"
+
+    Se não for número integral, devolve o valor original.
+    """
     s = str(s).strip()
     if not s:
         return s
+
     try:
         d = Decimal(s)
         if d == d.to_integral_value():
@@ -154,6 +106,15 @@ def _normalize_decimal_string_to_int_string(s: str) -> str:
 
 
 def _normalize_phoneish_value(x: Any) -> Optional[str]:
+    """
+    Normaliza CPF/celular preservando como texto e removendo '.0' indevido.
+
+    Regras:
+    - None / NaN / vazio -> None
+    - float integral -> string inteira
+    - string numérica integral com .0 / notação científica -> string inteira
+    - demais strings -> trim simples
+    """
     try:
         import pandas as pd
     except Exception:
@@ -169,6 +130,7 @@ def _normalize_phoneish_value(x: Any) -> Optional[str]:
         except Exception:
             pass
 
+    # números Python
     if isinstance(x, int):
         return str(x)
 
@@ -179,6 +141,7 @@ def _normalize_phoneish_value(x: Any) -> Optional[str]:
                     return None
             except Exception:
                 pass
+        # se for 11974817404.0 -> 11974817404
         if x.is_integer():
             return str(int(x))
         s = str(x).strip()
@@ -188,11 +151,18 @@ def _normalize_phoneish_value(x: Any) -> Optional[str]:
     if not s or s.lower() == "nan":
         return None
 
+    # corrige:
+    # "11974817404.0" -> "11974817404"
+    # "5.511944391404e13" -> "55119443914040"
     s2 = _normalize_decimal_string_to_int_string(s)
+
     return s2 or None
 
 
 def _normalize_generic_string(x: Any) -> Optional[str]:
+    """
+    Converte qualquer valor para STRING segura sem estourar upload.
+    """
     try:
         import pandas as pd
     except Exception:
@@ -215,6 +185,9 @@ def _normalize_generic_string(x: Any) -> Optional[str]:
 
 
 def _xlsx_safe_cell_value(key: str, value: Any):
+    """
+    Mantém datas compatíveis com Excel e força CPF/celular como texto.
+    """
     from datetime import datetime, date
 
     if key in PHONEISH_COLUMNS:
@@ -231,6 +204,7 @@ def _xlsx_safe_cell_value(key: str, value: Any):
 # ============================================================
 # STAGING SCHEMA (BLINDADO)
 # ============================================================
+# Tudo STRING para não quebrar em CSV/XLSX e deixar a SP parsear
 STAGING_SCHEMA: List[bigquery.SchemaField] = [
     bigquery.SchemaField("status_inscricao", "STRING", mode="NULLABLE"),
     bigquery.SchemaField("data_inscricao", "STRING", mode="NULLABLE"),
@@ -261,179 +235,52 @@ STAGING_SCHEMA: List[bigquery.SchemaField] = [
     bigquery.SchemaField("consultor_comercial", "STRING", mode="NULLABLE"),
 ]
 
-_STAGING_COLS = [f.name for f in STAGING_SCHEMA]
-
 
 def _coerce_df_to_staging_schema(df):
+    """
+    Ajusta o DataFrame para bater com o schema da staging.
+    Blindado:
+    - manda tudo como STRING;
+    - protege CPF/celular de .0 / float / notação científica;
+    - mantém ordem do schema.
+    """
     import pandas as pd
 
     df = df.copy()
     df.columns = [str(c).strip() for c in df.columns]
 
-    for col in _STAGING_COLS:
-        if col not in df.columns:
-            df[col] = None
+    expected_cols = [f.name for f in STAGING_SCHEMA]
 
-    df = df[_STAGING_COLS]
+    # cria colunas faltantes
+    for c in expected_cols:
+        if c not in df.columns:
+            df[c] = None
 
-    for col in _STAGING_COLS:
-        normalizer = _normalize_phoneish_value if col in PHONEISH_COLUMNS else _normalize_generic_string
-        df[col] = df[col].map(normalizer).astype("object")
+    # remove extras e mantém ordem
+    df = df[expected_cols]
+
+    for col in expected_cols:
+        if col in PHONEISH_COLUMNS:
+            df[col] = df[col].map(_normalize_phoneish_value)
+        else:
+            df[col] = df[col].map(_normalize_generic_string)
+
+    # reforça dtype object/string-like
+    for col in expected_cols:
+        df[col] = df[col].astype("object")
 
     return df
 
 
 # ============================================================
-# LEITURA DE ARQUIVO (CSV / XLSX) — via GCS blob
+# STAGING + PROCEDURE (upload)  AGORA ASSÍNCRONO
 # ============================================================
-def _detect_csv_encoding(raw_bytes: bytes) -> str:
-    try:
-        import chardet
-        detected = chardet.detect(raw_bytes)
-        encoding = (detected.get("encoding") or "utf-8").lower()
-        confidence = detected.get("confidence") or 0
-        if confidence >= 0.7:
-            return "utf-8" if encoding == "ascii" else encoding
-    except ImportError:
-        pass
-    return "utf-8"
-
-
-def _csv_blob_to_dataframe(blob) -> Any:
-    import pandas as pd
-
-    payload = blob.download_as_bytes()
-    detected_enc = _detect_csv_encoding(payload)
-    encodings_to_try: List[str] = []
-    for enc in (detected_enc, "utf-8-sig", "utf-8", "latin-1"):
-        if enc not in encodings_to_try:
-            encodings_to_try.append(enc)
-
-    last_error: Optional[Exception] = None
-    best_df = None
-    for sep in (";", ","):
-        for enc in encodings_to_try:
-            try:
-                df = pd.read_csv(BytesIO(payload), sep=sep, encoding=enc, dtype=str)
-                if len(df.columns) > 1:
-                    return df
-                if best_df is None:
-                    best_df = df
-            except Exception as exc:
-                last_error = exc
-
-    if best_df is not None:
-        return best_df
-
-    raise RuntimeError("Não foi possível ler o CSV enviado via GCS.") from last_error
-
-
-def _xlsx_blob_to_dataframe(blob) -> Any:
-    from openpyxl import load_workbook
-    import pandas as pd
-
-    payload = blob.download_as_bytes()
-    wb = load_workbook(BytesIO(payload), data_only=True, read_only=True)
-    ws = wb.active
-    rows = ws.iter_rows(values_only=True)
-    try:
-        first_row = next(rows)
-    except StopIteration:
-        raise RuntimeError("Arquivo XLSX está vazio.")
-    headers = [str(c).strip() if c is not None else "" for c in first_row]
-    if not any(headers):
-        raise RuntimeError("Cabeçalho do XLSX não encontrado.")
-    data = []
-    for r in rows:
-        data.append({headers[i]: r[i] if i < len(r) else None for i in range(len(headers))})
-    return pd.DataFrame(data)
-
-
-# ============================================================
-# VALIDAÇÃO ANTECIPADA DO BLOB
-# ============================================================
-def _validate_blob(blob: storage.Blob, object_name: str) -> None:
-    """Valida extensão e tamanho antes de qualquer processamento pesado."""
-    blob.reload()
-
-    suffix = Path(object_name).suffix.lower()
-    if suffix not in ALLOWED_EXTENSIONS:
-        raise ValueError(
-            f"Extensão '{suffix}' não suportada. Use: {', '.join(sorted(ALLOWED_EXTENSIONS))}."
-        )
-
-    size = blob.size or 0
-    if size == 0:
-        raise ValueError("O arquivo enviado está vazio.")
-
-    if size > MAX_FILE_SIZE_BYTES:
-        mb = MAX_FILE_SIZE_BYTES // (1024 * 1024)
-        raise ValueError(
-            f"O arquivo excede o limite de {mb} MB ({size / (1024 * 1024):.1f} MB recebidos)."
-        )
-
-    logger.info("Arquivo validado: object=%s ext=%s size_bytes=%d", object_name, suffix, size)
-
-
-# ============================================================
-# STAGING + PROCEDURE (importação)
-# ============================================================
-def _upload_df_to_gcs_temp(df, bucket: storage.Bucket) -> str:
-    """Sobe o DataFrame como CSV temporário no GCS. Retorna o object_name."""
-    temp_name = f"{GCS_UPLOAD_PREFIX.strip('/')}/tmp/staging_{uuid.uuid4().hex}.csv"
-    blob = bucket.blob(temp_name)
-    csv_bytes = df.to_csv(index=False).encode("utf-8")
-
-    def _do_upload():
-        blob.upload_from_string(csv_bytes, content_type="text/csv")
-
-    _with_retry(_do_upload, operation_name="upload CSV temporário para GCS")
-    logger.info("CSV temporário enviado: gs://%s/%s (%d bytes)", bucket.name, temp_name, len(csv_bytes))
-    return temp_name
-
-
-def _load_gcs_csv_to_staging(bucket: storage.Bucket, temp_name: str) -> None:
-    client = get_bq_client()
-    table_id = f"{GCP_PROJECT_ID}.{BQ_DATASET}.{BQ_STAGING_TABLE}"
-    uri = f"gs://{bucket.name}/{temp_name}"
-
-    job_config = bigquery.LoadJobConfig(
-        schema=STAGING_SCHEMA,
-        source_format=bigquery.SourceFormat.CSV,
-        skip_leading_rows=1,
-        write_disposition=bigquery.WriteDisposition.WRITE_TRUNCATE,
-    )
-
-    def _do_load():
-        job = client.load_table_from_uri(uri, table_id, job_config=job_config)
-        job.result()
-        logger.info("BQ Load Job concluído: job_id=%s tabela=%s", job.job_id, table_id)
-
-    _with_retry(_do_load, operation_name=f"BQ load_table_from_uri → {table_id}")
-
-
-def _load_dataframe_to_staging_via_gcs(df) -> None:
-    """Coerção → upload CSV temp no GCS → BQ load job → limpeza garantida."""
-    bucket = _get_upload_bucket()
-    df2 = _coerce_df_to_staging_schema(df)
-    temp_name = _upload_df_to_gcs_temp(df2, bucket)
-    try:
-        _load_gcs_csv_to_staging(bucket, temp_name)
-    finally:
-        try:
-            bucket.blob(temp_name).delete()
-            logger.debug("Blob temporário removido: %s", temp_name)
-        except Exception as exc:
-            logger.warning("Falha ao remover blob temporário '%s': %s", temp_name, exc)
-
-
 def load_to_staging(df) -> None:
-    """Carrega o DataFrame diretamente na staging sem passar pelo GCS."""
     client = get_bq_client()
     table_id = f"{GCP_PROJECT_ID}.{BQ_DATASET}.{BQ_STAGING_TABLE}"
-    df2 = _coerce_df_to_staging_schema(df)
 
-    def _do_load():
+    try:
+        df2 = _coerce_df_to_staging_schema(df)
         job = client.load_table_from_dataframe(
             df2,
             table_id,
@@ -443,133 +290,34 @@ def load_to_staging(df) -> None:
             ),
         )
         job.result()
-        logger.info("BQ load_table_from_dataframe concluído: job_id=%s", job.job_id)
-
-    _with_retry(_do_load, operation_name=f"load_to_staging → {table_id}")
+    except (BadRequest, Forbidden, NotFound, GoogleAPICallError) as e:
+        logger.exception("BQ load_to_staging falhou: %s", str(e))
+        raise RuntimeError(f"Erro ao carregar staging ({table_id}): {e}") from e
 
 
 def run_procedure_async() -> str:
-    """Dispara a procedure e retorna o job_id sem bloquear a request."""
+    """
+    Dispara a procedure e retorna o job_id sem bloquear a request.
+    """
     client = get_bq_client()
     sql = f"CALL `{GCP_PROJECT_ID}.{BQ_DATASET}.{BQ_PROCEDURE}`();"
 
-    def _do_call():
+    try:
         job = client.query(sql)
-        logger.info("Procedure disparada: job_id=%s procedure=%s", job.job_id, BQ_PROCEDURE)
         return job.job_id
-
-    return _with_retry(_do_call, operation_name=f"run_procedure_async ({BQ_PROCEDURE})")
+    except (BadRequest, Forbidden, NotFound, GoogleAPICallError) as e:
+        logger.exception("BQ run_procedure_async falhou: %s", str(e))
+        raise RuntimeError(f"Erro ao disparar procedure ({BQ_PROCEDURE}): {e}") from e
 
 
 def process_upload_dataframe(df) -> str:
-    """1) carrega staging (truncate)  2) dispara SP async  3) retorna job_id"""
+    """
+    1) carrega staging (truncate)
+    2) dispara SP async
+    3) retorna job_id
+    """
     load_to_staging(df)
     return run_procedure_async()
-
-
-# ============================================================
-# SIGNED URL + PROCESS GCS UPLOAD
-# ============================================================
-def generate_gcs_signed_upload(filename: str, source_tag: str = "manual") -> Dict[str, str]:
-    """
-    Gera signed URL PUT para upload direto ao GCS pelo cliente.
-    Expiração controlada por GCS_SIGNED_URL_EXPIRY_MINUTES (padrão 30).
-    Usa access token + service_account_email para funcionar no Cloud Run
-    sem depender de chave privada local nem de módulo inexistente.
-    """
-    bucket = _get_upload_bucket()
-    safe_name = Path(filename).name
-    safe_source = (source_tag or "manual").replace("/", "_").replace("\\", "_")
-    object_name = f"{GCS_UPLOAD_PREFIX.strip('/')}/{safe_source}/{uuid.uuid4().hex}_{safe_name}"
-    blob = bucket.blob(object_name)
-
-    # Obtém as credenciais padrão do ambiente (Cloud Run fornece) e força refresh
-    # para termos um access_token utilizável pelo helper de signed URL.
-    credentials, _project = default(
-        scopes=["https://www.googleapis.com/auth/cloud-platform"]
-    )
-    credentials.refresh(Request())
-
-    service_account_email = (
-        os.getenv("GCS_SIGNING_SERVICE_ACCOUNT")
-        or getattr(credentials, "service_account_email", None)
-    )
-    if not service_account_email:
-        raise RuntimeError(
-            "Não foi possível identificar o e-mail da Service Account para assinar URL. "
-            "Defina GCS_SIGNING_SERVICE_ACCOUNT no ambiente do Cloud Run."
-        )
-
-    try:
-        signed_url = blob.generate_signed_url(
-            version="v4",
-            expiration=timedelta(minutes=GCS_SIGNED_URL_EXPIRY_MINUTES),
-            method="PUT",
-            content_type="application/octet-stream",
-            service_account_email=service_account_email,
-            access_token=credentials.token,
-        )
-    except Exception as exc:
-        logger.exception("Falha ao gerar signed URL para %s", object_name)
-        raise RuntimeError(
-            "Não foi possível assinar URL do GCS. "
-            "Verifique GCS_UPLOAD_BUCKET, GCS_SIGNING_SERVICE_ACCOUNT e a permissão "
-            "iam.serviceAccounts.signBlob da Service Account."
-        ) from exc
-
-    logger.info(
-        "Signed URL gerado: object=%s expiry_min=%d", object_name, GCS_SIGNED_URL_EXPIRY_MINUTES
-    )
-    return {
-        "upload_url": signed_url,
-        "object_name": object_name,
-        "bucket": bucket.name,
-        "expires_in_minutes": GCS_SIGNED_URL_EXPIRY_MINUTES,
-    }
-
-
-def process_gcs_upload(object_name: str) -> Dict[str, Any]:
-    """
-    Processa arquivo já presente no GCS:
-      1. Valida extensão e tamanho (falha rápido)
-      2. Lê CSV ou XLSX como DataFrame
-      3. Carrega na staging via GCS (com retry e limpeza garantida)
-      4. Dispara a procedure de forma assíncrona
-      5. Remove o blob original (melhor esforço)
-    """
-    bucket = _get_upload_bucket()
-    blob = bucket.blob(object_name)
-
-    if not blob.exists():
-        raise FileNotFoundError(f"Arquivo não encontrado no GCS: {object_name}")
-
-    # 1. Validação antecipada
-    _validate_blob(blob, object_name)
-
-    # 2. Leitura
-    suffix = Path(object_name).suffix.lower()
-    try:
-        df = _xlsx_blob_to_dataframe(blob) if suffix in {".xlsx", ".xls"} else _csv_blob_to_dataframe(blob)
-    except Exception as exc:
-        logger.exception("Falha ao ler arquivo '%s': %s", object_name, exc)
-        raise RuntimeError(f"Não foi possível ler o arquivo: {exc}") from exc
-
-    logger.info("Arquivo lido: object=%s linhas=%d colunas=%d", object_name, len(df), len(df.columns))
-
-    # 3. Staging (com retry + limpeza do CSV temp garantida)
-    _load_dataframe_to_staging_via_gcs(df)
-
-    # 4. Procedure assíncrona
-    job_id = run_procedure_async()
-
-    # 5. Remove blob original (melhor esforço — não falha o fluxo)
-    try:
-        blob.delete()
-        logger.info("Blob original removido: %s", object_name)
-    except Exception as exc:
-        logger.warning("Não foi possível remover blob original '%s': %s", object_name, exc)
-
-    return {"message": "Upload processado com sucesso.", "job_id": job_id, "rows_read": len(df)}
 
 
 def get_bq_job_status(job_id: str) -> Dict[str, Any]:
@@ -582,14 +330,14 @@ def get_bq_job_status(job_id: str) -> Dict[str, Any]:
         "created": job.created.isoformat() if job.created else None,
         "started": job.started.isoformat() if job.started else None,
         "ended": job.ended.isoformat() if job.ended else None,
-        "ok": True if (job.state == "DONE" and not job.error_result) else (
-            None if job.state != "DONE" else False
-        ),
     }
 
     if job.error_result:
+        payload["ok"] = False
         payload["error"] = job.error_result
         payload["errors"] = job.errors
+    else:
+        payload["ok"] = True if job.state == "DONE" else None
 
     return payload
 
@@ -599,38 +347,6 @@ def get_bq_job_status(job_id: str) -> Dict[str, Any]:
 # ============================================================
 def _base_select_sql() -> str:
     return f"FROM {_tbl(BQ_VIEW_LEADS)} v WHERE 1=1"
-
-
-def _as_list(v: Any) -> List[str]:
-    if v is None:
-        return []
-    if isinstance(v, (list, tuple)):
-        return [str(x).strip() for x in v if str(x).strip()]
-    s = str(v).strip()
-    if not s:
-        return []
-    if "||" in s:
-        return [p.strip() for p in s.split("||") if p.strip()]
-    if "," in s:
-        return [p.strip() for p in s.split(",") if p.strip()]
-    return [s]
-
-
-def _data_inscricao_order_clause(order_dir: str) -> str:
-    return f"""
-    CASE WHEN v.data_inscricao IS NULL THEN 1 ELSE 0 END ASC,
-    v.data_inscricao {order_dir},
-    v.data_atualizacao DESC
-    """
-
-
-def _data_disparo_priority_order_clause() -> str:
-    return """
-    CASE WHEN v.data_disparo IS NULL OR TRIM(CAST(v.data_disparo AS STRING)) = '' THEN 0 ELSE 1 END ASC,
-    SAFE_CAST(v.data_disparo AS DATE) ASC NULLS LAST,
-    v.data_inscricao ASC NULLS LAST,
-    v.data_atualizacao DESC
-    """
 
 
 def _apply_filters(sql: str, filters: Dict[str, Any], params: List[Any]) -> str:
@@ -648,51 +364,53 @@ def _apply_filters(sql: str, filters: Dict[str, Any], params: List[Any]) -> str:
     consultores_disp = _as_list(filters.get("consultor_disparo")) or _as_list(filters.get("consultor"))
     consultores_com = _as_list(filters.get("consultor_comercial"))
 
-    def _add_string_filter(column: str, values: List[str], param_name: str):
-        nonlocal sql
-        if not values:
-            return
+    if cursos:
+        sql += " AND v.curso IN UNNEST(@cursos)"
+        params.append(bigquery.ArrayQueryParameter("cursos", "STRING", cursos))
 
-        include_empty = EMPTY_FILTER_TOKEN in values
-        normal_values = [v for v in values if v != EMPTY_FILTER_TOKEN]
+    if polos:
+        sql += " AND v.polo IN UNNEST(@polos)"
+        params.append(bigquery.ArrayQueryParameter("polos", "STRING", polos))
 
-        clauses: List[str] = []
-        if normal_values:
-            clauses.append(f"{column} IN UNNEST(@{param_name})")
-            params.append(bigquery.ArrayQueryParameter(param_name, "STRING", normal_values))
+    if modalidades:
+        sql += " AND v.modalidade IN UNNEST(@modalidades)"
+        params.append(bigquery.ArrayQueryParameter("modalidades", "STRING", modalidades))
 
-        if include_empty:
-            clauses.append(f"({column} IS NULL OR TRIM(CAST({column} AS STRING)) = '')")
+    if turnos:
+        sql += " AND v.turno IN UNNEST(@turnos)"
+        params.append(bigquery.ArrayQueryParameter("turnos", "STRING", turnos))
 
-        if clauses:
-            sql += " AND (" + " OR ".join(clauses) + ")"
+    if canais:
+        sql += " AND v.canal IN UNNEST(@canais)"
+        params.append(bigquery.ArrayQueryParameter("canais", "STRING", canais))
 
-    _add_string_filter("v.curso", cursos, "cursos")
-    _add_string_filter("v.polo", polos, "polos")
-    _add_string_filter("v.modalidade", modalidades, "modalidades")
-    _add_string_filter("v.turno", turnos, "turnos")
-    _add_string_filter("v.canal", canais, "canais")
-    _add_string_filter("v.campanha", campanhas, "campanhas")
-    _add_string_filter("v.origem", origens, "origens")
-    _add_string_filter("v.tipo_negocio", tipos_negocio, "tipos_negocio")
-    _add_string_filter("v.consultor_disparo", consultores_disp, "consultores_disp")
-    _add_string_filter("v.consultor_comercial", consultores_com, "consultores_com")
-    _add_string_filter("v.tipo_disparo", tipos_disparo, "tipos_disparo")
+    if campanhas:
+        sql += " AND v.campanha IN UNNEST(@campanhas)"
+        params.append(bigquery.ArrayQueryParameter("campanhas", "STRING", campanhas))
+
+    if origens:
+        sql += " AND v.origem IN UNNEST(@origens)"
+        params.append(bigquery.ArrayQueryParameter("origens", "STRING", origens))
+
+    if tipos_negocio:
+        sql += " AND v.tipo_negocio IN UNNEST(@tipos_negocio)"
+        params.append(bigquery.ArrayQueryParameter("tipos_negocio", "STRING", tipos_negocio))
 
     if status_list:
-        include_empty = EMPTY_FILTER_TOKEN in status_list
-        normal_status = [v for v in status_list if v != EMPTY_FILTER_TOKEN]
-        clauses: List[str] = []
+        sql += " AND (v.status_inscricao IN UNNEST(@status_list) OR v.status IN UNNEST(@status_list))"
+        params.append(bigquery.ArrayQueryParameter("status_list", "STRING", status_list))
 
-        if normal_status:
-            clauses.append("(v.status_inscricao IN UNNEST(@status_list) OR v.status IN UNNEST(@status_list))")
-            params.append(bigquery.ArrayQueryParameter("status_list", "STRING", normal_status))
+    if consultores_disp:
+        sql += " AND v.consultor_disparo IN UNNEST(@consultores_disp)"
+        params.append(bigquery.ArrayQueryParameter("consultores_disp", "STRING", consultores_disp))
 
-        if include_empty:
-            clauses.append("(v.status IS NULL OR TRIM(CAST(v.status AS STRING)) = '')")
+    if consultores_com:
+        sql += " AND v.consultor_comercial IN UNNEST(@consultores_com)"
+        params.append(bigquery.ArrayQueryParameter("consultores_com", "STRING", consultores_com))
 
-        if clauses:
-            sql += " AND (" + " OR ".join(clauses) + ")"
+    if tipos_disparo:
+        sql += " AND v.tipo_disparo IN UNNEST(@tipos_disparo)"
+        params.append(bigquery.ArrayQueryParameter("tipos_disparo", "STRING", tipos_disparo))
 
     if filters.get("cpf"):
         sql += " AND v.cpf = @cpf"
@@ -738,25 +456,10 @@ def query_leads(
     order_by: str = "data_inscricao",
     order_dir: str = "DESC",
 ) -> List[Dict[str, Any]]:
-    return list(query_leads_iter(filters=filters, limit=limit, offset=offset, order_by=order_by, order_dir=order_dir))
-
-
-def _build_leads_query(
-    filters: Optional[Dict[str, Any]] = None,
-    limit: int = DEFAULT_LIMIT,
-    offset: int = 0,
-    order_by: str = "data_inscricao",
-    order_dir: str = "DESC",
-) -> Tuple[str, List[Any], int]:
+    client = get_bq_client()
     filters = filters or {}
-    requested_limit = max(1, int(limit))
-    effective_limit = requested_limit
-    if MAX_LIMIT > 0 and requested_limit > MAX_LIMIT:
-        logger.warning(
-            "query_leads com limit acima do recomendado requested=%s recommended_max=%s",
-            requested_limit, MAX_LIMIT,
-        )
 
+    limit = max(1, min(int(limit), MAX_LIMIT))
     offset = max(0, int(offset))
     order_dir = "ASC" if str(order_dir).upper() == "ASC" else "DESC"
 
@@ -766,7 +469,6 @@ def _build_leads_query(
     allowed_order = {
         "data_inscricao": "v.data_inscricao",
         "data_inscricao_dt": "v.data_inscricao",
-        "data_disparo": "v.data_disparo",
         "status": "v.status_inscricao",
         "curso": "v.curso",
         "modalidade": "v.modalidade",
@@ -794,50 +496,17 @@ def _build_leads_query(
 
     params: List[Any] = []
     sql = _apply_filters(sql, filters, params)
-
-    if order_by == "data_disparo":
-        order_clause = _data_disparo_priority_order_clause()
-    elif order_by in ("data_inscricao", "data_inscricao_dt"):
+    if order_by in ("data_inscricao", "data_inscricao_dt"):
         order_clause = _data_inscricao_order_clause(order_dir)
     else:
         order_clause = f"{order_expr} {order_dir}"
-
     sql += f"\n ORDER BY {order_clause} \n LIMIT @limit OFFSET @offset"
-    params.append(bigquery.ScalarQueryParameter("limit", "INT64", effective_limit))
+
+    params.append(bigquery.ScalarQueryParameter("limit", "INT64", limit))
     params.append(bigquery.ScalarQueryParameter("offset", "INT64", offset))
-    return sql, params, effective_limit
 
-
-def query_leads_iter(
-    filters: Optional[Dict[str, Any]] = None,
-    limit: int = DEFAULT_LIMIT,
-    offset: int = 0,
-    order_by: str = "data_inscricao",
-    order_dir: str = "DESC",
-) -> Iterator[Dict[str, Any]]:
-    client = get_bq_client()
-    sql, params, effective_limit = _build_leads_query(
-        filters=filters, limit=limit, offset=offset, order_by=order_by, order_dir=order_dir,
-    )
-    t0 = perf_counter()
-    job = client.query(sql, job_config=bigquery.QueryJobConfig(query_parameters=params))
-    try:
-        rows = job.result(timeout=QUERY_TIMEOUT_SECONDS)
-    except FuturesTimeoutError as exc:
-        logger.exception(
-            "BQ query_leads timeout job_id=%s limit=%s timeout=%ss",
-            getattr(job, "job_id", None), effective_limit, QUERY_TIMEOUT_SECONDS,
-        )
-        job.cancel()
-        raise TimeoutError(
-            f"Consulta excedeu timeout de {QUERY_TIMEOUT_SECONDS}s para limit={effective_limit}"
-        ) from exc
-    logger.info(
-        "BQ query_leads concluído job_id=%s limit=%s elapsed=%.2fs",
-        getattr(job, "job_id", None), effective_limit, perf_counter() - t0,
-    )
-    for r in rows:
-        yield dict(r)
+    rows = client.query(sql, job_config=bigquery.QueryJobConfig(query_parameters=params)).result()
+    return [dict(r) for r in rows]
 
 
 def query_leads_count(filters: Optional[Dict[str, Any]] = None) -> int:
@@ -868,7 +537,7 @@ def _distinct_values_from_view(col: str, alias: str) -> List[str]:
 
 def query_options() -> Dict[str, List[str]]:
     return {
-        "status": _distinct_values_from_view("status", "status"),
+        "status": _distinct_values_from_view("status_inscricao", "status"),
         "cursos": _distinct_values_from_view("curso", "curso"),
         "modalidades": _distinct_values_from_view("modalidade", "modalidade"),
         "turnos": _distinct_values_from_view("turno", "turno"),
@@ -921,8 +590,8 @@ def export_leads_rows(
     filters: Optional[Dict[str, Any]] = None,
     limit: int = EXPORT_MAX_ROWS,
     offset: int = 0,
-    order_by: str = "data_disparo",
-    order_dir: str = "ASC",
+    order_by: str = "data_inscricao",
+    order_dir: str = "DESC",
 ) -> List[Dict[str, Any]]:
     client = get_bq_client()
     filters = filters or {}
@@ -937,7 +606,6 @@ def export_leads_rows(
     allowed_order = {
         "data_inscricao": "v.data_inscricao",
         "data_inscricao_dt": "v.data_inscricao",
-        "data_disparo": "v.data_disparo",
         "status": "v.status_inscricao",
         "curso": "v.curso",
         "modalidade": "v.modalidade",
@@ -950,18 +618,19 @@ def export_leads_rows(
     order_expr = allowed_order.get(order_by, "v.data_inscricao")
 
     select_cols = ",\n      ".join([f"v.{c}" for c, _ in EXPORT_COLUMNS])
-    sql = f"SELECT\n      {select_cols}\n    " + _base_select_sql()
+
+    sql = f"""
+    SELECT
+      {select_cols}
+    """ + _base_select_sql()
 
     params: List[Any] = []
     sql = _apply_filters(sql, filters, params)
 
-    if order_by == "data_disparo":
-        order_clause = _data_disparo_priority_order_clause()
-    elif order_by in ("data_inscricao", "data_inscricao_dt"):
+    if order_by in ("data_inscricao", "data_inscricao_dt"):
         order_clause = _data_inscricao_order_clause(order_dir)
     else:
         order_clause = f"{order_expr} {order_dir}"
-
     sql += f"\n ORDER BY {order_clause} \n LIMIT @limit OFFSET @offset"
     params.append(bigquery.ScalarQueryParameter("limit", "INT64", limit))
     params.append(bigquery.ScalarQueryParameter("offset", "INT64", offset))
@@ -970,28 +639,12 @@ def export_leads_rows(
     return [dict(r) for r in rows]
 
 
-def export_leads_rows_iter(
-    filters: Optional[Dict[str, Any]] = None,
-    batch_size: int = 1000,
-    order_by: str = "data_disparo",
-    order_dir: str = "ASC",
-) -> Iterator[List[Dict[str, Any]]]:
-    """Itera exportação paginada para evitar alto consumo de memória."""
-    offset = 0
-    size = max(1, int(batch_size))
-
-    while True:
-        rows = export_leads_rows(filters=filters, limit=size, offset=offset, order_by=order_by, order_dir=order_dir)
-        if not rows:
-            break
-        yield rows
-        fetched = len(rows)
-        offset += fetched
-        if fetched < size:
-            break
-
-
 def rows_to_xlsx(rows: List[Dict[str, Any]], xlsx_path: str, sheet_name: str = "Leads") -> str:
+    """
+    Gera XLSX no disco.
+    - Excel não aceita datetime com timezone
+    - CPF/celular saem como TEXTO para evitar conversão numérica
+    """
     wb = Workbook()
     ws = wb.active
     ws.title = sheet_name[:31]
@@ -1013,6 +666,10 @@ def rows_to_xlsx(rows: List[Dict[str, Any]], xlsx_path: str, sheet_name: str = "
 
 
 def df_to_xlsx(df, xlsx_path: str, sheet_name: str = "Upload") -> str:
+    """
+    Salva uma cópia do upload em XLSX.
+    Mantém CPF/celular como texto quando possível.
+    """
     wb = Workbook()
     ws = wb.active
     ws.title = sheet_name[:31]
