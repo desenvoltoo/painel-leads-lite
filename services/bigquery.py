@@ -6,6 +6,8 @@ import logging
 import threading
 import time
 import uuid
+import re
+import unicodedata
 from concurrent.futures import TimeoutError as FuturesTimeoutError
 from decimal import Decimal, InvalidOperation
 from datetime import timedelta
@@ -40,7 +42,7 @@ BQ_STAGING_TABLE = os.getenv("BQ_STAGING_TABLE", "stg_leads_site")
 BQ_PROCEDURE = os.getenv("BQ_PROCEDURE", "sp_import_star_from_site")
 
 # Painel lê somente essa view
-BQ_VIEW_LEADS = "vw_leads_painel_lite"
+BQ_VIEW_LEADS = os.getenv("BQ_VIEW_LEADS", "vw_leads_painel_lite")
 
 DEFAULT_LIMIT = int(os.getenv("BQ_DEFAULT_LIMIT", "200"))
 MAX_LIMIT = int(os.getenv("BQ_MAX_LIMIT", "2000"))
@@ -61,6 +63,34 @@ RETRY_MAX_DELAY_S = float(os.getenv("BQ_RETRY_MAX_DELAY_S", "30.0"))
 
 # colunas que não devem sofrer comportamento numérico
 PHONEISH_COLUMNS = {"cpf", "celular"}
+
+UPLOAD_COLUMN_ALIASES = {
+    "unidade": "unidade",
+    "polo": "unidade",
+    "campus": "unidade",
+    "statusinscricao": "status_inscricao",
+    "status inscricao": "status_inscricao",
+    "status inscrição": "status_inscricao",
+    "datainscricao": "data_inscricao",
+    "data inscricao": "data_inscricao",
+    "data inscrição": "data_inscricao",
+    "tipo negocio": "tipo_negocio",
+    "tipo negócio": "tipo_negocio",
+    "qtd acionamentos": "qtd_acionamentos",
+    "data ultima acao": "data_ultima_acao",
+    "data última ação": "data_ultima_acao",
+    "data disparo": "data_disparo",
+    "peca disparo": "peca_disparo",
+    "peça disparo": "peca_disparo",
+    "texto disparo": "texto_disparo",
+    "consultor disparo": "consultor_disparo",
+    "tipo disparo": "tipo_disparo",
+    "data matricula": "data_matricula",
+    "data matrícula": "data_matricula",
+    "acao comercial": "acao_comercial",
+    "ação comercial": "acao_comercial",
+    "consultor comercial": "consultor_comercial",
+}
 
 # ============================================================
 # CLIENTES THREAD-SAFE
@@ -121,6 +151,63 @@ def _tbl(name: str) -> str:
     return f"`{GCP_PROJECT_ID}.{BQ_DATASET}.{name}`"
 
 
+def _view_table_id() -> str:
+    return f"{GCP_PROJECT_ID}.{BQ_DATASET}.{BQ_VIEW_LEADS}"
+
+
+def _view_columns() -> set[str]:
+    """Retorna as colunas reais da view/tabela, com cache por thread."""
+    cache_key = f"view_columns::{_view_table_id()}"
+    cache = getattr(_thread_local, "schema_cache", None)
+    if cache is None:
+        cache = {}
+        _thread_local.schema_cache = cache
+    if cache_key not in cache:
+        table = get_bq_client().get_table(_view_table_id())
+        cache[cache_key] = {field.name for field in table.schema}
+    return cache[cache_key]
+
+
+def _has_view_col(col: str) -> bool:
+    return col in _view_columns()
+
+
+def _select_col(col: str, alias: Optional[str] = None, bq_type: str = "STRING") -> str:
+    """Seleciona coluna se existir; caso contrário devolve NULL tipado com o mesmo alias."""
+    out_alias = alias or col
+    if _has_view_col(col):
+        return f"v.{col} AS {out_alias}"
+    return f"CAST(NULL AS {bq_type}) AS {out_alias}"
+
+
+def _first_existing_col(*cols: str) -> Optional[str]:
+    existing = _view_columns()
+    return next((col for col in cols if col in existing), None)
+
+
+def _order_expr_for(order_by: str) -> Optional[str]:
+    if order_by == "data_inscricao_dt":
+        order_by = "data_inscricao"
+    allowed_order = {
+        "data_inscricao": "data_inscricao",
+        "data_disparo": "data_disparo",
+        "status": "status_inscricao",
+        "curso": "curso",
+        "modalidade": "modalidade",
+        "polo": "polo",
+        "nome": "nome",
+        "cpf": "cpf",
+        "canal": "canal",
+        "campanha": "campanha",
+        "consultor_disparo": "consultor_disparo",
+    }
+    col = allowed_order.get(order_by, "data_inscricao")
+    if _has_view_col(col):
+        return f"v.{col}"
+    fallback = _first_existing_col("data_inscricao", "data_disparo", "nome", "cpf")
+    return f"v.{fallback}" if fallback else None
+
+
 def _as_list(v: Any) -> List[str]:
     if v is None:
         return []
@@ -137,16 +224,28 @@ def _as_list(v: Any) -> List[str]:
 
 
 def _data_inscricao_order_clause(order_dir: str) -> str:
-    """
-    Ordena mantendo linhas sem data_inscricao no final.
-    - primeiro: quem tem data (NULL por último)
-    - depois: data mais recente/antiga conforme order_dir
-    - por fim: desempate determinístico por data_atualizacao
-    """
+    """Ordena por data_inscricao, tolerando views sem data_atualizacao."""
+    expr = _order_expr_for("data_inscricao")
+    if not expr:
+        return "1"
+
+    parts = [
+        f"CASE WHEN {expr} IS NULL THEN 1 ELSE 0 END ASC",
+        f"{expr} {order_dir}",
+    ]
+    if _has_view_col("data_atualizacao"):
+        parts.append("v.data_atualizacao DESC")
+    return ",\n    ".join(parts)
+
+
+def _data_disparo_order_clause(order_dir: str) -> str:
+    """Ordena por data_disparo, mantendo vazios no início como descrito no painel."""
+    expr = _order_expr_for("data_disparo")
+    if not expr:
+        return _data_inscricao_order_clause(order_dir)
     return f"""
-    CASE WHEN v.data_inscricao IS NULL THEN 1 ELSE 0 END ASC,
-    v.data_inscricao {order_dir},
-    v.data_atualizacao DESC
+    CASE WHEN {expr} IS NULL OR TRIM(CAST({expr} AS STRING)) = '' THEN 0 ELSE 1 END ASC,
+    {expr} {order_dir}
     """
 
 
@@ -240,6 +339,18 @@ def _normalize_phoneish_value(x: Any) -> Optional[str]:
     return s2 or None
 
 
+def _normalize_column_name(name: Any) -> str:
+    """Normaliza cabeçalhos de upload para o schema da staging."""
+    raw = str(name or "").strip()
+    compact = " ".join(raw.replace("_", " ").replace("-", " ").split()).lower()
+    no_accents = "".join(
+        ch for ch in unicodedata.normalize("NFKD", compact)
+        if not unicodedata.combining(ch)
+    )
+    snake = re.sub(r"[^a-z0-9]+", "_", no_accents).strip("_")
+    return UPLOAD_COLUMN_ALIASES.get(compact) or UPLOAD_COLUMN_ALIASES.get(no_accents) or snake
+
+
 def _normalize_generic_string(x: Any) -> Optional[str]:
     """
     Converte qualquer valor para STRING segura sem estourar upload.
@@ -328,7 +439,8 @@ def _coerce_df_to_staging_schema(df):
     import pandas as pd
 
     df = df.copy()
-    df.columns = [str(c).strip() for c in df.columns]
+    df.columns = [_normalize_column_name(c) for c in df.columns]
+    df = df.loc[:, ~df.columns.duplicated()]
 
     expected_cols = [f.name for f in STAGING_SCHEMA]
 
@@ -641,67 +753,69 @@ def _apply_filters(sql: str, filters: Dict[str, Any], params: List[Any]) -> str:
     consultores_disp = _as_list(filters.get("consultor_disparo")) or _as_list(filters.get("consultor"))
     consultores_com = _as_list(filters.get("consultor_comercial"))
 
-    if cursos:
+    if cursos and _has_view_col("curso"):
         sql += " AND v.curso IN UNNEST(@cursos)"
         params.append(bigquery.ArrayQueryParameter("cursos", "STRING", cursos))
 
-    if polos:
+    if polos and _has_view_col("polo"):
         sql += " AND v.polo IN UNNEST(@polos)"
         params.append(bigquery.ArrayQueryParameter("polos", "STRING", polos))
 
-    if modalidades:
+    if modalidades and _has_view_col("modalidade"):
         sql += " AND v.modalidade IN UNNEST(@modalidades)"
         params.append(bigquery.ArrayQueryParameter("modalidades", "STRING", modalidades))
 
-    if turnos:
+    if turnos and _has_view_col("turno"):
         sql += " AND v.turno IN UNNEST(@turnos)"
         params.append(bigquery.ArrayQueryParameter("turnos", "STRING", turnos))
 
-    if canais:
+    if canais and _has_view_col("canal"):
         sql += " AND v.canal IN UNNEST(@canais)"
         params.append(bigquery.ArrayQueryParameter("canais", "STRING", canais))
 
-    if campanhas:
+    if campanhas and _has_view_col("campanha"):
         sql += " AND v.campanha IN UNNEST(@campanhas)"
         params.append(bigquery.ArrayQueryParameter("campanhas", "STRING", campanhas))
 
-    if origens:
+    if origens and _has_view_col("origem"):
         sql += " AND v.origem IN UNNEST(@origens)"
         params.append(bigquery.ArrayQueryParameter("origens", "STRING", origens))
 
-    if tipos_negocio:
+    if tipos_negocio and _has_view_col("tipo_negocio"):
         sql += " AND v.tipo_negocio IN UNNEST(@tipos_negocio)"
         params.append(bigquery.ArrayQueryParameter("tipos_negocio", "STRING", tipos_negocio))
 
-    if status_list:
-        sql += " AND (v.status_inscricao IN UNNEST(@status_list) OR v.status IN UNNEST(@status_list))"
+    status_cols = [col for col in ("status_inscricao", "status") if _has_view_col(col)]
+    if status_list and status_cols:
+        status_sql = " OR ".join([f"v.{col} IN UNNEST(@status_list)" for col in status_cols])
+        sql += f" AND ({status_sql})"
         params.append(bigquery.ArrayQueryParameter("status_list", "STRING", status_list))
 
-    if consultores_disp:
+    if consultores_disp and _has_view_col("consultor_disparo"):
         sql += " AND v.consultor_disparo IN UNNEST(@consultores_disp)"
         params.append(bigquery.ArrayQueryParameter("consultores_disp", "STRING", consultores_disp))
 
-    if consultores_com:
+    if consultores_com and _has_view_col("consultor_comercial"):
         sql += " AND v.consultor_comercial IN UNNEST(@consultores_com)"
         params.append(bigquery.ArrayQueryParameter("consultores_com", "STRING", consultores_com))
 
-    if tipos_disparo:
+    if tipos_disparo and _has_view_col("tipo_disparo"):
         sql += " AND v.tipo_disparo IN UNNEST(@tipos_disparo)"
         params.append(bigquery.ArrayQueryParameter("tipos_disparo", "STRING", tipos_disparo))
 
-    if filters.get("cpf"):
+    if filters.get("cpf") and _has_view_col("cpf"):
         sql += " AND v.cpf = @cpf"
         params.append(bigquery.ScalarQueryParameter("cpf", "STRING", str(filters["cpf"]).strip()))
 
-    if filters.get("celular"):
+    if filters.get("celular") and _has_view_col("celular"):
         sql += " AND v.celular = @celular"
         params.append(bigquery.ScalarQueryParameter("celular", "STRING", str(filters["celular"]).strip()))
 
-    if filters.get("email"):
+    if filters.get("email") and _has_view_col("email"):
         sql += " AND LOWER(v.email) = LOWER(@email)"
         params.append(bigquery.ScalarQueryParameter("email", "STRING", str(filters["email"]).strip()))
 
-    if filters.get("nome"):
+    if filters.get("nome") and _has_view_col("nome"):
         sql += " AND LOWER(v.nome) LIKE LOWER(@nome_like)"
         params.append(bigquery.ScalarQueryParameter("nome_like", "STRING", f"%{str(filters['nome']).strip()}%"))
 
@@ -709,14 +823,20 @@ def _apply_filters(sql: str, filters: Dict[str, Any], params: List[Any]) -> str:
         val = str(filters.get("matriculado")).lower().strip()
         b = True if val in ("true", "1", "sim", "yes") else False if val in ("false", "0", "nao", "não", "no") else None
         if b is not None:
-            sql += " AND IFNULL(v.flag_matriculado, FALSE) = @matriculado"
-            params.append(bigquery.ScalarQueryParameter("matriculado", "BOOL", b))
+            if _has_view_col("flag_matriculado"):
+                sql += " AND IFNULL(v.flag_matriculado, FALSE) = @matriculado"
+                params.append(bigquery.ScalarQueryParameter("matriculado", "BOOL", b))
+            elif _has_view_col("matriculado"):
+                sql += " AND LOWER(CAST(v.matriculado AS STRING)) IN UNNEST(@matriculado_text)"
+                truthy = ["true", "1", "sim", "yes", "s"]
+                falsy = ["false", "0", "nao", "não", "no", "n"]
+                params.append(bigquery.ArrayQueryParameter("matriculado_text", "STRING", truthy if b else falsy))
 
-    if filters.get("data_ini"):
+    if filters.get("data_ini") and _has_view_col("data_inscricao"):
         sql += " AND v.data_inscricao >= @data_ini"
         params.append(bigquery.ScalarQueryParameter("data_ini", "DATE", filters["data_ini"]))
 
-    if filters.get("data_fim"):
+    if filters.get("data_fim") and _has_view_col("data_inscricao"):
         sql += " AND v.data_inscricao <= @data_fim"
         params.append(bigquery.ScalarQueryParameter("data_fim", "DATE", filters["data_fim"]))
 
@@ -769,17 +889,9 @@ def query_leads_iter(
     }
     order_expr = allowed_order.get(order_by, "v.data_inscricao")
 
-    sql = """
+    sql = f"""
     SELECT
-      v.data_inscricao,
-      v.nome, v.cpf, v.celular, v.email,
-      v.curso, v.modalidade, v.turno,
-      v.polo,
-      v.origem,
-      v.status_inscricao, v.status,
-      v.flag_matriculado,
-      v.consultor_comercial, v.consultor_disparo,
-      v.canal, v.campanha
+      {select_cols}
     """ + _base_select_sql()
 
     params: List[Any] = []
@@ -790,6 +902,8 @@ def query_leads_iter(
         order_clause = _data_disparo_order_clause(order_dir)
     else:
         order_clause = f"{order_expr} {order_dir}"
+    else:
+        order_clause = "1"
     sql += f"\n ORDER BY {order_clause} \n LIMIT @limit OFFSET @offset"
 
     params.append(bigquery.ScalarQueryParameter("limit", "INT64", limit))
@@ -824,6 +938,10 @@ def query_leads_count(filters: Optional[Dict[str, Any]] = None) -> int:
 # OPTIONS
 # ============================================================
 def _distinct_values_from_view(col: str, alias: str) -> List[str]:
+    if not _has_view_col(col):
+        logger.warning("Coluna '%s' não existe em %s; opções de filtro vazias.", col, _view_table_id())
+        return []
+
     client = get_bq_client()
     sql = f"""
     SELECT DISTINCT {col} AS {alias}
@@ -933,6 +1051,8 @@ def export_leads_rows(
         order_clause = _data_disparo_order_clause(order_dir)
     else:
         order_clause = f"{order_expr} {order_dir}"
+    else:
+        order_clause = "1"
     sql += f"\n ORDER BY {order_clause} \n LIMIT @limit OFFSET @offset"
     params.append(bigquery.ScalarQueryParameter("limit", "INT64", limit))
     params.append(bigquery.ScalarQueryParameter("offset", "INT64", offset))
