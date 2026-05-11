@@ -38,7 +38,7 @@ logger = logging.getLogger(__name__)
 GCP_PROJECT_ID = os.getenv("GCP_PROJECT_ID", "painel-universidade")
 BQ_DATASET = os.getenv("BQ_DATASET", "modelo_estrela")
 
-BQ_STAGING_TABLE = os.getenv("BQ_STAGING_TABLE", "stg_leads_site")
+BQ_STAGING_TABLE = "stg_leads_site"
 BQ_PROCEDURE = os.getenv("BQ_PROCEDURE", "sp_import_star_from_site")
 
 # Painel lê somente essa view
@@ -149,6 +149,10 @@ def _with_retry(fn, *args, operation_name: str = "operação", **kwargs) -> Any:
 
 def _tbl(name: str) -> str:
     return f"`{GCP_PROJECT_ID}.{BQ_DATASET}.{name}`"
+
+
+def _staging_table_id() -> str:
+    return f"{GCP_PROJECT_ID}.{BQ_DATASET}.{BQ_STAGING_TABLE}"
 
 
 def _view_table_id() -> str:
@@ -466,7 +470,7 @@ def _coerce_df_to_staging_schema(df):
 # ============================================================
 def load_to_staging(df) -> None:
     client = get_bq_client()
-    table_id = f"{GCP_PROJECT_ID}.{BQ_DATASET}.{BQ_STAGING_TABLE}"
+    table_id = _staging_table_id()
     df2 = _coerce_df_to_staging_schema(df)
 
     def _do_load():
@@ -600,7 +604,7 @@ def _upload_df_to_gcs_temp(df, bucket: storage.Bucket) -> str:
 
 def _load_gcs_csv_to_staging(bucket: storage.Bucket, temp_name: str) -> None:
     client = get_bq_client()
-    table_id = f"{GCP_PROJECT_ID}.{BQ_DATASET}.{BQ_STAGING_TABLE}"
+    table_id = _staging_table_id()
     uri = f"gs://{bucket.name}/{temp_name}"
 
     def _do_load():
