@@ -150,6 +150,15 @@ def _data_inscricao_order_clause(order_dir: str) -> str:
     """
 
 
+def _data_disparo_order_clause(order_dir: str) -> str:
+    """Ordena por data_disparo colocando valores vazios primeiro."""
+    return f"""
+    CASE WHEN v.data_disparo IS NULL OR TRIM(CAST(v.data_disparo AS STRING)) = '' THEN 0 ELSE 1 END ASC,
+    v.data_disparo {order_dir},
+    v.data_inscricao ASC
+    """
+
+
 # ============================================================
 # NORMALIZADORES
 # ============================================================
@@ -747,6 +756,7 @@ def query_leads_iter(
     allowed_order = {
         "data_inscricao": "v.data_inscricao",
         "data_inscricao_dt": "v.data_inscricao",
+        "data_disparo": "v.data_disparo",
         "status": "v.status_inscricao",
         "curso": "v.curso",
         "modalidade": "v.modalidade",
@@ -776,6 +786,8 @@ def query_leads_iter(
     sql = _apply_filters(sql, filters, params)
     if order_by in ("data_inscricao", "data_inscricao_dt"):
         order_clause = _data_inscricao_order_clause(order_dir)
+    elif order_by == "data_disparo":
+        order_clause = _data_disparo_order_clause(order_dir)
     else:
         order_clause = f"{order_expr} {order_dir}"
     sql += f"\n ORDER BY {order_clause} \n LIMIT @limit OFFSET @offset"
@@ -893,6 +905,7 @@ def export_leads_rows(
     allowed_order = {
         "data_inscricao": "v.data_inscricao",
         "data_inscricao_dt": "v.data_inscricao",
+        "data_disparo": "v.data_disparo",
         "status": "v.status_inscricao",
         "curso": "v.curso",
         "modalidade": "v.modalidade",
@@ -916,6 +929,8 @@ def export_leads_rows(
 
     if order_by in ("data_inscricao", "data_inscricao_dt"):
         order_clause = _data_inscricao_order_clause(order_dir)
+    elif order_by == "data_disparo":
+        order_clause = _data_disparo_order_clause(order_dir)
     else:
         order_clause = f"{order_expr} {order_dir}"
     sql += f"\n ORDER BY {order_clause} \n LIMIT @limit OFFSET @offset"
