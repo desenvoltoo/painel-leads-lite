@@ -239,14 +239,19 @@ def _data_inscricao_order_clause(order_dir: str) -> str:
 
 
 def _data_disparo_order_clause(order_dir: str) -> str:
-    """Ordena por data_disparo, mantendo vazios no início como descrito no painel."""
+    """Ordena por data_disparo colocando valores vazios primeiro."""
     expr = _order_expr_for("data_disparo")
     if not expr:
         return _data_inscricao_order_clause(order_dir)
-    return f"""
-    CASE WHEN {expr} IS NULL OR TRIM(CAST({expr} AS STRING)) = '' THEN 0 ELSE 1 END ASC,
-    {expr} {order_dir}
-    """
+
+    parts = [
+        f"CASE WHEN {expr} IS NULL OR TRIM(CAST({expr} AS STRING)) = '' THEN 0 ELSE 1 END ASC",
+        f"{expr} {order_dir}",
+    ]
+    data_inscricao_expr = _order_expr_for("data_inscricao")
+    if data_inscricao_expr:
+        parts.append(f"{data_inscricao_expr} ASC")
+    return ",\n    ".join(parts)
 
 
 # ============================================================
