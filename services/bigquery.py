@@ -249,6 +249,15 @@ def _data_disparo_order_clause(order_dir: str) -> str:
     """
 
 
+def _data_disparo_order_clause(order_dir: str) -> str:
+    """Ordena por data_disparo colocando valores vazios primeiro."""
+    return f"""
+    CASE WHEN v.data_disparo IS NULL OR TRIM(CAST(v.data_disparo AS STRING)) = '' THEN 0 ELSE 1 END ASC,
+    v.data_disparo {order_dir},
+    v.data_inscricao ASC
+    """
+
+
 # ============================================================
 # NORMALIZADORES
 # ============================================================
@@ -864,26 +873,21 @@ def query_leads_iter(
     if order_by == "data_inscricao_dt":
         order_by = "data_inscricao"
 
-    order_expr = _order_expr_for(order_by)
-    select_cols = ",\n      ".join([
-        _select_col("data_inscricao", bq_type="DATE"),
-        _select_col("nome"),
-        _select_col("cpf"),
-        _select_col("celular"),
-        _select_col("email"),
-        _select_col("curso"),
-        _select_col("modalidade"),
-        _select_col("turno"),
-        _select_col("polo"),
-        _select_col("origem"),
-        _select_col("status_inscricao"),
-        _select_col("status"),
-        _select_col("flag_matriculado", bq_type="BOOL"),
-        _select_col("consultor_comercial"),
-        _select_col("consultor_disparo"),
-        _select_col("canal"),
-        _select_col("campanha"),
-    ])
+    allowed_order = {
+        "data_inscricao": "v.data_inscricao",
+        "data_inscricao_dt": "v.data_inscricao",
+        "data_disparo": "v.data_disparo",
+        "status": "v.status_inscricao",
+        "curso": "v.curso",
+        "modalidade": "v.modalidade",
+        "polo": "v.polo",
+        "nome": "v.nome",
+        "cpf": "v.cpf",
+        "canal": "v.canal",
+        "campanha": "v.campanha",
+        "consultor_disparo": "v.consultor_disparo",
+    }
+    order_expr = allowed_order.get(order_by, "v.data_inscricao")
 
     sql = f"""
     SELECT
@@ -896,7 +900,7 @@ def query_leads_iter(
         order_clause = _data_inscricao_order_clause(order_dir)
     elif order_by == "data_disparo":
         order_clause = _data_disparo_order_clause(order_dir)
-    elif order_expr:
+    else:
         order_clause = f"{order_expr} {order_dir}"
     else:
         order_clause = "1"
@@ -1016,13 +1020,22 @@ def export_leads_rows(
     if order_by == "data_inscricao_dt":
         order_by = "data_inscricao"
 
-    order_expr = _order_expr_for(order_by)
-    bool_cols = {"flag_matriculado"}
-    date_cols = {"data_inscricao", "data_ultima_acao", "data_disparo", "data_matricula"}
-    select_cols = ",\n      ".join([
-        _select_col(c, bq_type=("BOOL" if c in bool_cols else "DATE" if c in date_cols else "STRING"))
-        for c, _ in EXPORT_COLUMNS
-    ])
+    allowed_order = {
+        "data_inscricao": "v.data_inscricao",
+        "data_inscricao_dt": "v.data_inscricao",
+        "data_disparo": "v.data_disparo",
+        "status": "v.status_inscricao",
+        "curso": "v.curso",
+        "modalidade": "v.modalidade",
+        "polo": "v.polo",
+        "nome": "v.nome",
+        "cpf": "v.cpf",
+        "canal": "v.canal",
+        "campanha": "v.campanha",
+    }
+    order_expr = allowed_order.get(order_by, "v.data_inscricao")
+
+    select_cols = ",\n      ".join([f"v.{c}" for c, _ in EXPORT_COLUMNS])
 
     sql = f"""
     SELECT
@@ -1036,7 +1049,7 @@ def export_leads_rows(
         order_clause = _data_inscricao_order_clause(order_dir)
     elif order_by == "data_disparo":
         order_clause = _data_disparo_order_clause(order_dir)
-    elif order_expr:
+    else:
         order_clause = f"{order_expr} {order_dir}"
     else:
         order_clause = "1"

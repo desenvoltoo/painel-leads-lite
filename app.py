@@ -244,6 +244,40 @@ def _update_export_job(job_id: str, **kwargs):
     with EXPORT_BATCH_JOBS_LOCK:
         if job_id in EXPORT_BATCH_JOBS:
             EXPORT_BATCH_JOBS[job_id].update(kwargs)
+
+
+def _is_missing_stg_import_star_error(exc: Exception) -> bool:
+    text = str(exc).lower()
+    return "not found" in text and "stg_import_star" in text
+
+
+def _missing_stg_import_star_response(kind: str):
+    warning = (
+        "A dependência BigQuery modelo_estrela.stg_import_star não foi encontrada. "
+        "Retornando resposta vazia para manter o painel disponível."
+    )
+    if kind == "options":
+        return {
+            "ok": True,
+            "warning": warning,
+            "data": {
+                "status": [],
+                "cursos": [],
+                "modalidades": [],
+                "turnos": [],
+                "polos": [],
+                "origens": [],
+                "canais": [],
+                "campanhas": [],
+                "consultores_disparo": [],
+                "consultores_comercial": [],
+                "tipos_disparo": [],
+                "tipos_negocio": [],
+            },
+        }
+    if kind == "kpis":
+        return {"ok": True, "warning": warning, "total": 0, "top_status": None}
+    return {"ok": True, "warning": warning, "total": 0, "data": []}
  
  
 # ============================================================
@@ -497,6 +531,9 @@ def create_app() -> Flask:
         except TimeoutError as e:
             return jsonify(_error_payload(e, "Timeout ao buscar leads. Tente reduzir filtros/volume ou usar stream=true.")), 504
         except Exception as e:
+            if _is_missing_stg_import_star_error(e):
+                logger.warning("Dependência BigQuery ausente ao buscar leads: %s", e)
+                return jsonify(_missing_stg_import_star_response("leads")), 200
             return jsonify(_error_payload(e, "Erro ao buscar leads no BigQuery.")), 500
 
     @app.post("/api/leads/search")
@@ -524,6 +561,9 @@ def create_app() -> Flask:
         except TimeoutError as e:
             return jsonify(_error_payload(e, "Timeout ao buscar leads. Tente reduzir filtros/volume ou usar stream=true.")), 504
         except Exception as e:
+            if _is_missing_stg_import_star_error(e):
+                logger.warning("Dependência BigQuery ausente ao buscar leads: %s", e)
+                return jsonify(_missing_stg_import_star_response("leads")), 200
             return jsonify(_error_payload(e, "Erro ao buscar leads no BigQuery.")), 500
  
     @app.get("/api/kpis")
@@ -549,6 +589,9 @@ def create_app() -> Flask:
  
             return jsonify({"ok": True, "total": total, "top_status": top_status})
         except Exception as e:
+            if _is_missing_stg_import_star_error(e):
+                logger.warning("Dependência BigQuery ausente ao calcular KPIs: %s", e)
+                return jsonify(_missing_stg_import_star_response("kpis")), 200
             return jsonify(_error_payload(e, "Erro ao calcular KPIs.")), 500
 
     @app.post("/api/kpis/search")
@@ -572,6 +615,9 @@ def create_app() -> Flask:
 
             return jsonify({"ok": True, "total": total, "top_status": top_status})
         except Exception as e:
+            if _is_missing_stg_import_star_error(e):
+                logger.warning("Dependência BigQuery ausente ao calcular KPIs: %s", e)
+                return jsonify(_missing_stg_import_star_response("kpis")), 200
             return jsonify(_error_payload(e, "Erro ao calcular KPIs.")), 500
  
     @app.get("/api/options")
@@ -580,6 +626,9 @@ def create_app() -> Flask:
             data = query_options()
             return jsonify({"ok": True, "data": data})
         except Exception as e:
+            if _is_missing_stg_import_star_error(e):
+                logger.warning("Dependência BigQuery ausente ao carregar opções: %s", e)
+                return jsonify(_missing_stg_import_star_response("options")), 200
             return jsonify(_error_payload(e, "Erro ao carregar opções dos filtros.")), 500
  
     # ============================================================
@@ -755,18 +804,24 @@ def create_app() -> Flask:
         if not _validate_upload_filename(filename):
             return jsonify({"ok": False, "error": "Formato inválido. Envie CSV ou XLSX."}), 400
 
+        if not env_bool("GCS_SIGNED_UPLOAD_ENABLED", False):
+            return jsonify({
+                "ok": False,
+                "error": "Upload por URL assinada desabilitado; use o envio direto pelo servidor.",
+                "use_direct_upload": True,
+            }), 501
+
         try:
             source = (request.args.get("source") or "manual").strip() or "manual"
             payload = generate_gcs_signed_upload(filename=filename, source_tag=source)
             return jsonify({"ok": True, "data": payload}), 200
         except Exception as e:
-            logger.exception("Falha ao gerar signed URL de upload: %s", e)
-            return jsonify(
-                _error_payload(
-                    e,
-                    f"Falha ao gerar URL de upload: {e}",
-                )
-            ), 500
+            logger.warning("Falha ao gerar signed URL de upload; cliente deve usar upload direto: %s", e)
+            return jsonify({
+                "ok": False,
+                "error": f"Falha ao gerar URL de upload: {e}",
+                "use_direct_upload": True,
+            }), 501
 
     @app.post("/api/process-upload")
     def api_process_upload():
