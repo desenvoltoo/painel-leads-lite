@@ -988,34 +988,47 @@ def query_options() -> Dict[str, List[str]]:
 # EXPORT (XLSX)
 # ============================================================
 EXPORT_COLUMNS: List[Tuple[str, str]] = [
-    ("data_inscricao", "Data Inscrição"),
-    ("nome", "Candidato"),
-    ("cpf", "CPF"),
-    ("celular", "Celular"),
-    ("email", "Email"),
-    ("curso", "Curso"),
-    ("modalidade", "Modalidade"),
-    ("turno", "Turno"),
-    ("polo", "Polo"),
-    ("origem", "Origem"),
-    ("status", "Status"),
-    ("flag_matriculado", "Matriculado"),
-    ("tipo_negocio", "Tipo Negócio"),
-    ("consultor_comercial", "Consultor Comercial"),
-    ("consultor_disparo", "Consultor Disparo"),
-    ("canal", "Canal"),
-    ("campanha", "Campanha"),
-    ("acao_comercial", "Ação Comercial"),
-    ("tipo_disparo", "Tipo Disparo"),
-    ("peca_disparo", "Peça Disparo"),
-    ("texto_disparo", "Texto Disparo"),
-    ("qtd_acionamentos", "Qtd Acionamentos"),
-    ("data_matricula", "Data Matrícula"),
-    ("data_ultima_acao", "Data Última Ação"),
-    ("data_disparo", "Data Disparo"),
-    ("data_atualizacao", "Atualizado em"),
-    ("observacao", "Observação"),
+    ("status_inscricao", "status_inscricao"),
+    ("data_inscricao", "data_inscricao"),
+    ("origem", "origem"),
+    ("unidade", "unidade"),
+    ("tipo_negocio", "tipo_negocio"),
+    ("curso", "curso"),
+    ("modalidade", "modalidade"),
+    ("turno", "turno"),
+    ("nome", "nome"),
+    ("cpf", "cpf"),
+    ("celular", "celular"),
+    ("email", "email"),
+    ("data_ultima_acao", "data_ultima_acao"),
+    ("qtd_acionamentos", "qtd_acionamentos"),
+    ("status", "status"),
+    ("data_disparo", "data_disparo"),
+    ("peca_disparo", "peca_disparo"),
+    ("texto_disparo", "texto_disparo"),
+    ("consultor_disparo", "consultor_disparo"),
+    ("tipo_disparo", "tipo_disparo"),
+    ("campanha", "campanha"),
+    ("observacao", "observacao"),
+    ("data_matricula", "data_matricula"),
+    ("matriculado", "matriculado"),
+    ("canal", "canal"),
+    ("acao_comercial", "acao_comercial"),
+    ("consultor_comercial", "consultor_comercial"),
 ]
+
+EXPORT_COLUMN_FALLBACKS: Dict[str, Tuple[str, ...]] = {
+    "unidade": ("unidade", "polo"),
+    "matriculado": ("matriculado", "flag_matriculado"),
+}
+
+
+def _select_export_col(col: str, bq_type: str = "STRING") -> str:
+    """Seleciona coluna de exportação preservando o alias esperado no cabeçalho."""
+    for source_col in EXPORT_COLUMN_FALLBACKS.get(col, (col,)):
+        if _has_view_col(source_col):
+            return f"v.{source_col} AS {col}"
+    return f"CAST(NULL AS {bq_type}) AS {col}"
 
 
 def export_leads_rows(
@@ -1039,7 +1052,7 @@ def export_leads_rows(
     bool_cols = {"flag_matriculado"}
     date_cols = {"data_inscricao", "data_ultima_acao", "data_disparo", "data_matricula"}
     select_cols = ",\n      ".join([
-        _select_col(c, bq_type=("BOOL" if c in bool_cols else "DATE" if c in date_cols else "STRING"))
+        _select_export_col(c, bq_type=("BOOL" if c in bool_cols else "DATE" if c in date_cols else "STRING"))
         for c, _ in EXPORT_COLUMNS
     ])
 
