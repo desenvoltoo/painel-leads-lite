@@ -64,6 +64,54 @@ RETRY_MAX_DELAY_S = float(os.getenv("BQ_RETRY_MAX_DELAY_S", "30.0"))
 # colunas que não devem sofrer comportamento numérico
 PHONEISH_COLUMNS = {"cpf", "celular"}
 
+EMPTY_FILTER_TOKEN = "__EMPTY__"
+
+
+def _split_empty_filter(values: List[str]) -> Tuple[List[str], bool]:
+    cleaned: List[str] = []
+    include_empty = False
+    for value in values:
+        item = str(value or "").strip()
+        if not item:
+            continue
+        if item == EMPTY_FILTER_TOKEN:
+            include_empty = True
+            continue
+        cleaned.append(item)
+    return cleaned, include_empty
+
+
+def _empty_value_condition(column_expr: str) -> str:
+    return f"({column_expr} IS NULL OR TRIM(CAST({column_expr} AS STRING)) = '')"
+
+
+def _apply_multi_value_filter(
+    sql: str,
+    params: List[Any],
+    *,
+    col: str,
+    param_name: str,
+    values: List[str],
+) -> str:
+    if not values or not _has_view_col(col):
+        return sql
+
+    filled_values, include_empty = _split_empty_filter(values)
+    conditions: List[str] = []
+    column_expr = f"v.{col}"
+
+    if filled_values:
+        conditions.append(f"{column_expr} IN UNNEST(@{param_name})")
+        params.append(bigquery.ArrayQueryParameter(param_name, "STRING", filled_values))
+
+    if include_empty:
+        conditions.append(_empty_value_condition(column_expr))
+
+    if conditions:
+        sql += " AND (" + " OR ".join(conditions) + ")"
+
+    return sql
+
 UPLOAD_COLUMN_ALIASES = {
     "unidade": "unidade",
     "polo": "unidade",
@@ -753,53 +801,18 @@ def _apply_filters(sql: str, filters: Dict[str, Any], params: List[Any]) -> str:
     consultores_disp = _as_list(filters.get("consultor_disparo")) or _as_list(filters.get("consultor"))
     consultores_com = _as_list(filters.get("consultor_comercial"))
 
-    if cursos and _has_view_col("curso"):
-        sql += " AND v.curso IN UNNEST(@cursos)"
-        params.append(bigquery.ArrayQueryParameter("cursos", "STRING", cursos))
-
-    if polos and _has_view_col("polo"):
-        sql += " AND v.polo IN UNNEST(@polos)"
-        params.append(bigquery.ArrayQueryParameter("polos", "STRING", polos))
-
-    if modalidades and _has_view_col("modalidade"):
-        sql += " AND v.modalidade IN UNNEST(@modalidades)"
-        params.append(bigquery.ArrayQueryParameter("modalidades", "STRING", modalidades))
-
-    if turnos and _has_view_col("turno"):
-        sql += " AND v.turno IN UNNEST(@turnos)"
-        params.append(bigquery.ArrayQueryParameter("turnos", "STRING", turnos))
-
-    if canais and _has_view_col("canal"):
-        sql += " AND v.canal IN UNNEST(@canais)"
-        params.append(bigquery.ArrayQueryParameter("canais", "STRING", canais))
-
-    if campanhas and _has_view_col("campanha"):
-        sql += " AND v.campanha IN UNNEST(@campanhas)"
-        params.append(bigquery.ArrayQueryParameter("campanhas", "STRING", campanhas))
-
-    if origens and _has_view_col("origem"):
-        sql += " AND v.origem IN UNNEST(@origens)"
-        params.append(bigquery.ArrayQueryParameter("origens", "STRING", origens))
-
-    if tipos_negocio and _has_view_col("tipo_negocio"):
-        sql += " AND v.tipo_negocio IN UNNEST(@tipos_negocio)"
-        params.append(bigquery.ArrayQueryParameter("tipos_negocio", "STRING", tipos_negocio))
-
-    if status_list and _has_view_col("status"):
-        sql += " AND v.status IN UNNEST(@status_list)"
-        params.append(bigquery.ArrayQueryParameter("status_list", "STRING", status_list))
-
-    if consultores_disp and _has_view_col("consultor_disparo"):
-        sql += " AND v.consultor_disparo IN UNNEST(@consultores_disp)"
-        params.append(bigquery.ArrayQueryParameter("consultores_disp", "STRING", consultores_disp))
-
-    if consultores_com and _has_view_col("consultor_comercial"):
-        sql += " AND v.consultor_comercial IN UNNEST(@consultores_com)"
-        params.append(bigquery.ArrayQueryParameter("consultores_com", "STRING", consultores_com))
-
-    if tipos_disparo and _has_view_col("tipo_disparo"):
-        sql += " AND v.tipo_disparo IN UNNEST(@tipos_disparo)"
-        params.append(bigquery.ArrayQueryParameter("tipos_disparo", "STRING", tipos_disparo))
+    sql = _apply_multi_value_filter(sql, params, col="curso", param_name="cursos", values=cursos)
+    sql = _apply_multi_value_filter(sql, params, col="polo", param_name="polos", values=polos)
+    sql = _apply_multi_value_filter(sql, params, col="modalidade", param_name="modalidades", values=modalidades)
+    sql = _apply_multi_value_filter(sql, params, col="turno", param_name="turnos", values=turnos)
+    sql = _apply_multi_value_filter(sql, params, col="canal", param_name="canais", values=canais)
+    sql = _apply_multi_value_filter(sql, params, col="campanha", param_name="campanhas", values=campanhas)
+    sql = _apply_multi_value_filter(sql, params, col="origem", param_name="origens", values=origens)
+    sql = _apply_multi_value_filter(sql, params, col="tipo_negocio", param_name="tipos_negocio", values=tipos_negocio)
+    sql = _apply_multi_value_filter(sql, params, col="status", param_name="status_list", values=status_list)
+    sql = _apply_multi_value_filter(sql, params, col="consultor_disparo", param_name="consultores_disp", values=consultores_disp)
+    sql = _apply_multi_value_filter(sql, params, col="consultor_comercial", param_name="consultores_com", values=consultores_com)
+    sql = _apply_multi_value_filter(sql, params, col="tipo_disparo", param_name="tipos_disparo", values=tipos_disparo)
 
     if filters.get("cpf") and _has_view_col("cpf"):
         sql += " AND v.cpf = @cpf"
