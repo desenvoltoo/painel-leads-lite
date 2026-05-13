@@ -69,7 +69,7 @@ def _get_filters_from_request() -> Tuple[Dict[str, Any], Dict[str, Any]]:
         return v if v else None
  
     filters = {
-        "status": n(request.args.get("status")),  # pode ser status_inscricao também
+        "status": n(request.args.get("status")),
         "curso": n(request.args.get("curso")),
         "polo": n(request.args.get("polo")),
         "origem": n(request.args.get("origem")),
@@ -539,7 +539,7 @@ def create_app() -> Flask:
             total = len(rows)
             status_counts: dict = {}
             for r in rows:
-                st = r.get("status_inscricao") or r.get("status") or "LEAD"
+                st = r.get("status") or "LEAD"
                 status_counts[st] = status_counts.get(st, 0) + 1
  
             top_status = None
@@ -562,7 +562,7 @@ def create_app() -> Flask:
             total = len(rows)
             status_counts: dict = {}
             for r in rows:
-                st = r.get("status_inscricao") or r.get("status") or "LEAD"
+                st = r.get("status") or "LEAD"
                 status_counts[st] = status_counts.get(st, 0) + 1
 
             top_status = None

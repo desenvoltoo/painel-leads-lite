@@ -195,7 +195,7 @@ def _order_expr_for(order_by: str) -> Optional[str]:
     allowed_order = {
         "data_inscricao": "data_inscricao",
         "data_disparo": "data_disparo",
-        "status": "status_inscricao",
+        "status": "status",
         "curso": "curso",
         "modalidade": "modalidade",
         "polo": "polo",
@@ -749,7 +749,7 @@ def _apply_filters(sql: str, filters: Dict[str, Any], params: List[Any]) -> str:
     tipos_negocio = _as_list(filters.get("tipo_negocio"))
     tipos_disparo = _as_list(filters.get("tipo_disparo"))
 
-    status_list = _as_list(filters.get("status")) or _as_list(filters.get("status_inscricao"))
+    status_list = _as_list(filters.get("status"))
     consultores_disp = _as_list(filters.get("consultor_disparo")) or _as_list(filters.get("consultor"))
     consultores_com = _as_list(filters.get("consultor_comercial"))
 
@@ -785,10 +785,8 @@ def _apply_filters(sql: str, filters: Dict[str, Any], params: List[Any]) -> str:
         sql += " AND v.tipo_negocio IN UNNEST(@tipos_negocio)"
         params.append(bigquery.ArrayQueryParameter("tipos_negocio", "STRING", tipos_negocio))
 
-    status_cols = [col for col in ("status_inscricao", "status") if _has_view_col(col)]
-    if status_list and status_cols:
-        status_sql = " OR ".join([f"v.{col} IN UNNEST(@status_list)" for col in status_cols])
-        sql += f" AND ({status_sql})"
+    if status_list and _has_view_col("status"):
+        sql += " AND v.status IN UNNEST(@status_list)"
         params.append(bigquery.ArrayQueryParameter("status_list", "STRING", status_list))
 
     if consultores_disp and _has_view_col("consultor_disparo"):
@@ -885,7 +883,6 @@ def query_leads_iter(
         _select_col("turno"),
         _select_col("polo"),
         _select_col("origem"),
-        _select_col("status_inscricao"),
         _select_col("status"),
         _select_col("flag_matriculado", bq_type="BOOL"),
         _select_col("consultor_comercial"),
@@ -959,7 +956,7 @@ def _distinct_values_from_view(col: str, alias: str) -> List[str]:
 
 def query_options() -> Dict[str, List[str]]:
     return {
-        "status": _distinct_values_from_view("status_inscricao", "status"),
+        "status": _distinct_values_from_view("status", "status"),
         "cursos": _distinct_values_from_view("curso", "curso"),
         "modalidades": _distinct_values_from_view("modalidade", "modalidade"),
         "turnos": _distinct_values_from_view("turno", "turno"),
@@ -988,7 +985,6 @@ EXPORT_COLUMNS: List[Tuple[str, str]] = [
     ("turno", "Turno"),
     ("polo", "Polo"),
     ("origem", "Origem"),
-    ("status_inscricao", "Status Inscrição"),
     ("status", "Status"),
     ("flag_matriculado", "Matriculado"),
     ("tipo_negocio", "Tipo Negócio"),
