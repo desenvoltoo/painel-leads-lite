@@ -1,6 +1,8 @@
 substitutions:
   _SERVICE_NAME: painel-leads-lite
   _REGION: us-central1
+  _BQ_LOCATION: US
+  _BQ_STAGING_TABLE: stg_import_star
   _IMAGE: us-central1-docker.pkg.dev/$PROJECT_ID/cloud-run-source-deploy/painel-leads-lite/painel-leads-lite
 
 steps:
@@ -14,8 +16,8 @@ steps:
 
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk:slim'
     id: Deploy
-    entrypoint: gcloud 
-    args: ['run','deploy','${_SERVICE_NAME}','--image','${_IMAGE}:$COMMIT_SHA','--region','${_REGION}','--platform','managed','--allow-unauthenticated','--port','8080','--timeout','300','--quiet']
+    entrypoint: gcloud
+    args: ['run','deploy','${_SERVICE_NAME}','--image','${_IMAGE}:$COMMIT_SHA','--region','${_REGION}','--platform','managed','--allow-unauthenticated','--port','8080','--timeout','300','--update-env-vars','BQ_LOCATION=${_BQ_LOCATION},BQ_STAGING_TABLE=${_BQ_STAGING_TABLE}','--quiet']
 
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk:slim'
     id: PromoteTraffic

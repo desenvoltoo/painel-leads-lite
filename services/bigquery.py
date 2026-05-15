@@ -6,6 +6,7 @@ import logging
 import threading
 import time
 import uuid
+import csv
 import re
 import unicodedata
 from concurrent.futures import TimeoutError as FuturesTimeoutError
@@ -37,8 +38,9 @@ logger = logging.getLogger(__name__)
 # ============================================================
 GCP_PROJECT_ID = os.getenv("GCP_PROJECT_ID", "painel-universidade")
 BQ_DATASET = os.getenv("BQ_DATASET", "modelo_estrela")
+BQ_LOCATION = os.getenv("BQ_LOCATION", "").strip()
 
-BQ_STAGING_TABLE = "stg_leads_site"
+BQ_STAGING_TABLE = os.getenv("BQ_STAGING_TABLE", "stg_import_star").strip() or "stg_import_star"
 BQ_PROCEDURE = os.getenv("BQ_PROCEDURE", "sp_import_star_from_site")
 
 # Painel lê somente essa view
@@ -146,6 +148,30 @@ UPLOAD_COLUMN_ALIASES = {
 # de corrida em ambientes multi-thread (FastAPI / Gunicorn).
 # ============================================================
 _thread_local = threading.local()
+
+
+def _bq_location() -> Optional[str]:
+    """Retorna a região do dataset para consultar jobs na localização correta."""
+    if BQ_LOCATION:
+        return BQ_LOCATION
+
+    cache_key = f"dataset_location::{GCP_PROJECT_ID}.{BQ_DATASET}"
+    cache = getattr(_thread_local, "schema_cache", None)
+    if cache is None:
+        cache = {}
+        _thread_local.schema_cache = cache
+    if cache_key in cache:
+        return cache[cache_key]
+
+    try:
+        dataset = get_bq_client().get_dataset(f"{GCP_PROJECT_ID}.{BQ_DATASET}")
+        location = dataset.location or None
+        cache[cache_key] = location
+        return location
+    except Exception as exc:
+        logger.warning("Não foi possível detectar a localização do dataset BigQuery: %s", exc)
+        cache[cache_key] = None
+        return None
 
 
 def get_bq_client() -> bigquery.Client:
@@ -527,8 +553,10 @@ def load_to_staging(df) -> None:
             table_id,
             job_config=bigquery.LoadJobConfig(
                 schema=STAGING_SCHEMA,
+                create_disposition=bigquery.CreateDisposition.CREATE_IF_NEEDED,
                 write_disposition=bigquery.WriteDisposition.WRITE_TRUNCATE,
             ),
+            location=_bq_location(),
         )
         job.result()
         logger.info("BQ load_table_from_dataframe concluído: job_id=%s", job.job_id)
@@ -542,8 +570,8 @@ def run_procedure_async() -> str:
     sql = f"CALL `{GCP_PROJECT_ID}.{BQ_DATASET}.{BQ_PROCEDURE}`();"
 
     def _do_call():
-        job = client.query(sql)
-        logger.info("Procedure disparada: job_id=%s procedure=%s", job.job_id, BQ_PROCEDURE)
+        job = client.query(sql, location=_bq_location())
+        logger.info("Procedure disparada: job_id=%s location=%s procedure=%s", job.job_id, job.location, BQ_PROCEDURE)
         return job.job_id
 
     return _with_retry(_do_call, operation_name=f"run_procedure_async ({BQ_PROCEDURE})")
@@ -640,7 +668,7 @@ def _validate_blob(blob: storage.Blob, object_name: str) -> None:
 def _upload_df_to_gcs_temp(df, bucket: storage.Bucket) -> str:
     temp_name = f"{GCS_UPLOAD_PREFIX.strip('/')}/tmp/staging_{uuid.uuid4().hex}.csv"
     blob = bucket.blob(temp_name)
-    csv_bytes = df.to_csv(index=False).encode("utf-8")
+    csv_bytes = df.to_csv(index=False, na_rep="", quoting=csv.QUOTE_MINIMAL).encode("utf-8")
 
     def _do_upload():
         blob.upload_from_string(csv_bytes, content_type="text/csv")
@@ -657,13 +685,20 @@ def _load_gcs_csv_to_staging(bucket: storage.Bucket, temp_name: str) -> None:
 
     def _do_load():
         job = client.load_table_from_uri(
-            uri, table_id,
+            uri,
+            table_id,
             job_config=bigquery.LoadJobConfig(
                 schema=STAGING_SCHEMA,
                 source_format=bigquery.SourceFormat.CSV,
                 skip_leading_rows=1,
+                field_delimiter=",",
+                quote_character='"',
+                allow_quoted_newlines=True,
+                encoding="UTF-8",
+                create_disposition=bigquery.CreateDisposition.CREATE_IF_NEEDED,
                 write_disposition=bigquery.WriteDisposition.WRITE_TRUNCATE,
             ),
+            location=_bq_location(),
         )
         job.result()
         logger.info("BQ Load Job concluído: job_id=%s tabela=%s", job.job_id, table_id)
@@ -759,11 +794,12 @@ def process_gcs_upload(object_name: str) -> Dict[str, Any]:
 
 def get_bq_job_status(job_id: str) -> Dict[str, Any]:
     client = get_bq_client()
-    job = client.get_job(job_id)
+    job = client.get_job(job_id, location=_bq_location())
 
     payload: Dict[str, Any] = {
         "job_id": job.job_id,
         "state": job.state,
+        "location": job.location,
         "created": job.created.isoformat() if job.created else None,
         "started": job.started.isoformat() if job.started else None,
         "ended": job.ended.isoformat() if job.ended else None,
