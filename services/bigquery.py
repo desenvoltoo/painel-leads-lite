@@ -742,7 +742,8 @@ def generate_gcs_signed_upload(filename: str, source_tag: str = "manual") -> Dic
     except Exception as exc:
         raise RuntimeError(
             "Não foi possível assinar URL do GCS. "
-            "Verifique GCS_UPLOAD_BUCKET e permissões da Service Account para assinar URLs."
+            "Verifique se a Service Account tem permissão roles/iam.serviceAccountTokenCreator "
+            "e se GCS_UPLOAD_BUCKET está configurado corretamente."
         ) from exc
 
     logger.info("Signed URL gerado: object=%s expiry_min=%d", object_name, GCS_SIGNED_URL_EXPIRY_MINUTES)
@@ -1112,7 +1113,7 @@ def export_leads_rows(
     params.append(bigquery.ScalarQueryParameter("limit", "INT64", limit))
     params.append(bigquery.ScalarQueryParameter("offset", "INT64", offset))
 
-    rows = client.query(sql, job_config=bigquery.QueryJobConfig(query_parameters=params)).result()
+    rows = client.query(sql, job_config=bigquery.QueryJobConfig(query_parameters=params), location=_bq_location()).result()
     return [dict(r) for r in rows]
 
 
