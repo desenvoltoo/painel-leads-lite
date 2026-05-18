@@ -826,6 +826,8 @@ async function doUpload() {
 ========================= */
 function exportXlsxServerSide() {
   const params = buildLeadsParams();
+  delete params.limit;
+  delete params.offset;
   const url = new URL("/api/export/xlsx", window.location.origin);
 
   Object.entries(params).forEach(([k, v]) => {
