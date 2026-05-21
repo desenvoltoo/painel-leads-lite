@@ -7,11 +7,12 @@ import threading
 import time
 import uuid
 import csv
+import json
 import re
 import unicodedata
 from concurrent.futures import TimeoutError as FuturesTimeoutError
 from decimal import Decimal, InvalidOperation
-from datetime import timedelta
+from datetime import timedelta, datetime
 from io import BytesIO, StringIO
 from pathlib import Path
 from time import perf_counter
@@ -190,6 +191,124 @@ def _get_upload_bucket() -> storage.Bucket:
     if not GCS_UPLOAD_BUCKET:
         raise RuntimeError("Defina GCS_UPLOAD_BUCKET no ambiente.")
     return get_storage_client().bucket(GCS_UPLOAD_BUCKET)
+
+
+def _export_jobs_table_id() -> str:
+    return f"{GCP_PROJECT_ID}.{BQ_DATASET}.export_jobs"
+
+
+def _ensure_export_jobs_table() -> None:
+    client = get_bq_client()
+    table_id = _export_jobs_table_id()
+    try:
+        _with_retry(client.get_table, table_id, operation_name="get export_jobs table")
+        return
+    except NotFound:
+        pass
+    except Exception:
+        logger.exception("Falha ao validar tabela export_jobs")
+        raise
+
+    schema = [
+        bigquery.SchemaField("job_id", "STRING", mode="REQUIRED"),
+        bigquery.SchemaField("status", "STRING", mode="NULLABLE"),
+        bigquery.SchemaField("created_at", "TIMESTAMP", mode="NULLABLE"),
+        bigquery.SchemaField("updated_at", "TIMESTAMP", mode="NULLABLE"),
+        bigquery.SchemaField("metadata", "STRING", mode="NULLABLE"),
+    ]
+    table = bigquery.Table(table_id, schema=schema)
+    _with_retry(client.create_table, table, operation_name="create export_jobs table")
+
+
+def create_export_job(job_id: str, metadata_dict: Dict[str, Any]) -> None:
+    _ensure_export_jobs_table()
+    client = get_bq_client()
+    now = datetime.utcnow()
+    payload = metadata_dict or {}
+    row = {
+        "job_id": job_id,
+        "status": str(payload.get("status") or "queued"),
+        "created_at": now,
+        "updated_at": now,
+        "metadata": json.dumps(payload, ensure_ascii=False, default=str),
+    }
+    errors = _with_retry(
+        client.insert_rows_json,
+        _export_jobs_table_id(),
+        [row],
+        operation_name="insert export job",
+    )
+    if errors:
+        raise RuntimeError(f"Falha ao inserir export job no BigQuery: {errors}")
+
+
+def update_export_job(job_id: str, **kwargs) -> None:
+    _ensure_export_jobs_table()
+    existing = get_export_job(job_id)
+    if not existing:
+        return
+    metadata = dict(existing)
+    metadata.update(kwargs)
+    status = str(metadata.get("status") or "queued")
+
+    query = f"""
+        UPDATE `{_export_jobs_table_id()}`
+        SET
+          status = @status,
+          metadata = @metadata,
+          updated_at = CURRENT_TIMESTAMP()
+        WHERE job_id = @job_id
+    """
+    params = [
+        bigquery.ScalarQueryParameter("status", "STRING", status),
+        bigquery.ScalarQueryParameter("metadata", "STRING", json.dumps(metadata, ensure_ascii=False, default=str)),
+        bigquery.ScalarQueryParameter("job_id", "STRING", job_id),
+    ]
+    client = get_bq_client()
+    list(
+        client.query(
+            query,
+            job_config=bigquery.QueryJobConfig(query_parameters=params),
+            location=_bq_location(),
+        ).result()
+    )
+
+
+def get_export_job(job_id: str) -> Optional[Dict[str, Any]]:
+    _ensure_export_jobs_table()
+    query = f"""
+        SELECT job_id, status, created_at, updated_at, metadata
+        FROM `{_export_jobs_table_id()}`
+        WHERE job_id = @job_id
+        LIMIT 1
+    """
+    params = [bigquery.ScalarQueryParameter("job_id", "STRING", job_id)]
+    client = get_bq_client()
+    rows = list(
+        client.query(
+            query,
+            job_config=bigquery.QueryJobConfig(query_parameters=params),
+            location=_bq_location(),
+        ).result()
+    )
+    if not rows:
+        return None
+    row = rows[0]
+    metadata_raw = row.get("metadata")
+    metadata = {}
+    if metadata_raw:
+        try:
+            metadata = json.loads(metadata_raw)
+        except Exception:
+            logger.warning("metadata inválido para export job job_id=%s", job_id)
+            metadata = {}
+    if not isinstance(metadata, dict):
+        metadata = {}
+    metadata.setdefault("job_id", row.get("job_id"))
+    metadata.setdefault("status", row.get("status"))
+    metadata.setdefault("created_at", row.get("created_at").isoformat() + "Z" if row.get("created_at") else None)
+    metadata.setdefault("updated_at", row.get("updated_at").isoformat() + "Z" if row.get("updated_at") else None)
+    return metadata
 
 
 # ============================================================
