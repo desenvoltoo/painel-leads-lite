@@ -22,6 +22,7 @@ from werkzeug.security import check_password_hash
 from startup_diagnostics import build_error_payload, env_bool, env_int
  
 from services.bigquery import (
+    EXPORT_MAX_ROWS,
     query_leads,
     query_leads_iter,
     query_leads_count,
@@ -590,11 +591,10 @@ def create_app() -> Flask:
         try:
             filters, meta = _get_filters_from_request()
  
-            limit = min(int(meta.get("limit") or 50000), 100000)
             rows = export_leads_rows(
                 filters=filters,
-                limit=limit,
-                offset=int(meta.get("offset") or 0),
+                limit=EXPORT_MAX_ROWS,
+                offset=0,
                 order_by=meta.get("order_by") or "data_inscricao",
                 order_dir=meta.get("order_dir") or "DESC",
             )
