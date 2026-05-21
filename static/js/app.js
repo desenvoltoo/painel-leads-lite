@@ -32,6 +32,7 @@ let currentPage = 1;
 let totalLeads = 0;
 let isLoadingLeads = false;
 let activeExportJobId = null;
+let activeExportPollTimer = null;
 
 /* =========================
    Helpers UI
@@ -855,6 +856,7 @@ async function startBatchExport() {
     const resp = await apiPostJson("/api/export/batch", payload);
     activeExportJobId = resp?.job_id;
     if (!activeExportJobId) throw new Error("Job não retornado pela API.");
+    if (activeExportPollTimer) clearTimeout(activeExportPollTimer);
     pollBatchExportStatus();
   } catch (e) {
     setExportProgress({ visible: true, text: `Falha ao iniciar exportação: ${e.message}`, progress: 0 });
@@ -864,32 +866,37 @@ async function startBatchExport() {
 async function pollBatchExportStatus() {
   if (!activeExportJobId) return;
 
-  const timer = setInterval(async () => {
-    try {
-      const resp = await apiGet("/api/export/batch/status", { job_id: activeExportJobId });
-      const data = resp?.data || {};
-      const total = Number(data.total || 0);
-      const processed = Number(data.processed || 0);
-      const pct = total > 0 ? Math.round((processed / total) * 100) : 10;
-      const msg = data.message || "Processando...";
-      setExportProgress({ visible: true, text: `${msg} (${processed}/${total})`, progress: pct });
+  try {
+    const jobId = activeExportJobId;
+    const resp = await apiGet("/api/export/batch/status", { job_id: jobId });
+    const data = resp?.data || {};
+    const total = Number(data.total || 0);
+    const processed = Number(data.processed || 0);
+    const pct = total > 0 ? Math.round((processed / total) * 100) : 10;
+    const msg = data.message || "Processando...";
+    setExportProgress({ visible: true, text: `${msg} (${processed}/${total})`, progress: pct });
 
-      if (data.status === "done") {
-        clearInterval(timer);
-        setExportProgress({ visible: true, text: "Concluído. Baixando arquivo...", progress: 100 });
-        window.location.href = `/api/export/batch/download?job_id=${encodeURIComponent(activeExportJobId)}`;
-        activeExportJobId = null;
-      } else if (data.status === "error") {
-        clearInterval(timer);
-        setExportProgress({ visible: true, text: data.error || "Falha no processamento.", progress: 0 });
-        activeExportJobId = null;
-      }
-    } catch (e) {
-      clearInterval(timer);
-      setExportProgress({ visible: true, text: `Erro ao consultar progresso: ${e.message}`, progress: 0 });
+    if (data.status === "done") {
+      activeExportPollTimer = null;
+      setExportProgress({ visible: true, text: "Concluído. Baixando arquivo...", progress: 100 });
+      window.location.href = `/api/export/batch/download?job_id=${encodeURIComponent(jobId)}`;
       activeExportJobId = null;
+      return;
     }
-  }, 1500);
+
+    if (data.status === "error") {
+      activeExportPollTimer = null;
+      setExportProgress({ visible: true, text: data.error || "Falha no processamento.", progress: 0 });
+      activeExportJobId = null;
+      return;
+    }
+
+    activeExportPollTimer = setTimeout(pollBatchExportStatus, 1500);
+  } catch (e) {
+    activeExportPollTimer = null;
+    setExportProgress({ visible: true, text: `Erro ao consultar progresso: ${e.message}`, progress: 0 });
+    activeExportJobId = null;
+  }
 }
 
 /* =========================

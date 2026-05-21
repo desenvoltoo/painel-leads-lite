@@ -9,6 +9,7 @@ import uuid
 import csv
 import re
 import unicodedata
+import urllib.request
 from concurrent.futures import TimeoutError as FuturesTimeoutError
 from decimal import Decimal, InvalidOperation
 from datetime import timedelta
@@ -17,6 +18,8 @@ from pathlib import Path
 from time import perf_counter
 from typing import Any, Dict, Iterator, List, Optional, Tuple
 
+import google.auth
+from google.auth.transport.requests import Request as GoogleAuthRequest
 from google.cloud import bigquery, storage
 from google.api_core.exceptions import (
     GoogleAPICallError,
@@ -39,6 +42,7 @@ logger = logging.getLogger(__name__)
 GCP_PROJECT_ID = os.getenv("GCP_PROJECT_ID", "painel-universidade")
 BQ_DATASET = os.getenv("BQ_DATASET", "modelo_estrela")
 BQ_LOCATION = os.getenv("BQ_LOCATION", "").strip()
+BQ_LOCATION_AUTODETECT = os.getenv("BQ_LOCATION_AUTODETECT", "true").strip().lower() not in {"0", "false", "no", "off"}
 
 BQ_STAGING_TABLE = os.getenv("BQ_STAGING_TABLE", "stg_import_star").strip() or "stg_import_star"
 BQ_PROCEDURE = os.getenv("BQ_PROCEDURE", "sp_import_star_from_site")
@@ -151,27 +155,39 @@ _thread_local = threading.local()
 
 
 def _bq_location() -> Optional[str]:
-    """Retorna a região do dataset para consultar jobs na localização correta."""
-    if BQ_LOCATION:
-        return BQ_LOCATION
-
+    """Retorna a localização real do dataset para criar/consultar jobs no lugar certo."""
+    configured_location = BQ_LOCATION or None
     cache_key = f"dataset_location::{GCP_PROJECT_ID}.{BQ_DATASET}"
     cache = getattr(_thread_local, "schema_cache", None)
     if cache is None:
         cache = {}
         _thread_local.schema_cache = cache
-    if cache_key in cache:
-        return cache[cache_key]
 
-    try:
-        dataset = get_bq_client().get_dataset(f"{GCP_PROJECT_ID}.{BQ_DATASET}")
-        location = dataset.location or None
-        cache[cache_key] = location
-        return location
-    except Exception as exc:
-        logger.warning("Não foi possível detectar a localização do dataset BigQuery: %s", exc)
-        cache[cache_key] = None
-        return None
+    if BQ_LOCATION_AUTODETECT:
+        if cache_key in cache:
+            detected_location = cache[cache_key]
+        else:
+            try:
+                dataset = get_bq_client().get_dataset(f"{GCP_PROJECT_ID}.{BQ_DATASET}")
+                detected_location = dataset.location or None
+                cache[cache_key] = detected_location
+            except Exception as exc:
+                logger.warning("Não foi possível detectar a localização do dataset BigQuery: %s", exc)
+                detected_location = None
+                cache[cache_key] = None
+
+        if configured_location and detected_location and configured_location.upper() != detected_location.upper():
+            logger.warning(
+                "BQ_LOCATION=%s difere da localização real do dataset %s.%s=%s; usando a localização real.",
+                configured_location,
+                GCP_PROJECT_ID,
+                BQ_DATASET,
+                detected_location,
+            )
+            return detected_location
+        return detected_location or configured_location
+
+    return configured_location
 
 
 def get_bq_client() -> bigquery.Client:
@@ -721,6 +737,36 @@ def _load_dataframe_to_staging_via_gcs(df) -> None:
             logger.warning("Falha ao remover blob temporário '%s': %s", temp_name, exc)
 
 
+def _metadata_service_account_email() -> Optional[str]:
+    """Consulta o metadata server do Cloud Run para descobrir o e-mail da service account."""
+    req = urllib.request.Request(
+        "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/email",
+        headers={"Metadata-Flavor": "Google"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=2) as resp:
+            email = resp.read().decode("utf-8").strip()
+            return email or None
+    except Exception as exc:
+        logger.warning("Não foi possível obter service account pelo metadata server: %s", exc)
+        return None
+
+
+def _cloud_run_signing_identity() -> Tuple[Optional[str], Optional[str]]:
+    """Obtém e-mail/token para assinar URLs no Cloud Run sem chave JSON privada."""
+    credentials, _project_id = google.auth.default(scopes=["https://www.googleapis.com/auth/cloud-platform"])
+    auth_request = GoogleAuthRequest()
+    credentials.refresh(auth_request)
+    signer_email = (
+        os.getenv("GCS_SIGNING_SERVICE_ACCOUNT", "").strip()
+        or getattr(credentials, "service_account_email", None)
+        or getattr(credentials, "signer_email", None)
+    )
+    if not signer_email or signer_email == "default":
+        signer_email = _metadata_service_account_email()
+    return signer_email, credentials.token
+
+
 def generate_gcs_signed_upload(filename: str, source_tag: str = "manual") -> Dict[str, str]:
     """
     Gera signed URL PUT para upload direto ao GCS pelo cliente.
@@ -732,17 +778,31 @@ def generate_gcs_signed_upload(filename: str, source_tag: str = "manual") -> Dic
     object_name = f"{GCS_UPLOAD_PREFIX.strip('/')}/{safe_source}/{uuid.uuid4().hex}_{safe_name}"
     blob = bucket.blob(object_name)
 
+    signed_url_kwargs = {
+        "version": "v4",
+        "expiration": timedelta(minutes=GCS_SIGNED_URL_EXPIRY_MINUTES),
+        "method": "PUT",
+        "content_type": "application/octet-stream",
+    }
+
     try:
-        signed_url = blob.generate_signed_url(
-            version="v4",
-            expiration=timedelta(minutes=GCS_SIGNED_URL_EXPIRY_MINUTES),
-            method="PUT",
-            content_type="application/octet-stream",
-        )
+        try:
+            signed_url = blob.generate_signed_url(**signed_url_kwargs)
+        except AttributeError as private_key_exc:
+            signer_email, access_token = _cloud_run_signing_identity()
+            if not signer_email or not access_token:
+                raise private_key_exc
+            signed_url = blob.generate_signed_url(
+                **signed_url_kwargs,
+                service_account_email=signer_email,
+                access_token=access_token,
+            )
     except Exception as exc:
         raise RuntimeError(
             "Não foi possível assinar URL do GCS. "
-            "Verifique GCS_UPLOAD_BUCKET e permissões da Service Account para assinar URLs."
+            "No Cloud Run, habilite a Service Account Credentials API e conceda "
+            "roles/iam.serviceAccountTokenCreator para a service account que assina URLs; "
+            "também verifique GCS_UPLOAD_BUCKET e permissões de escrita no bucket."
         ) from exc
 
     logger.info("Signed URL gerado: object=%s expiry_min=%d", object_name, GCS_SIGNED_URL_EXPIRY_MINUTES)
@@ -961,7 +1021,7 @@ def query_leads_iter(
     params.append(bigquery.ScalarQueryParameter("offset", "INT64", offset))
 
     t0 = perf_counter()
-    job = client.query(sql, job_config=bigquery.QueryJobConfig(query_parameters=params))
+    job = client.query(sql, job_config=bigquery.QueryJobConfig(query_parameters=params), location=_bq_location())
     try:
         rows = job.result(timeout=QUERY_TIMEOUT_SECONDS)
     except FuturesTimeoutError as exc:
@@ -981,7 +1041,7 @@ def query_leads_count(filters: Optional[Dict[str, Any]] = None) -> int:
     params: List[Any] = []
     sql = _apply_filters(sql, filters, params)
 
-    rows = list(client.query(sql, job_config=bigquery.QueryJobConfig(query_parameters=params)).result())
+    rows = list(client.query(sql, job_config=bigquery.QueryJobConfig(query_parameters=params), location=_bq_location()).result())
     return int(rows[0]["total"]) if rows else 0
 
 
@@ -1000,7 +1060,7 @@ def _distinct_values_from_view(col: str, alias: str) -> List[str]:
     WHERE {col} IS NOT NULL AND TRIM(CAST({col} AS STRING)) != ''
     ORDER BY {alias}
     """
-    return [str(r[alias]) for r in client.query(sql).result()]
+    return [str(r[alias]) for r in client.query(sql, location=_bq_location()).result()]
 
 
 def query_options() -> Dict[str, List[str]]:
@@ -1112,7 +1172,7 @@ def export_leads_rows(
     params.append(bigquery.ScalarQueryParameter("limit", "INT64", limit))
     params.append(bigquery.ScalarQueryParameter("offset", "INT64", offset))
 
-    rows = client.query(sql, job_config=bigquery.QueryJobConfig(query_parameters=params)).result()
+    rows = client.query(sql, job_config=bigquery.QueryJobConfig(query_parameters=params), location=_bq_location()).result()
     return [dict(r) for r in rows]
 
 

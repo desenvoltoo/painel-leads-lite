@@ -31,7 +31,6 @@ from services.bigquery import (
     generate_gcs_signed_upload,
     get_bq_job_status,          # novo
     export_leads_rows,
-    export_leads_rows_iter,
     rows_to_xlsx,               # gera export XLSX no servidor
     EXPORT_COLUMNS,
 )
@@ -39,6 +38,7 @@ from services.bigquery import (
 logger = logging.getLogger(__name__)
 EXPORT_BATCH_JOBS: Dict[str, Dict[str, Any]] = {}
 EXPORT_BATCH_JOBS_LOCK = threading.Lock()
+EXPORT_BATCH_STATUS_TIME_BUDGET_SECONDS = 8
  
 
 
@@ -240,12 +240,6 @@ def _stamp() -> str:
     return datetime.now().strftime("%Y%m%d_%H%M%S")
 
 
-def _update_export_job(job_id: str, **kwargs):
-    with EXPORT_BATCH_JOBS_LOCK:
-        if job_id in EXPORT_BATCH_JOBS:
-            EXPORT_BATCH_JOBS[job_id].update(kwargs)
- 
- 
 # ============================================================
 # Upload parsing: CSV/XLSX robusto (separador, encoding)
 # FIX v4.2: usa chardet para detectar encoding real do arquivo
@@ -613,68 +607,173 @@ def create_app() -> Flask:
         except Exception as e:
             return jsonify(_error_payload(e, "Erro ao exportar XLSX.")), 500
 
-    def _run_batch_export_job(job_id: str, filters: Dict[str, Any], batch_size: int, out_path: Path):
+    def _write_batch_export_header(out_path: Path):
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(out_path, "w", newline="", encoding="utf-8-sig") as csvfile:
+            writer = csv.writer(csvfile, delimiter=";")
+            writer.writerow([label for _, label in EXPORT_COLUMNS])
+
+    def _append_batch_export_rows(out_path: Path, rows):
+        keys = [key for key, _ in EXPORT_COLUMNS]
+        with open(out_path, "a", newline="", encoding="utf-8-sig") as csvfile:
+            writer = csv.writer(csvfile, delimiter=";")
+            for row in rows:
+                writer.writerow([(row.get(k) if row.get(k) is not None else "") for k in keys])
+
+    def _process_batch_export_job(job_id: str):
+        """Processa o export em pequenos passos durante o polling.
+
+        Cloud Run pode pausar CPU depois que a resposta HTTP termina; por isso,
+        um daemon thread iniciado no POST pode ficar congelado e o status nunca
+        sair de queued/running. Avançar o trabalho no endpoint de status mantém
+        a exportação dentro de requests ativos, que têm CPU garantida.
+        """
+        with EXPORT_BATCH_JOBS_LOCK:
+            job = EXPORT_BATCH_JOBS.get(job_id)
+            if not job or job.get("status") in ("done", "error"):
+                return job
+            if job.get("processing"):
+                return dict(job)
+            job["processing"] = True
+            job["status"] = "running"
+            job.setdefault("processed", 0)
+            job.setdefault("next_offset", 0)
+            job_snapshot = dict(job)
+
         try:
-            total = query_leads_count(filters=filters)
-            total_batches = max(1, (total + batch_size - 1) // batch_size) if total else 0
-            _update_export_job(
-                job_id,
-                status="running",
-                total=total,
-                total_batches=total_batches,
-                current_batch=0,
-                processed=0,
-            )
+            out_path = Path(job_snapshot["file_path"])
+            filters = job_snapshot.get("filters") or {}
+            batch_size = max(100, min(int(job_snapshot.get("batch_size") or 1000), 5000))
+            order_by = job_snapshot.get("order_by") or "data_disparo"
+            order_dir = job_snapshot.get("order_dir") or "ASC"
 
-            with open(out_path, "w", newline="", encoding="utf-8-sig") as csvfile:
-                writer = csv.writer(csvfile, delimiter=";")
-                headers = [label for _, label in EXPORT_COLUMNS]
-                keys = [key for key, _ in EXPORT_COLUMNS]
-                writer.writerow(headers)
-
-                processed = 0
-                for idx, batch in enumerate(
-                    export_leads_rows_iter(
-                        filters=filters,
-                        batch_size=batch_size,
-                        order_by="data_disparo",
-                        order_dir="ASC",
-                    ),
-                    start=1,
-                ):
-                    for row in batch:
-                        writer.writerow([(row.get(k) if row.get(k) is not None else "") for k in keys])
-                    processed += len(batch)
-                    _update_export_job(
-                        job_id,
-                        current_batch=idx,
-                        processed=processed,
-                        message=f"Exportando lote {idx} de {max(total_batches, idx)}",
+            if not job_snapshot.get("initialized"):
+                total = query_leads_count(filters=filters)
+                total_batches = max(1, (total + batch_size - 1) // batch_size) if total else 0
+                _write_batch_export_header(out_path)
+                with EXPORT_BATCH_JOBS_LOCK:
+                    job = EXPORT_BATCH_JOBS.get(job_id)
+                    if not job:
+                        return None
+                    job.update(
+                        initialized=True,
+                        total=total,
+                        total_batches=total_batches,
+                        current_batch=0,
+                        processed=0,
+                        next_offset=0,
+                        file_name=out_path.name,
+                        message="Exportação iniciada.",
                     )
+                    job_snapshot = dict(job)
+                if total == 0:
+                    with EXPORT_BATCH_JOBS_LOCK:
+                        job = EXPORT_BATCH_JOBS.get(job_id)
+                        if job:
+                            job.update(
+                                status="done",
+                                processing=False,
+                                ended_at=datetime.utcnow().isoformat() + "Z",
+                                message="Exportação concluída sem registros.",
+                            )
+                            return dict(job)
+                    return None
 
-            _update_export_job(
-                job_id,
-                status="done",
-                ended_at=datetime.utcnow().isoformat() + "Z",
-                file_name=out_path.name,
-                file_path=str(out_path),
-                message="Exportação concluída.",
-            )
+            started = perf_counter()
+            while perf_counter() - started < EXPORT_BATCH_STATUS_TIME_BUDGET_SECONDS:
+                with EXPORT_BATCH_JOBS_LOCK:
+                    job = EXPORT_BATCH_JOBS.get(job_id)
+                    if not job or job.get("status") in ("done", "error"):
+                        return job
+                    total = int(job.get("total") or 0)
+                    processed = int(job.get("processed") or 0)
+                    next_offset = int(job.get("next_offset") or processed)
+                    total_batches = int(job.get("total_batches") or 0)
+
+                if processed >= total:
+                    with EXPORT_BATCH_JOBS_LOCK:
+                        job = EXPORT_BATCH_JOBS.get(job_id)
+                        if job:
+                            job.update(
+                                status="done",
+                                processing=False,
+                                ended_at=datetime.utcnow().isoformat() + "Z",
+                                message="Exportação concluída.",
+                            )
+                            return dict(job)
+                    return None
+
+                rows = export_leads_rows(
+                    filters=filters,
+                    limit=batch_size,
+                    offset=next_offset,
+                    order_by=order_by,
+                    order_dir=order_dir,
+                )
+
+                if not rows:
+                    with EXPORT_BATCH_JOBS_LOCK:
+                        job = EXPORT_BATCH_JOBS.get(job_id)
+                        if job:
+                            job.update(
+                                status="done",
+                                processing=False,
+                                ended_at=datetime.utcnow().isoformat() + "Z",
+                                message="Exportação concluída.",
+                            )
+                            return dict(job)
+                    return None
+
+                _append_batch_export_rows(out_path, rows)
+                fetched = len(rows)
+                with EXPORT_BATCH_JOBS_LOCK:
+                    job = EXPORT_BATCH_JOBS.get(job_id)
+                    if not job:
+                        return None
+                    processed = min(int(job.get("processed") or 0) + fetched, total)
+                    current_batch = (processed + batch_size - 1) // batch_size if processed else 0
+                    job.update(
+                        processed=processed,
+                        next_offset=next_offset + fetched,
+                        current_batch=current_batch,
+                        file_name=out_path.name,
+                        message=f"Exportando lote {current_batch} de {max(total_batches, current_batch)}",
+                    )
+                    if processed >= total or fetched < batch_size:
+                        job.update(
+                            status="done",
+                            processing=False,
+                            ended_at=datetime.utcnow().isoformat() + "Z",
+                            message="Exportação concluída.",
+                        )
+                        return dict(job)
+
+            with EXPORT_BATCH_JOBS_LOCK:
+                job = EXPORT_BATCH_JOBS.get(job_id)
+                if job:
+                    job["processing"] = False
+                    return dict(job)
+            return None
         except Exception as e:
             logger.exception("Falha no export em lote job_id=%s", job_id)
-            _update_export_job(
-                job_id,
-                status="error",
-                ended_at=datetime.utcnow().isoformat() + "Z",
-                message="Falha na exportação em lote.",
-                error=str(e),
-            )
+            with EXPORT_BATCH_JOBS_LOCK:
+                job = EXPORT_BATCH_JOBS.get(job_id)
+                if job:
+                    job.update(
+                        status="error",
+                        processing=False,
+                        ended_at=datetime.utcnow().isoformat() + "Z",
+                        message="Falha na exportação em lote.",
+                        error=str(e),
+                    )
+                    return dict(job)
+            return None
 
     @app.post("/api/export/batch")
     def api_export_batch():
         try:
             payload = request.get_json(silent=True) or {}
-            filters, _meta = _get_filters_from_payload(payload)
+            filters, meta = _get_filters_from_payload(payload)
             batch_size = int(payload.get("batch_size") or 1000)
             batch_size = max(100, min(batch_size, 5000))
 
@@ -690,23 +789,30 @@ def create_app() -> Flask:
                     "batch_size": batch_size,
                     "total": 0,
                     "processed": 0,
+                    "next_offset": 0,
                     "total_batches": 0,
                     "current_batch": 0,
-                    "message": "Exportação agendada.",
+                    "message": "Exportação agendada. Aguardando consulta de status para iniciar.",
                     "file_name": None,
-                    "file_path": None,
+                    "file_path": str(out_path),
+                    "filters": filters,
+                    "order_by": meta.get("order_by") or "data_disparo",
+                    "order_dir": meta.get("order_dir") or "ASC",
+                    "initialized": False,
+                    "processing": False,
                 }
-
-            worker = threading.Thread(
-                target=_run_batch_export_job,
-                args=(job_id, filters, batch_size, out_path),
-                daemon=True,
-            )
-            worker.start()
 
             return jsonify({"ok": True, "job_id": job_id, "status": "queued"}), 202
         except Exception as e:
             return jsonify(_error_payload(e, "Erro ao iniciar exportação em lote.")), 500
+
+    def _public_export_job(job: Dict[str, Any]):
+        if not job:
+            return job
+        public_job = dict(job)
+        public_job.pop("filters", None)
+        public_job.pop("processing", None)
+        return public_job
 
     @app.get("/api/export/batch/status")
     def api_export_batch_status():
@@ -715,12 +821,16 @@ def create_app() -> Flask:
             return jsonify({"ok": False, "error": "job_id é obrigatório"}), 400
 
         with EXPORT_BATCH_JOBS_LOCK:
-            job = EXPORT_BATCH_JOBS.get(job_id)
+            exists = job_id in EXPORT_BATCH_JOBS
 
+        if not exists:
+            return jsonify({"ok": False, "error": "job_id não encontrado"}), 404
+
+        job = _process_batch_export_job(job_id)
         if not job:
             return jsonify({"ok": False, "error": "job_id não encontrado"}), 404
 
-        return jsonify({"ok": True, "data": job}), 200
+        return jsonify({"ok": True, "data": _public_export_job(job)}), 200
 
     @app.get("/api/export/batch/download")
     def api_export_batch_download():
