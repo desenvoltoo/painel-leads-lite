@@ -264,7 +264,14 @@ def update_export_job(job_id: str, **kwargs) -> None:
         bigquery.ScalarQueryParameter("metadata", "STRING", json.dumps(metadata, ensure_ascii=False, default=str)),
         bigquery.ScalarQueryParameter("job_id", "STRING", job_id),
     ]
-    _run_query(query, params)
+    client = get_bq_client()
+    list(
+        client.query(
+            query,
+            job_config=bigquery.QueryJobConfig(query_parameters=params),
+            location=_bq_location(),
+        ).result()
+    )
 
 
 def get_export_job(job_id: str) -> Optional[Dict[str, Any]]:
@@ -276,7 +283,14 @@ def get_export_job(job_id: str) -> Optional[Dict[str, Any]]:
         LIMIT 1
     """
     params = [bigquery.ScalarQueryParameter("job_id", "STRING", job_id)]
-    rows = list(_run_query(query, params))
+    client = get_bq_client()
+    rows = list(
+        client.query(
+            query,
+            job_config=bigquery.QueryJobConfig(query_parameters=params),
+            location=_bq_location(),
+        ).result()
+    )
     if not rows:
         return None
     row = rows[0]
