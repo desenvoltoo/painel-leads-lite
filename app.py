@@ -35,11 +35,12 @@ from services.bigquery import (
     export_leads_rows_iter,
     rows_to_xlsx,               # gera export XLSX no servidor
     EXPORT_COLUMNS,
+    create_export_job,
+    update_export_job,
+    get_export_job,
 )
 
 logger = logging.getLogger(__name__)
-EXPORT_BATCH_JOBS: Dict[str, Dict[str, Any]] = {}
-EXPORT_BATCH_JOBS_LOCK = threading.Lock()
  
 
 
@@ -241,12 +242,6 @@ def _stamp() -> str:
     return datetime.now().strftime("%Y%m%d_%H%M%S")
 
 
-def _update_export_job(job_id: str, **kwargs):
-    with EXPORT_BATCH_JOBS_LOCK:
-        if job_id in EXPORT_BATCH_JOBS:
-            EXPORT_BATCH_JOBS[job_id].update(kwargs)
- 
- 
 # ============================================================
 # Upload parsing: CSV/XLSX robusto (separador, encoding)
 # FIX v4.2: usa chardet para detectar encoding real do arquivo
@@ -617,7 +612,7 @@ def create_app() -> Flask:
         try:
             total = query_leads_count(filters=filters)
             total_batches = max(1, (total + batch_size - 1) // batch_size) if total else 0
-            _update_export_job(
+            update_export_job(
                 job_id,
                 status="running",
                 total=total,
@@ -645,14 +640,14 @@ def create_app() -> Flask:
                     for row in batch:
                         writer.writerow([(row.get(k) if row.get(k) is not None else "") for k in keys])
                     processed += len(batch)
-                    _update_export_job(
+                    update_export_job(
                         job_id,
                         current_batch=idx,
                         processed=processed,
                         message=f"Exportando lote {idx} de {max(total_batches, idx)}",
                     )
 
-            _update_export_job(
+            update_export_job(
                 job_id,
                 status="done",
                 ended_at=datetime.utcnow().isoformat() + "Z",
@@ -662,7 +657,7 @@ def create_app() -> Flask:
             )
         except Exception as e:
             logger.exception("Falha no export em lote job_id=%s", job_id)
-            _update_export_job(
+            update_export_job(
                 job_id,
                 status="error",
                 ended_at=datetime.utcnow().isoformat() + "Z",
@@ -682,20 +677,19 @@ def create_app() -> Flask:
             fname = f"leads_export_batch_{_stamp()}_{job_id[:8]}.csv"
             out_path = EXPORT_DIR / fname
 
-            with EXPORT_BATCH_JOBS_LOCK:
-                EXPORT_BATCH_JOBS[job_id] = {
-                    "job_id": job_id,
-                    "status": "queued",
-                    "created_at": datetime.utcnow().isoformat() + "Z",
-                    "batch_size": batch_size,
-                    "total": 0,
-                    "processed": 0,
-                    "total_batches": 0,
-                    "current_batch": 0,
-                    "message": "Exportação agendada.",
-                    "file_name": None,
-                    "file_path": None,
-                }
+            create_export_job(job_id, {
+                "job_id": job_id,
+                "status": "queued",
+                "created_at": datetime.utcnow().isoformat() + "Z",
+                "batch_size": batch_size,
+                "total": 0,
+                "processed": 0,
+                "total_batches": 0,
+                "current_batch": 0,
+                "message": "Exportação agendada.",
+                "file_name": None,
+                "file_path": None,
+            })
 
             worker = threading.Thread(
                 target=_run_batch_export_job,
@@ -714,8 +708,7 @@ def create_app() -> Flask:
         if not job_id:
             return jsonify({"ok": False, "error": "job_id é obrigatório"}), 400
 
-        with EXPORT_BATCH_JOBS_LOCK:
-            job = EXPORT_BATCH_JOBS.get(job_id)
+        job = get_export_job(job_id)
 
         if not job:
             return jsonify({"ok": False, "error": "job_id não encontrado"}), 404
@@ -728,8 +721,7 @@ def create_app() -> Flask:
         if not job_id:
             return jsonify({"ok": False, "error": "job_id é obrigatório"}), 400
 
-        with EXPORT_BATCH_JOBS_LOCK:
-            job = EXPORT_BATCH_JOBS.get(job_id)
+        job = get_export_job(job_id)
 
         if not job:
             return jsonify({"ok": False, "error": "job_id não encontrado"}), 404
