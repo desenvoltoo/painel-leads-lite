@@ -824,7 +824,14 @@ async function doUpload() {
 /* =========================
    Export XLSX (server-side)
 ========================= */
-function exportXlsxServerSide() {
+async function exportXlsxServerSide() {
+  const btn = $("#btnExport");
+  const previousText = btn?.textContent;
+  if (btn) {
+    btn.disabled = true;
+    btn.textContent = "Exportando...";
+  }
+
   const params = buildLeadsParams();
   delete params.limit;
   delete params.offset;
@@ -844,7 +851,44 @@ function exportXlsxServerSide() {
     url.searchParams.set(k, s);
   });
 
-  window.location.href = url.toString();
+  try {
+    const resp = await fetch(url.toString(), {
+      method: "GET",
+      cache: "no-store",
+      credentials: "same-origin",
+    });
+
+    if (!resp.ok) {
+      const text = await resp.text();
+      let message = `Erro ao exportar XLSX (${resp.status})`;
+      try {
+        const payload = text ? JSON.parse(text) : {};
+        message = payload?.error || payload?.message || message;
+      } catch {
+        if (text) message = text;
+      }
+      throw new Error(message);
+    }
+
+    const blob = await resp.blob();
+    const blobUrl = window.URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = blobUrl;
+    a.download = "leads_export.xlsx";
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    window.URL.revokeObjectURL(blobUrl);
+    setStatus("Exportação XLSX concluída.", "ok");
+  } catch (e) {
+    console.error(e);
+    setStatus(e.message || "Falha ao exportar XLSX.", "err");
+  } finally {
+    if (btn) {
+      btn.disabled = false;
+      btn.textContent = previousText || "Exportar XLSX";
+    }
+  }
 }
 
 async function startBatchExport() {
