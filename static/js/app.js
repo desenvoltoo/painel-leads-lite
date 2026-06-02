@@ -50,6 +50,18 @@ function setUploadStatus(msg, type = "ok") {
   el.className = type === "err" ? "error" : "muted";
 }
 
+
+function formatImportReport(report) {
+  if (!report) return "";
+  const reasons = report.motivos_rejeicoes || {};
+  const reasonText = Object.keys(reasons).length
+    ? Object.entries(reasons).map(([motivo, qtd]) => `${motivo}: ${qtd}`).join("; ")
+    : "nenhuma";
+  return `Arquivo: ${report.arquivo || "-"} | Linhas recebidas: ${report.linhas_recebidas ?? 0} | `
+    + `Importadas: ${report.linhas_importadas ?? 0} | Rejeitadas: ${report.linhas_rejeitadas ?? 0} | `
+    + `Motivo das rejeições: ${reasonText} | Tempo: ${report.tempo_processamento_s ?? 0}s`;
+}
+
 function setSearchLoading(loading) {
   const row = $("#searchLoading");
   if (!row) return;
@@ -813,8 +825,10 @@ async function doUpload() {
     }
 
     const jobId = resp?.job_id;
-    setUploadStatus(resp?.message || "Upload recebido. Processando...", "ok");
+    const reportText = formatImportReport(resp?.report);
+    setUploadStatus(reportText || resp?.message || "Upload recebido. Processando...", "ok");
     await pollUploadStatus(jobId);
+    if (reportText) setUploadStatus(`Processamento concluído. ${reportText}`, "ok");
   } catch (e) {
     console.error(e);
     setUploadStatus(e.message || "Erro no upload.", "err");

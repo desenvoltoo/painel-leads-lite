@@ -339,7 +339,8 @@ def _read_upload_to_df(file_storage) -> pd.DataFrame:
                     return df
                 if best_df is None:
                     best_df = df
-            except Exception:
+            except Exception as exc:
+                logger.debug("Tentativa de leitura CSV falhou: sep=%s encoding=%s", sep, enc, exc_info=True)
                 continue
 
     if best_df is not None:
@@ -825,6 +826,7 @@ def create_app() -> Flask:
             result = process_gcs_upload(object_name)
             return jsonify({"ok": True, **result}), 202
         except Exception as e:
+            logger.exception("Falha na ingestão via GCS: object_name=%s", object_name)
             return jsonify(_error_payload(e, "Falha na ingestão via GCS.")), 500
 
     @app.post("/api/upload")
@@ -841,12 +843,8 @@ def create_app() -> Flask:
 
         try:
             df = _read_upload_to_df(file_storage)
-            job_id = process_upload_dataframe(df)
-            return jsonify({
-                "ok": True,
-                "message": "Upload recebido. Processamento iniciado no BigQuery.",
-                "job_id": job_id,
-            }), 202
+            result = process_upload_dataframe(df, filename=filename)
+            return jsonify({"ok": True, **result}), 202
         except Exception as e:
             logger.exception("Falha no upload direto: %s", e)
             return jsonify(_error_payload(e, "Falha ao processar upload.")), 500
