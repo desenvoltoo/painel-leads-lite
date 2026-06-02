@@ -18,6 +18,7 @@ from pathlib import Path
 from time import perf_counter
 from typing import Any, Dict, Iterator, List, Optional, Tuple
 
+import google.auth
 from google.cloud import bigquery, storage
 from cachetools import TTLCache
 from google.api_core.exceptions import (
@@ -893,6 +894,32 @@ def load_to_staging(
     create_disposition = bigquery.CreateDisposition.CREATE_NEVER
 
     def _do_load():
+        credentials, project = google.auth.default()
+        credential_service_account = getattr(credentials, "service_account_email", "N/A")
+        location = _bq_location()
+        logger.error(
+            "BQ DEBUG | project=%s | cred_type=%s | service_account=%s | table=%s | "
+            "dataset=%s | location=%s | write_disposition=%s | create_disposition=%s",
+            project,
+            credentials.__class__.__name__,
+            credential_service_account,
+            table_id,
+            BQ_DATASET,
+            location,
+            write_disposition,
+            create_disposition,
+        )
+
+        table_check = client.get_table(table_id)
+        logger.error(
+            "BQ TABLE CHECK | project=%s | dataset=%s | table_id=%s | columns=%d | table_location=%s",
+            table_check.project,
+            table_check.dataset_id,
+            table_check.table_id,
+            len(table_check.schema),
+            getattr(table_check, "location", "N/A"),
+        )
+
         logger.info(
             "Upload iniciado: service_account=%s dataset=%s tabela=%s linhas=%d "
             "write_disposition=%s create_disposition=%s schema_colunas=%d autodetect=%s",
@@ -905,18 +932,29 @@ def load_to_staging(
             len(table.schema),
             False,
         )
-        job = client.load_table_from_dataframe(
-            df2,
-            table_id,
-            job_config=bigquery.LoadJobConfig(
-                schema=table.schema,
-                autodetect=False,
-                create_disposition=create_disposition,
-                write_disposition=write_disposition,
-            ),
-            location=_bq_location(),
-        )
-        job.result()
+        try:
+            job = client.load_table_from_dataframe(
+                df2,
+                table_id,
+                job_config=bigquery.LoadJobConfig(
+                    schema=table.schema,
+                    autodetect=False,
+                    create_disposition=create_disposition,
+                    write_disposition=write_disposition,
+                ),
+                location=location,
+            )
+            job.result()
+        except Exception as exc:
+            logger.exception(
+                "BQ LOAD FAILED | exception_type=%s | message=%s | service_account=%s | table=%s",
+                exc.__class__.__name__,
+                str(exc),
+                credential_service_account,
+                table_id,
+            )
+            raise
+
         rows_loaded = int(getattr(job, "output_rows", 0) or len(df2))
         logger.info("Upload concluído: job_id=%s tabela=%s", job.job_id, table_id)
         logger.info("Linhas gravadas: tabela=%s linhas=%d", table_id, rows_loaded)
