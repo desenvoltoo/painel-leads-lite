@@ -231,3 +231,64 @@ body {
   .chart-box { height: 300px; }
   .data-panel { border-radius: 20px; padding: 1rem; }
 }
+
+.export-form {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: .75rem;
+}
+
+.export-form .form-select { width: 160px; }
+
+.command-grid,
+.quality-grid {
+  display: grid;
+  gap: .9rem;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+}
+
+.command-grid div,
+.quality-grid div {
+  background: #f8fafc;
+  border: 1px solid var(--gestao-border);
+  border-radius: 18px;
+  padding: 1rem;
+}
+
+.command-grid span,
+.quality-grid span {
+  color: var(--gestao-muted);
+  display: block;
+  font-size: .72rem;
+  font-weight: 800;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+}
+
+.command-grid strong,
+.quality-grid strong {
+  display: block;
+  font-size: 1.25rem;
+  margin-top: .45rem;
+  word-break: break-word;
+}
+
+.table-filter {
+  margin-top: .35rem;
+  min-width: 130px;
+  text-transform: none;
+}
+
+@media (max-width: 1199.98px) {
+  .command-grid,
+  .quality-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
+@media (max-width: 767.98px) {
+  .command-grid,
+  .quality-grid { grid-template-columns: 1fr; }
+  .export-form,
+  .export-form .form-select,
+  .export-form .btn { width: 100%; }
+}
