@@ -1,0 +1,149 @@
+<!doctype html>
+<html lang="pt-br">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Gestão Operacional | Painel Leads Lite</title>
+
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+  <link href="https://cdn.datatables.net/1.13.8/css/dataTables.bootstrap5.min.css" rel="stylesheet">
+  <link href="https://cdn.datatables.net/responsive/2.5.0/css/responsive.bootstrap5.min.css" rel="stylesheet">
+  <link href="https://cdn.datatables.net/buttons/2.4.2/css/buttons.bootstrap5.min.css" rel="stylesheet">
+  <link href="{{ url_for('static', filename='css/gestao.css') }}?v={{ asset_version }}" rel="stylesheet">
+</head>
+<body>
+  <nav class="navbar navbar-expand-lg gestao-navbar sticky-top">
+    <div class="container-fluid px-3 px-lg-4">
+      <a class="navbar-brand d-flex align-items-center gap-2" href="/gestao" aria-label="Gestão Operacional">
+        <span class="brand-icon">GO</span>
+        <span>
+          <strong>Gestão Operacional</strong>
+          <small class="d-block">Painel executivo de priorização</small>
+        </span>
+      </a>
+      <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#gestaoNavbar" aria-controls="gestaoNavbar" aria-expanded="false" aria-label="Alternar navegação">
+        <span class="navbar-toggler-icon"></span>
+      </button>
+      <div id="gestaoNavbar" class="collapse navbar-collapse justify-content-end">
+        <div class="navbar-nav align-items-lg-center gap-lg-2">
+          <a class="nav-link" href="/">Painel atual</a>
+          <a class="nav-link active" href="/gestao">Gestão</a>
+          <a class="nav-link" href="/gestao?refresh=1">Atualizar dados</a>
+          {% if current_user %}
+          <span class="nav-user">{{ current_user }}</span>
+          <form method="post" action="/logout" class="m-0">
+            <button class="btn btn-sm btn-outline-secondary" type="submit">Sair</button>
+          </form>
+          {% endif %}
+        </div>
+      </div>
+    </div>
+  </nav>
+
+  <main class="container-fluid gestao-shell px-3 px-lg-4 py-4">
+    <section class="hero-panel mb-4">
+      <div>
+        <p class="eyebrow mb-2">Operação Comercial</p>
+        <h1 class="h2 mb-2">Visão executiva da fila e produtividade</h1>
+        <p class="mb-0 text-secondary">Indicadores consolidados, ranking de consultores e fila operacional priorizada para tomada de decisão.</p>
+      </div>
+      <div class="hero-meta">
+        <span class="badge text-bg-light">{{ ui_version }}</span>
+        {% if gestao_data %}
+        <span class="text-secondary">Atualizado em <strong id="generatedAt">{{ gestao_data.generated_at }}</strong></span>
+        <span class="text-secondary">Cache: {{ gestao_data.cache_ttl_seconds }}s</span>
+        {% endif %}
+      </div>
+    </section>
+
+    {% if gestao_error %}
+    <div class="alert alert-danger shadow-sm" role="alert">
+      <strong>Não foi possível carregar o módulo.</strong> {{ gestao_error }}
+    </div>
+    {% endif %}
+
+    {% if gestao_data %}
+    <section class="kpi-grid mb-4" aria-label="KPIs operacionais">
+      <article class="kpi-card kpi-primary"><span>Total Leads</span><strong data-kpi="total_leads">0</strong><small>Carteira operacional</small></article>
+      <article class="kpi-card"><span>Aguardando Primeiro Contato</span><strong data-kpi="aguardando_primeiro_contato">0</strong><small>Entrada sem contato inicial</small></article>
+      <article class="kpi-card kpi-warning"><span>Sem Acionamento</span><strong data-kpi="sem_acionamento">0</strong><small>Leads nunca disparados</small></article>
+      <article class="kpi-card"><span>Leads Parados</span><strong data-kpi="leads_parados">0</strong><small>Sem evolução operacional</small></article>
+      <article class="kpi-card kpi-danger"><span>Leads Críticos</span><strong data-kpi="leads_criticos">0</strong><small>Prioridade máxima</small></article>
+      <article class="kpi-card kpi-info"><span>Alta Prioridade</span><strong data-kpi="leads_alta_prioridade">0</strong><small>Fila estratégica</small></article>
+      <article class="kpi-card kpi-success"><span>Matriculados</span><strong data-kpi="matriculados">0</strong><small>Conversões confirmadas</small></article>
+      <article class="kpi-card"><span>Tempo Médio Primeiro Contato</span><strong data-kpi="media_horas_primeiro_contato">0h</strong><small>Horas até primeira ação</small></article>
+    </section>
+
+    <section class="row g-3 mb-4" aria-label="Alertas operacionais">
+      <div class="col-12"><h2 class="section-title">Alertas</h2></div>
+      <div class="col-12 col-md-6 col-xl-3"><div class="alert-card"><span>Leads sem ação há mais de 7 dias</span><strong data-alert="leads_sem_acao_7_dias">0</strong></div></div>
+      <div class="col-12 col-md-6 col-xl-3"><div class="alert-card warning"><span>Leads sem disparo</span><strong data-alert="leads_sem_disparo">0</strong></div></div>
+      <div class="col-12 col-md-6 col-xl-3"><div class="alert-card danger"><span>Leads críticos</span><strong data-alert="leads_criticos">0</strong></div></div>
+      <div class="col-12 col-md-6 col-xl-3"><div class="alert-card dark"><span>Consultores sem atividade recente</span><strong data-alert="consultores_sem_atividade_recente">0</strong></div></div>
+    </section>
+
+    <section class="row g-4 mb-4" aria-label="Rankings de consultores">
+      <div class="col-12 col-xl-6">
+        <div class="data-panel h-100">
+          <div class="panel-header"><h2>Top Consultores por Matrículas</h2><span>Ranking horizontal</span></div>
+          <div class="chart-box"><canvas id="chartMatriculas"></canvas></div>
+        </div>
+      </div>
+      <div class="col-12 col-xl-6">
+        <div class="data-panel h-100">
+          <div class="panel-header"><h2>Top Consultores por Taxa de Conversão</h2><span>Taxa de matrícula</span></div>
+          <div class="chart-box"><canvas id="chartConversao"></canvas></div>
+        </div>
+      </div>
+    </section>
+
+    <section class="data-panel mb-4">
+      <div class="panel-header flex-wrap gap-2">
+        <div><h2>Produtividade dos Consultores</h2><span>Ordenação, busca e exportação CSV habilitadas</span></div>
+      </div>
+      <div class="table-responsive">
+        <table id="produtividadeTable" class="table table-hover table-striped align-middle nowrap w-100">
+          <thead>
+            <tr>
+              <th>Consultor</th><th>Total Leads</th><th>Não Disparados</th><th>Disparados</th><th>Matriculados</th><th>Taxa Matrícula</th><th>Última Atividade</th><th>Score Médio</th><th>Leads Críticos</th><th>Leads Parados</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="data-panel">
+      <div class="panel-header flex-wrap gap-2">
+        <div><h2>Fila Operacional</h2><span>Top 500 registros ordenados por Score Prioridade DESC</span></div>
+      </div>
+      <div class="table-responsive">
+        <table id="filaTable" class="table table-hover table-striped align-middle nowrap w-100">
+          <thead>
+            <tr>
+              <th>Nome</th><th>Celular</th><th>Curso</th><th>Polo</th><th>Status</th><th>Consultor</th><th>Score Prioridade</th><th>Nível Prioridade</th><th>Etapa Operacional</th><th>Dias Sem Ação</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
+    {% endif %}
+  </main>
+
+  {% if gestao_data %}
+  <script id="gestao-data" type="application/json">{{ gestao_data | tojson }}</script>
+  {% endif %}
+  <script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+  <script src="https://cdn.datatables.net/1.13.8/js/jquery.dataTables.min.js"></script>
+  <script src="https://cdn.datatables.net/1.13.8/js/dataTables.bootstrap5.min.js"></script>
+  <script src="https://cdn.datatables.net/responsive/2.5.0/js/dataTables.responsive.min.js"></script>
+  <script src="https://cdn.datatables.net/responsive/2.5.0/js/responsive.bootstrap5.min.js"></script>
+  <script src="https://cdn.datatables.net/buttons/2.4.2/js/dataTables.buttons.min.js"></script>
+  <script src="https://cdn.datatables.net/buttons/2.4.2/js/buttons.bootstrap5.min.js"></script>
+  <script src="https://cdn.datatables.net/buttons/2.4.2/js/buttons.html5.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+  <script src="{{ url_for('static', filename='js/gestao.js') }}?v={{ asset_version }}"></script>
+</body>
+</html>
