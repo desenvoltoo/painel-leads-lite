@@ -48,7 +48,7 @@ BQ_PROCEDURE = os.getenv("BQ_PROCEDURE", "sp_import_star_from_site")
 # Painel lê somente essa view
 BQ_VIEW_LEADS = os.getenv("BQ_VIEW_LEADS", "vw_leads_painel_lite")
 
-# Gestão Operacional lê somente as novas views dedicadas ao módulo /gestao
+# Gestão Operacional usa as views dedicadas e recalcula prioridade máxima por status vazio
 BQ_VIEW_GESTAO_LEADS_PRIORIZADOS = os.getenv("BQ_VIEW_GESTAO_LEADS_PRIORIZADOS", "vw_leads_priorizados")
 BQ_VIEW_GESTAO_PRODUTIVIDADE = os.getenv("BQ_VIEW_GESTAO_PRODUTIVIDADE", "vw_produtividade_consultores")
 BQ_VIEW_GESTAO_OPERACAO = os.getenv("BQ_VIEW_GESTAO_OPERACAO", "vw_operacao_rpa")
@@ -1110,31 +1110,44 @@ def _run_gestao_query(sql: str, params: Optional[List[Any]] = None, operation_na
 
 
 def query_gestao_operacao() -> Dict[str, Any]:
-    """Consulta os KPIs consolidados da view modelo_estrela.vw_operacao_rpa."""
+    """Consulta KPIs consolidados e corrige prioridade máxima por status vazio."""
     view_name = BQ_VIEW_GESTAO_OPERACAO
+    status_empty_expr = _gestao_status_empty_expr("v")
     select_cols = ",\n      ".join([
         _select_table_col(view_name, "o", "total_leads", bq_type="INT64"),
-        _select_table_col(view_name, "o", "aguardando_primeiro_contato", bq_type="INT64"),
+        "p.nunca_trabalhados AS nunca_trabalhados",
+        "p.nunca_trabalhados AS aguardando_primeiro_contato",
         _select_table_col(view_name, "o", "sem_acionamento", bq_type="INT64"),
         _select_table_col(view_name, "o", "matriculados", bq_type="INT64"),
         _select_table_col(view_name, "o", "leads_parados", bq_type="INT64"),
-        _select_table_col(view_name, "o", "leads_criticos", bq_type="INT64"),
+        "p.nunca_trabalhados AS leads_criticos",
         _select_table_col(view_name, "o", "leads_alta_prioridade", bq_type="INT64"),
         _select_table_col(view_name, "o", "media_horas_primeiro_contato", bq_type="FLOAT64"),
         _select_table_col(view_name, "o", "score_medio_operacao", bq_type="FLOAT64"),
+        "p.nunca_trabalhados AS validacao_nunca_trabalhados_count",
+        "p.nunca_trabalhados AS validacao_nunca_trabalhados_card",
+        "0 AS validacao_nunca_trabalhados_diferenca",
     ])
     sql = f"""
+    WITH prioridade AS (
+      SELECT
+        COUNTIF({status_empty_expr}) AS nunca_trabalhados
+      FROM {_tbl(BQ_VIEW_LEADS)} v
+    )
     SELECT
       {select_cols}
     FROM {_tbl(view_name)} o
+    CROSS JOIN prioridade p
     LIMIT 1
     """
     return _single_row_to_json_safe(_run_gestao_query(sql, operation_name="query_gestao_operacao"))
 
-
 def query_gestao_produtividade() -> List[Dict[str, Any]]:
-    """Consulta produtividade por consultor em modelo_estrela.vw_produtividade_consultores."""
+    """Consulta produtividade por consultor e recalcula leads críticos por status vazio."""
     view_name = BQ_VIEW_GESTAO_PRODUTIVIDADE
+    consultor_key = "COALESCE(NULLIF(TRIM(CAST(p.consultor_comercial AS STRING)), ''), 'Sem consultor')"
+    if not _has_table_col(view_name, "consultor_comercial"):
+        consultor_key = "'Sem consultor'"
     select_cols = ",\n      ".join([
         _select_table_col(view_name, "p", "consultor_comercial"),
         _select_table_col(view_name, "p", "total_leads", bq_type="INT64"),
@@ -1145,60 +1158,89 @@ def query_gestao_produtividade() -> List[Dict[str, Any]]:
         _select_table_col(view_name, "p", "ultima_atividade", bq_type="TIMESTAMP"),
         _select_table_col(view_name, "p", "score_medio_carteira", bq_type="FLOAT64"),
         _select_table_col(view_name, "p", "leads_sem_movimento_7_dias", bq_type="INT64"),
-        _select_table_col(view_name, "p", "leads_criticos", bq_type="INT64"),
+        "COALESCE(c.leads_criticos, 0) AS leads_criticos",
         _select_table_col(view_name, "p", "leads_alta_prioridade", bq_type="INT64"),
     ])
     logger.info("Colunas disponíveis em %s: %s", _table_id(view_name), sorted(_table_columns(view_name)))
     sql = f"""
+    WITH criticos_por_consultor AS (
+      {_gestao_criticos_por_consultor_cte()}
+    )
     SELECT *
     FROM (
       SELECT
         {select_cols}
       FROM {_tbl(view_name)} p
+      LEFT JOIN criticos_por_consultor c
+        ON {consultor_key} = c.consultor_key
     )
     ORDER BY COALESCE(matriculados, 0) DESC, COALESCE(taxa_matricula_pct, 0) DESC
     """
     return _rows_to_json_safe(_run_gestao_query(sql, operation_name="query_gestao_produtividade"))
 
-
 def query_gestao_fila_operacional(limit: int = GESTAO_FILA_LIMIT) -> List[Dict[str, Any]]:
-    """Consulta a fila operacional priorizada em modelo_estrela.vw_leads_priorizados."""
-    view_name = BQ_VIEW_GESTAO_LEADS_PRIORIZADOS
+    """Consulta fila priorizada recalculando prioridade sem data_disparo."""
     limit = max(1, min(int(limit or GESTAO_FILA_LIMIT), 1000))
-    columns = _table_columns(view_name)
-    status_expr = "lp.status" if "status" in columns else "lp.status_inscricao" if "status_inscricao" in columns else "CAST(NULL AS STRING)"
-    polo_expr = "lp.polo" if "polo" in columns else "lp.unidade" if "unidade" in columns else "CAST(NULL AS STRING)"
+    columns = _view_columns()
+    status_expr = "v.status" if "status" in columns else "v.status_inscricao" if "status_inscricao" in columns else "CAST(NULL AS STRING)"
+    polo_expr = "v.polo" if "polo" in columns else "v.unidade" if "unidade" in columns else "CAST(NULL AS STRING)"
+    status_empty_expr = _gestao_status_empty_expr("v")
+    matriculado_expr = _gestao_matriculado_expr("v")
+    ultima_acao_expr = "SAFE_CAST(v.data_ultima_acao AS TIMESTAMP)" if "data_ultima_acao" in columns else "CAST(NULL AS TIMESTAMP)"
+    data_inscricao_expr = "SAFE_CAST(v.data_inscricao AS DATE)" if "data_inscricao" in columns else "CAST(NULL AS DATE)"
+    nunca_disparado_expr = "(v.data_disparo IS NULL OR TRIM(CAST(v.data_disparo AS STRING)) = '')" if "data_disparo" in columns else "CAST(NULL AS BOOL)"
+    dias_sem_acao_expr = f"IF({ultima_acao_expr} IS NULL, NULL, DATE_DIFF(CURRENT_DATE(), DATE({ultima_acao_expr}), DAY))"
+    nivel_prioridade_expr = f"""
+        CASE
+          WHEN {matriculado_expr} THEN 'BAIXA'
+          WHEN {status_empty_expr} THEN 'CRÍTICA'
+          ELSE 'MÉDIA'
+        END
+    """
+    score_expr = f"""
+        CASE
+          WHEN {matriculado_expr} THEN 10
+          WHEN {status_empty_expr} THEN 100
+          ELSE 50
+        END + COALESCE({dias_sem_acao_expr}, 0) * 0.01
+    """
+    etapa_expr = f"""
+        CASE
+          WHEN {matriculado_expr} THEN 'Matriculado'
+          WHEN {status_empty_expr} THEN 'Nunca Trabalhado'
+          ELSE 'Em atendimento'
+        END
+    """
     select_cols = ",\n      ".join([
-        _select_table_col(view_name, "lp", "nome"),
-        _select_table_col(view_name, "lp", "celular"),
-        _select_table_col(view_name, "lp", "curso"),
+        _select_col("nome"),
+        _select_col("celular"),
+        _select_col("curso"),
         f"{polo_expr} AS polo",
         f"{status_expr} AS status",
-        _select_table_col(view_name, "lp", "consultor_comercial"),
-        _select_table_col(view_name, "lp", "score_prioridade", bq_type="FLOAT64"),
-        _select_table_col(view_name, "lp", "nivel_prioridade"),
-        _select_table_col(view_name, "lp", "etapa_operacional"),
-        _select_table_col(view_name, "lp", "dias_sem_acao", bq_type="INT64"),
-        _select_table_col(view_name, "lp", "nunca_disparado", bq_type="BOOL"),
-        _select_table_col(view_name, "lp", "horas_ate_primeiro_contato", bq_type="FLOAT64"),
-        _select_table_col(view_name, "lp", "flag_matriculado", bq_type="BOOL"),
-        _select_table_col(view_name, "lp", "data_inscricao", bq_type="DATE"),
-        _select_table_col(view_name, "lp", "data_ultima_acao", bq_type="TIMESTAMP"),
+        _select_col("consultor_comercial"),
+        f"{score_expr} AS score_prioridade",
+        f"{nivel_prioridade_expr} AS nivel_prioridade",
+        f"{etapa_expr} AS etapa_operacional",
+        f"{dias_sem_acao_expr} AS dias_sem_acao",
+        f"{nunca_disparado_expr} AS nunca_disparado",
+        "CAST(NULL AS FLOAT64) AS horas_ate_primeiro_contato",
+        f"{matriculado_expr} AS flag_matriculado",
+        f"{data_inscricao_expr} AS data_inscricao",
+        f"{ultima_acao_expr} AS data_ultima_acao",
     ])
-    logger.info("Colunas disponíveis em %s: %s", _table_id(view_name), sorted(columns))
+    logger.info("Colunas disponíveis em %s: %s", _view_table_id(), sorted(columns))
     sql = f"""
     SELECT *
     FROM (
       SELECT
         {select_cols}
-      FROM {_tbl(view_name)} lp
+      FROM {_tbl(BQ_VIEW_LEADS)} v
     )
     ORDER BY COALESCE(score_prioridade, 0) DESC
     LIMIT @limit
     """
     params = [bigquery.ScalarQueryParameter("limit", "INT64", limit)]
     return _rows_to_json_safe(_run_gestao_query(sql, params=params, operation_name="query_gestao_fila_operacional"))
-
 
 def _gestao_number(value: Any) -> float:
     if value is None or value == "":
@@ -1208,6 +1250,40 @@ def _gestao_number(value: Any) -> float:
     except (TypeError, ValueError):
         return 0
 
+
+
+def _gestao_status_empty_expr(alias: str = "v") -> str:
+    """Regra operacional para leads nunca trabalhados: status nulo ou vazio."""
+    if _has_view_col("status"):
+        return f"({alias}.status IS NULL OR TRIM(CAST({alias}.status AS STRING)) = '')"
+    return "FALSE"
+
+
+def _gestao_matriculado_expr(alias: str = "v") -> str:
+    """Identifica leads MAT/matriculados sem usar data_disparo para prioridade."""
+    checks = []
+    if _has_view_col("matriculado"):
+        checks.append(
+            f"UPPER(TRIM(CAST({alias}.matriculado AS STRING))) IN "
+            "('SIM', 'S', 'TRUE', '1', 'MATRICULADO', 'MAT')"
+        )
+    if _has_view_col("status_inscricao"):
+        checks.append(f"REGEXP_CONTAINS(UPPER(TRIM(CAST({alias}.status_inscricao AS STRING))), r'^(MAT|MATRICULADO)')")
+    if _has_view_col("status"):
+        checks.append(f"REGEXP_CONTAINS(UPPER(TRIM(CAST({alias}.status AS STRING))), r'^(MAT|MATRICULADO)')")
+    return "(" + " OR ".join(checks) + ")" if checks else "FALSE"
+
+
+def _gestao_criticos_por_consultor_cte() -> str:
+    if not _has_view_col("consultor_comercial"):
+        return "SELECT CAST(NULL AS STRING) AS consultor_key, 0 AS leads_criticos WHERE FALSE"
+    return f"""
+      SELECT
+        COALESCE(NULLIF(TRIM(CAST(v.consultor_comercial AS STRING)), ''), 'Sem consultor') AS consultor_key,
+        COUNTIF({_gestao_status_empty_expr('v')}) AS leads_criticos
+      FROM {_tbl(BQ_VIEW_LEADS)} v
+      GROUP BY consultor_key
+    """
 
 def _gestao_recent_activity_alert_count(produtividade: List[Dict[str, Any]]) -> int:
     threshold = datetime.utcnow() - timedelta(days=7)
