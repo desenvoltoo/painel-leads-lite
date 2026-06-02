@@ -42,7 +42,7 @@ GCP_PROJECT_ID = os.getenv("GCP_PROJECT_ID", "painel-universidade")
 BQ_DATASET = os.getenv("BQ_DATASET", "modelo_estrela")
 BQ_LOCATION = os.getenv("BQ_LOCATION", "").strip()
 
-BQ_STAGING_TABLE = os.getenv("BQ_STAGING_TABLE", "stg_import_star").strip() or "stg_import_star"
+BQ_STAGING_TABLE = os.getenv("BQ_STAGING_TABLE", "stg_leads_site").strip() or "stg_leads_site"
 BQ_PROCEDURE = os.getenv("BQ_PROCEDURE", "sp_import_star_from_site")
 
 # Painel lê somente essa view
@@ -671,6 +671,125 @@ STAGING_SCHEMA: List[bigquery.SchemaField] = [
     bigquery.SchemaField("consultor_comercial", "STRING", mode="NULLABLE"),
 ]
 
+STAGING_COLUMNS = tuple(field.name for field in STAGING_SCHEMA)
+# A staging aceita todas as colunas como NULLABLE/STRING. Para preservar a
+# compatibilidade com uploads parciais existentes, a validação obrigatória fica
+# restrita a linhas com algum conteúdo; colunas ausentes são enviadas como NULL.
+REQUIRED_UPLOAD_COLUMNS: Tuple[str, ...] = ()
+REJECTION_LOG_TABLE = "logs_rejeicoes_import"
+
+
+
+def _json_dump_record(record: Dict[str, Any]) -> str:
+    return json.dumps(record, default=str, ensure_ascii=False)
+
+
+def _empty_row_mask(df) -> Any:
+    """Retorna máscara booleana para linhas totalmente vazias após normalização."""
+    return df.apply(lambda row: all(value is None or str(value).strip() == "" for value in row), axis=1)
+
+
+def _rejection_log_table_id() -> str:
+    return f"{GCP_PROJECT_ID}.{BQ_DATASET}.{REJECTION_LOG_TABLE}"
+
+
+def _insert_rejection_logs(rejections: List[Dict[str, Any]]) -> None:
+    """Registra rejeições por linha sem interromper o upload caso o log falhe."""
+    if not rejections:
+        return
+
+    client = get_bq_client()
+    table_id = _rejection_log_table_id()
+    rows = [
+        {
+            "data_hora": item["data_hora"],
+            "arquivo": item["arquivo"],
+            "linha": item["linha"],
+            "motivo": item["motivo"],
+            "conteudo": item["conteudo"],
+        }
+        for item in rejections
+    ]
+
+    try:
+        errors = client.insert_rows_json(table_id, rows)
+        if errors:
+            logger.error("Falha ao inserir logs de rejeição em %s: %s", table_id, errors)
+        else:
+            logger.info("Logs de rejeição inseridos: tabela=%s linhas=%d", table_id, len(rows))
+    except Exception as exc:
+        logger.exception("Falha ao registrar rejeições em %s: %s", table_id, exc)
+
+
+def _build_import_report(
+    *,
+    filename: str,
+    started: float,
+    rows_received: int,
+    rows_imported: int,
+    rows_rejected: int,
+    received_columns: List[str],
+    rejection_reasons: Dict[str, int],
+    staging_rows: Optional[int] = None,
+) -> Dict[str, Any]:
+    normalized_columns = [_normalize_column_name(c) for c in received_columns]
+    return {
+        "arquivo": filename,
+        "tabela_destino": _staging_table_id(),
+        "linhas_recebidas": rows_received,
+        "linhas_importadas": rows_imported,
+        "linhas_rejeitadas": rows_rejected,
+        "linhas_gravadas_staging": staging_rows if staging_rows is not None else rows_imported,
+        "motivos_rejeicoes": rejection_reasons,
+        "tempo_processamento_s": round(perf_counter() - started, 3),
+        "colunas_recebidas": received_columns,
+        "colunas_recebidas_normalizadas": normalized_columns,
+        "colunas_esperadas": list(STAGING_COLUMNS),
+        "colunas_obrigatorias": list(REQUIRED_UPLOAD_COLUMNS),
+        "colunas_opcionais": list(STAGING_COLUMNS),
+        "colunas_faltantes": [c for c in STAGING_COLUMNS if c not in normalized_columns],
+        "colunas_extras": [c for c in normalized_columns if c not in STAGING_COLUMNS],
+    }
+
+
+def _prepare_dataframe_for_staging(df, filename: str, started: float) -> Tuple[Any, Dict[str, Any]]:
+    """Normaliza o DataFrame, rejeita apenas linhas vazias e monta relatório."""
+    received_columns = [str(c) for c in df.columns]
+    rows_received = len(df)
+    df2 = _coerce_df_to_staging_schema(df)
+    empty_mask = _empty_row_mask(df2)
+    rejected_df = df.loc[empty_mask].copy()
+    accepted_df = df2.loc[~empty_mask].copy()
+
+    rejection_reasons: Dict[str, int] = {}
+    rejections: List[Dict[str, Any]] = []
+    if len(rejected_df) > 0:
+        reason = "Linha vazia após normalização"
+        rejection_reasons[reason] = len(rejected_df)
+        now = datetime.utcnow().isoformat(timespec="seconds")
+        for idx, row in rejected_df.iterrows():
+            rejections.append(
+                {
+                    "data_hora": now,
+                    "arquivo": filename,
+                    "linha": int(idx) + 2,
+                    "motivo": reason,
+                    "conteudo": _json_dump_record(row.to_dict()),
+                }
+            )
+        _insert_rejection_logs(rejections)
+
+    report = _build_import_report(
+        filename=filename,
+        started=started,
+        rows_received=rows_received,
+        rows_imported=len(accepted_df),
+        rows_rejected=len(rejected_df),
+        received_columns=received_columns,
+        rejection_reasons=rejection_reasons,
+    )
+    return accepted_df, report
+
 
 def _coerce_df_to_staging_schema(df):
     """
@@ -712,10 +831,10 @@ def _coerce_df_to_staging_schema(df):
 # ============================================================
 # STAGING + PROCEDURE (upload)  AGORA ASSÍNCRONO
 # ============================================================
-def load_to_staging(df) -> None:
+def load_to_staging(df, *, already_coerced: bool = False) -> int:
     client = get_bq_client()
     table_id = _staging_table_id()
-    df2 = _coerce_df_to_staging_schema(df)
+    df2 = df.copy() if already_coerced else _coerce_df_to_staging_schema(df)
 
     def _do_load():
         job = client.load_table_from_dataframe(
@@ -729,9 +848,11 @@ def load_to_staging(df) -> None:
             location=_bq_location(),
         )
         job.result()
-        logger.info("BQ load_table_from_dataframe concluído: job_id=%s", job.job_id)
+        rows_loaded = int(getattr(job, "output_rows", 0) or len(df2))
+        logger.info("BQ load_table_from_dataframe concluído: job_id=%s tabela=%s linhas=%d", job.job_id, table_id, rows_loaded)
+        return rows_loaded
 
-    _with_retry(_do_load, operation_name=f"load_to_staging → {table_id}")
+    return _with_retry(_do_load, operation_name=f"load_to_staging → {table_id}")
 
 
 def run_procedure_async() -> str:
@@ -747,14 +868,36 @@ def run_procedure_async() -> str:
     return _with_retry(_do_call, operation_name=f"run_procedure_async ({BQ_PROCEDURE})")
 
 
-def process_upload_dataframe(df) -> str:
+def process_upload_dataframe(df, filename: str = "upload") -> Dict[str, Any]:
     """
-    1) carrega staging (truncate)
-    2) dispara SP async
-    3) retorna job_id
+    1) diagnostica/normaliza o arquivo
+    2) carrega a staging oficial (truncate)
+    3) dispara SP async
+    4) retorna job_id + relatório de importação
     """
-    load_to_staging(df)
-    return run_procedure_async()
+    started = perf_counter()
+    df2, report = _prepare_dataframe_for_staging(df, filename, started)
+    logger.info(
+        "Upload recebido: arquivo=%s tabela=%s linhas_recebidas=%d linhas_importadas=%d "
+        "linhas_rejeitadas=%d colunas_recebidas=%s colunas_esperadas=%s",
+        filename,
+        _staging_table_id(),
+        report["linhas_recebidas"],
+        report["linhas_importadas"],
+        report["linhas_rejeitadas"],
+        report["colunas_recebidas"],
+        report["colunas_esperadas"],
+    )
+    rows_loaded = load_to_staging(df2, already_coerced=True)
+    job_id = run_procedure_async()
+    report["linhas_gravadas_staging"] = rows_loaded
+    report["tempo_processamento_s"] = round(perf_counter() - started, 3)
+    return {
+        "message": "Upload recebido. Processamento iniciado no BigQuery.",
+        "job_id": job_id,
+        "rows_read": report["linhas_recebidas"],
+        "report": report,
+    }
 
 
 # ============================================================
@@ -794,6 +937,7 @@ def _csv_blob_to_dataframe(blob) -> Any:
                 if best_df is None:
                     best_df = df
             except Exception as exc:
+                logger.debug("Tentativa de leitura CSV via GCS falhou: sep=%s encoding=%s", sep, enc, exc_info=True)
                 last_error = exc
 
     if best_df is not None:
@@ -848,7 +992,7 @@ def _upload_df_to_gcs_temp(df, bucket: storage.Bucket) -> str:
     return temp_name
 
 
-def _load_gcs_csv_to_staging(bucket: storage.Bucket, temp_name: str) -> None:
+def _load_gcs_csv_to_staging(bucket: storage.Bucket, temp_name: str) -> int:
     client = get_bq_client()
     table_id = _staging_table_id()
     uri = f"gs://{bucket.name}/{temp_name}"
@@ -871,18 +1015,20 @@ def _load_gcs_csv_to_staging(bucket: storage.Bucket, temp_name: str) -> None:
             location=_bq_location(),
         )
         job.result()
-        logger.info("BQ Load Job concluído: job_id=%s tabela=%s", job.job_id, table_id)
+        rows_loaded = int(getattr(job, "output_rows", 0) or 0)
+        logger.info("BQ Load Job concluído: job_id=%s tabela=%s linhas=%d", job.job_id, table_id, rows_loaded)
+        return rows_loaded
 
-    _with_retry(_do_load, operation_name=f"BQ load_table_from_uri → {table_id}")
+    return _with_retry(_do_load, operation_name=f"BQ load_table_from_uri → {table_id}")
 
 
-def _load_dataframe_to_staging_via_gcs(df) -> None:
+def _load_dataframe_to_staging_via_gcs(df, *, already_coerced: bool = False) -> int:
     """Coerção → upload CSV temp no GCS → BQ load job → limpeza garantida."""
     bucket = _get_upload_bucket()
-    df2 = _coerce_df_to_staging_schema(df)
+    df2 = df.copy() if already_coerced else _coerce_df_to_staging_schema(df)
     temp_name = _upload_df_to_gcs_temp(df2, bucket)
     try:
-        _load_gcs_csv_to_staging(bucket, temp_name)
+        return _load_gcs_csv_to_staging(bucket, temp_name)
     finally:
         try:
             bucket.blob(temp_name).delete()
@@ -949,10 +1095,25 @@ def process_gcs_upload(object_name: str) -> Dict[str, Any]:
         logger.exception("Falha ao ler arquivo '%s': %s", object_name, exc)
         raise RuntimeError(f"Não foi possível ler o arquivo: {exc}") from exc
 
-    logger.info("Arquivo lido: object=%s linhas=%d colunas=%d", object_name, len(df), len(df.columns))
+    safe_filename = Path(object_name).name
+    started = perf_counter()
+    df2, report = _prepare_dataframe_for_staging(df, safe_filename, started)
+    logger.info(
+        "Arquivo lido: object=%s tabela=%s linhas_recebidas=%d linhas_importadas=%d "
+        "linhas_rejeitadas=%d colunas_recebidas=%s colunas_esperadas=%s",
+        object_name,
+        _staging_table_id(),
+        report["linhas_recebidas"],
+        report["linhas_importadas"],
+        report["linhas_rejeitadas"],
+        report["colunas_recebidas"],
+        report["colunas_esperadas"],
+    )
 
-    _load_dataframe_to_staging_via_gcs(df)
+    rows_loaded = _load_dataframe_to_staging_via_gcs(df2, already_coerced=True)
     job_id = run_procedure_async()
+    report["linhas_gravadas_staging"] = rows_loaded
+    report["tempo_processamento_s"] = round(perf_counter() - started, 3)
 
     try:
         blob.delete()
@@ -960,7 +1121,12 @@ def process_gcs_upload(object_name: str) -> Dict[str, Any]:
     except Exception as exc:
         logger.warning("Não foi possível remover blob original '%s': %s", object_name, exc)
 
-    return {"message": "Upload processado com sucesso.", "job_id": job_id, "rows_read": len(df)}
+    return {
+        "message": "Upload processado com sucesso.",
+        "job_id": job_id,
+        "rows_read": report["linhas_recebidas"],
+        "report": report,
+    }
 
 
 def get_bq_job_status(job_id: str) -> Dict[str, Any]:

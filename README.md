@@ -56,4 +56,4 @@ CREATE INDEX IF NOT EXISTS idx_leads_data_disparo ON leads (data_disparo);
 ### Configuração BigQuery para importação
 
 - `BQ_LOCATION`: região do dataset BigQuery usada para criar e consultar jobs de importação. O `cloudbuild.yaml` define `US` por padrão para evitar que jobs rodem em `us-central1` e não encontrem tabelas do dataset multi-região. Se o dataset estiver em outra região, ajuste a substituição `_BQ_LOCATION`.
-- `BQ_STAGING_TABLE`: tabela staging consumida pela rotina de ingestão. O `cloudbuild.yaml` define `stg_import_star` por padrão, alinhado ao serviço de ingestão que consulta `painel-universidade.modelo_estrela.stg_import_star`.
+- `BQ_STAGING_TABLE`: tabela staging consumida pela rotina de ingestão. O `cloudbuild.yaml` define `stg_leads_site` por padrão, alinhado ao fluxo oficial CSV → `painel-universidade.modelo_estrela.stg_leads_site` → procedure de importação.

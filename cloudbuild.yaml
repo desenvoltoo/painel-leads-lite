@@ -2,7 +2,7 @@ substitutions:
   _SERVICE_NAME: painel-leads-lite
   _REGION: us-central1
   _BQ_LOCATION: US
-  _BQ_STAGING_TABLE: stg_import_star
+  _BQ_STAGING_TABLE: stg_leads_site
   _IMAGE: us-central1-docker.pkg.dev/$PROJECT_ID/cloud-run-source-deploy/painel-leads-lite/painel-leads-lite
 
 steps:
