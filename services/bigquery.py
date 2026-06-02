@@ -19,6 +19,7 @@ from time import perf_counter
 from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 from google.cloud import bigquery, storage
+from cachetools import TTLCache
 from google.api_core.exceptions import (
     GoogleAPICallError,
     BadRequest,
@@ -46,6 +47,13 @@ BQ_PROCEDURE = os.getenv("BQ_PROCEDURE", "sp_import_star_from_site")
 
 # Painel lê somente essa view
 BQ_VIEW_LEADS = os.getenv("BQ_VIEW_LEADS", "vw_leads_painel_lite")
+
+# Gestão Operacional lê somente as novas views dedicadas ao módulo /gestao
+BQ_VIEW_GESTAO_LEADS_PRIORIZADOS = os.getenv("BQ_VIEW_GESTAO_LEADS_PRIORIZADOS", "vw_leads_priorizados")
+BQ_VIEW_GESTAO_PRODUTIVIDADE = os.getenv("BQ_VIEW_GESTAO_PRODUTIVIDADE", "vw_produtividade_consultores")
+BQ_VIEW_GESTAO_OPERACAO = os.getenv("BQ_VIEW_GESTAO_OPERACAO", "vw_operacao_rpa")
+GESTAO_CACHE_TTL_SECONDS = int(os.getenv("GESTAO_CACHE_TTL_SECONDS", "120"))
+GESTAO_FILA_LIMIT = int(os.getenv("GESTAO_FILA_LIMIT", "500"))
 
 DEFAULT_LIMIT = int(os.getenv("BQ_DEFAULT_LIMIT", "200"))
 MAX_LIMIT = int(os.getenv("BQ_MAX_LIMIT", "2000"))
@@ -149,6 +157,8 @@ UPLOAD_COLUMN_ALIASES = {
 # de corrida em ambientes multi-thread (FastAPI / Gunicorn).
 # ============================================================
 _thread_local = threading.local()
+_gestao_cache = TTLCache(maxsize=16, ttl=GESTAO_CACHE_TTL_SECONDS)
+_gestao_cache_lock = threading.Lock()
 
 
 def _bq_location() -> Optional[str]:
@@ -353,6 +363,61 @@ def _view_columns() -> set[str]:
 
 def _has_view_col(col: str) -> bool:
     return col in _view_columns()
+
+
+def _table_id(view_name: str) -> str:
+    return f"{GCP_PROJECT_ID}.{BQ_DATASET}.{view_name}"
+
+
+def _table_columns(view_name: str) -> set[str]:
+    """Retorna as colunas reais de uma view/tabela arbitrária, com cache por thread."""
+    table_id = _table_id(view_name)
+    cache_key = f"table_columns::{table_id}"
+    cache = getattr(_thread_local, "schema_cache", None)
+    if cache is None:
+        cache = {}
+        _thread_local.schema_cache = cache
+    if cache_key not in cache:
+        table = get_bq_client().get_table(table_id)
+        cache[cache_key] = {field.name for field in table.schema}
+    return cache[cache_key]
+
+
+def _has_table_col(view_name: str, col: str) -> bool:
+    return col in _table_columns(view_name)
+
+
+def _select_table_col(view_name: str, alias_prefix: str, col: str, alias: Optional[str] = None, bq_type: str = "STRING") -> str:
+    """Seleciona coluna de uma view arbitrária se existir; caso contrário devolve NULL tipado."""
+    out_alias = alias or col
+    if _has_table_col(view_name, col):
+        return f"{alias_prefix}.{col} AS {out_alias}"
+    return f"CAST(NULL AS {bq_type}) AS {out_alias}"
+
+
+def _json_safe_value(value: Any) -> Any:
+    if isinstance(value, Decimal):
+        try:
+            return float(value)
+        except (InvalidOperation, ValueError):
+            return str(value)
+    if isinstance(value, (datetime, timedelta)):
+        return str(value)
+    if hasattr(value, "isoformat"):
+        try:
+            return value.isoformat()
+        except Exception:
+            return str(value)
+    return value
+
+
+def _rows_to_json_safe(rows: Any) -> List[Dict[str, Any]]:
+    return [{key: _json_safe_value(value) for key, value in dict(row).items()} for row in rows]
+
+
+def _single_row_to_json_safe(rows: Any) -> Dict[str, Any]:
+    data = _rows_to_json_safe(rows)
+    return data[0] if data else {}
 
 
 def _select_col(col: str, alias: Optional[str] = None, bq_type: str = "STRING") -> str:
@@ -994,6 +1059,188 @@ def _apply_filters(sql: str, filters: Dict[str, Any], params: List[Any]) -> str:
         params.append(bigquery.ScalarQueryParameter("data_fim", "DATE", filters["data_fim"]))
 
     return sql
+
+
+
+# ============================================================
+# GESTÃO OPERACIONAL (/gestao)
+# ============================================================
+def _run_gestao_query(sql: str, params: Optional[List[Any]] = None, operation_name: str = "gestão operacional") -> Any:
+    client = get_bq_client()
+    job_config = bigquery.QueryJobConfig(query_parameters=params or [])
+    job = client.query(sql, job_config=job_config, location=_bq_location())
+    try:
+        result = job.result(timeout=QUERY_TIMEOUT_SECONDS)
+    except FuturesTimeoutError as exc:
+        logger.exception("BQ %s timeout job_id=%s", operation_name, getattr(job, "job_id", None))
+        job.cancel()
+        raise TimeoutError(f"Consulta excedeu timeout de {QUERY_TIMEOUT_SECONDS}s") from exc
+    logger.info("BQ %s concluído job_id=%s", operation_name, getattr(job, "job_id", None))
+    return result
+
+
+def query_gestao_operacao() -> Dict[str, Any]:
+    """Consulta os KPIs consolidados da view modelo_estrela.vw_operacao_rpa."""
+    view_name = BQ_VIEW_GESTAO_OPERACAO
+    select_cols = ",\n      ".join([
+        _select_table_col(view_name, "o", "total_leads", bq_type="INT64"),
+        _select_table_col(view_name, "o", "aguardando_primeiro_contato", bq_type="INT64"),
+        _select_table_col(view_name, "o", "sem_acionamento", bq_type="INT64"),
+        _select_table_col(view_name, "o", "matriculados", bq_type="INT64"),
+        _select_table_col(view_name, "o", "leads_parados", bq_type="INT64"),
+        _select_table_col(view_name, "o", "leads_criticos", bq_type="INT64"),
+        _select_table_col(view_name, "o", "leads_alta_prioridade", bq_type="INT64"),
+        _select_table_col(view_name, "o", "media_horas_primeiro_contato", bq_type="FLOAT64"),
+        _select_table_col(view_name, "o", "score_medio_operacao", bq_type="FLOAT64"),
+    ])
+    sql = f"""
+    SELECT
+      {select_cols}
+    FROM {_tbl(view_name)} o
+    LIMIT 1
+    """
+    return _single_row_to_json_safe(_run_gestao_query(sql, operation_name="query_gestao_operacao"))
+
+
+def query_gestao_produtividade() -> List[Dict[str, Any]]:
+    """Consulta produtividade por consultor em modelo_estrela.vw_produtividade_consultores."""
+    view_name = BQ_VIEW_GESTAO_PRODUTIVIDADE
+    select_cols = ",\n      ".join([
+        _select_table_col(view_name, "p", "consultor_comercial"),
+        _select_table_col(view_name, "p", "total_leads", bq_type="INT64"),
+        _select_table_col(view_name, "p", "leads_nao_disparados", bq_type="INT64"),
+        _select_table_col(view_name, "p", "leads_disparados", bq_type="INT64"),
+        _select_table_col(view_name, "p", "matriculados", bq_type="INT64"),
+        _select_table_col(view_name, "p", "taxa_matricula_pct", bq_type="FLOAT64"),
+        _select_table_col(view_name, "p", "ultima_atividade", bq_type="TIMESTAMP"),
+        _select_table_col(view_name, "p", "score_medio_carteira", bq_type="FLOAT64"),
+        _select_table_col(view_name, "p", "leads_sem_movimento_7_dias", bq_type="INT64"),
+        _select_table_col(view_name, "p", "leads_criticos", bq_type="INT64"),
+        _select_table_col(view_name, "p", "leads_alta_prioridade", bq_type="INT64"),
+    ])
+    sql = f"""
+    SELECT
+      {select_cols}
+    FROM {_tbl(view_name)} p
+    ORDER BY COALESCE(p.matriculados, 0) DESC, COALESCE(p.taxa_matricula_pct, 0) DESC
+    """
+    return _rows_to_json_safe(_run_gestao_query(sql, operation_name="query_gestao_produtividade"))
+
+
+def query_gestao_fila_operacional(limit: int = GESTAO_FILA_LIMIT) -> List[Dict[str, Any]]:
+    """Consulta a fila operacional priorizada em modelo_estrela.vw_leads_priorizados."""
+    view_name = BQ_VIEW_GESTAO_LEADS_PRIORIZADOS
+    limit = max(1, min(int(limit or GESTAO_FILA_LIMIT), 1000))
+    columns = _table_columns(view_name)
+    status_expr = "lp.status" if "status" in columns else "lp.status_inscricao" if "status_inscricao" in columns else "CAST(NULL AS STRING)"
+    polo_expr = "lp.polo" if "polo" in columns else "lp.unidade" if "unidade" in columns else "CAST(NULL AS STRING)"
+    select_cols = ",\n      ".join([
+        _select_table_col(view_name, "lp", "nome"),
+        _select_table_col(view_name, "lp", "celular"),
+        _select_table_col(view_name, "lp", "curso"),
+        f"{polo_expr} AS polo",
+        f"{status_expr} AS status",
+        _select_table_col(view_name, "lp", "consultor_comercial"),
+        _select_table_col(view_name, "lp", "score_prioridade", bq_type="FLOAT64"),
+        _select_table_col(view_name, "lp", "nivel_prioridade"),
+        _select_table_col(view_name, "lp", "etapa_operacional"),
+        _select_table_col(view_name, "lp", "dias_sem_acao", bq_type="INT64"),
+        _select_table_col(view_name, "lp", "nunca_disparado", bq_type="BOOL"),
+        _select_table_col(view_name, "lp", "horas_ate_primeiro_contato", bq_type="FLOAT64"),
+        _select_table_col(view_name, "lp", "flag_matriculado", bq_type="BOOL"),
+        _select_table_col(view_name, "lp", "data_inscricao", bq_type="DATE"),
+        _select_table_col(view_name, "lp", "data_ultima_acao", bq_type="TIMESTAMP"),
+    ])
+    sql = f"""
+    SELECT
+      {select_cols}
+    FROM {_tbl(view_name)} lp
+    ORDER BY COALESCE(lp.score_prioridade, 0) DESC
+    LIMIT @limit
+    """
+    params = [bigquery.ScalarQueryParameter("limit", "INT64", limit)]
+    return _rows_to_json_safe(_run_gestao_query(sql, params=params, operation_name="query_gestao_fila_operacional"))
+
+
+def _gestao_number(value: Any) -> float:
+    if value is None or value == "":
+        return 0
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _gestao_recent_activity_alert_count(produtividade: List[Dict[str, Any]]) -> int:
+    threshold = datetime.utcnow() - timedelta(days=7)
+    count = 0
+    for row in produtividade:
+        raw = row.get("ultima_atividade")
+        if not raw:
+            count += 1
+            continue
+        parsed = None
+        if isinstance(raw, datetime):
+            parsed = raw.replace(tzinfo=None)
+        else:
+            text = str(raw).replace("Z", "+00:00")
+            try:
+                parsed = datetime.fromisoformat(text).replace(tzinfo=None)
+            except ValueError:
+                try:
+                    parsed = datetime.strptime(str(raw)[:10], "%Y-%m-%d")
+                except ValueError:
+                    parsed = None
+        if parsed is None or parsed < threshold:
+            count += 1
+    return count
+
+
+def _build_gestao_alertas(operacao: Dict[str, Any], produtividade: List[Dict[str, Any]]) -> Dict[str, Any]:
+    leads_sem_movimento = sum(_gestao_number(row.get("leads_sem_movimento_7_dias")) for row in produtividade)
+    if leads_sem_movimento == 0:
+        leads_sem_movimento = _gestao_number(operacao.get("leads_parados"))
+
+    return {
+        "leads_sem_acao_7_dias": int(leads_sem_movimento),
+        "leads_sem_disparo": int(_gestao_number(operacao.get("sem_acionamento"))),
+        "leads_criticos": int(_gestao_number(operacao.get("leads_criticos"))),
+        "consultores_sem_atividade_recente": _gestao_recent_activity_alert_count(produtividade),
+    }
+
+
+def query_gestao_dashboard(force_refresh: bool = False) -> Dict[str, Any]:
+    """Retorna todos os dados do módulo /gestao com cache curto para evitar consultas repetidas."""
+    cache_key = f"gestao_dashboard::{GCP_PROJECT_ID}.{BQ_DATASET}::{GESTAO_FILA_LIMIT}"
+    with _gestao_cache_lock:
+        if not force_refresh and cache_key in _gestao_cache:
+            cached = _gestao_cache[cache_key]
+            logger.info("Gestão Operacional servida do cache ttl=%ss", GESTAO_CACHE_TTL_SECONDS)
+            return cached
+
+    started = perf_counter()
+    operacao = query_gestao_operacao()
+    produtividade = query_gestao_produtividade()
+    fila = query_gestao_fila_operacional(limit=GESTAO_FILA_LIMIT)
+    payload = {
+        "operacao": operacao,
+        "produtividade": produtividade,
+        "fila_operacional": fila,
+        "alertas": _build_gestao_alertas(operacao, produtividade),
+        "cache_ttl_seconds": GESTAO_CACHE_TTL_SECONDS,
+        "generated_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+    }
+
+    with _gestao_cache_lock:
+        _gestao_cache[cache_key] = payload
+
+    logger.info(
+        "Gestão Operacional carregada consultores=%s fila=%s elapsed=%.2fs",
+        len(produtividade),
+        len(fila),
+        perf_counter() - started,
+    )
+    return payload
 
 
 # ============================================================
