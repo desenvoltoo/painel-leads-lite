@@ -831,25 +831,38 @@ def _coerce_df_to_staging_schema(df):
 # ============================================================
 # STAGING + PROCEDURE (upload)  AGORA ASSÍNCRONO
 # ============================================================
+def _ensure_staging_table_exists(client: bigquery.Client, table_id: str) -> None:
+    try:
+        client.get_table(table_id)
+    except NotFound as exc:
+        raise RuntimeError(
+            f"Tabela destino não encontrada no BigQuery: {table_id}. "
+            "O upload não cria tabelas automaticamente; crie a tabela de staging antes de enviar arquivos."
+        ) from exc
+    logger.info("Tabela destino encontrada: tabela=%s", table_id)
+
+
 def load_to_staging(df, *, already_coerced: bool = False) -> int:
     client = get_bq_client()
     table_id = _staging_table_id()
+    _ensure_staging_table_exists(client, table_id)
     df2 = df.copy() if already_coerced else _coerce_df_to_staging_schema(df)
 
     def _do_load():
+        logger.info("Upload iniciado: tabela=%s linhas=%d", table_id, len(df2))
         job = client.load_table_from_dataframe(
             df2,
             table_id,
             job_config=bigquery.LoadJobConfig(
-                schema=STAGING_SCHEMA,
-                create_disposition=bigquery.CreateDisposition.CREATE_IF_NEEDED,
-                write_disposition=bigquery.WriteDisposition.WRITE_TRUNCATE,
+                create_disposition=bigquery.CreateDisposition.CREATE_NEVER,
+                write_disposition=bigquery.WriteDisposition.WRITE_APPEND,
             ),
             location=_bq_location(),
         )
         job.result()
         rows_loaded = int(getattr(job, "output_rows", 0) or len(df2))
-        logger.info("BQ load_table_from_dataframe concluído: job_id=%s tabela=%s linhas=%d", job.job_id, table_id, rows_loaded)
+        logger.info("Upload concluído: job_id=%s tabela=%s", job.job_id, table_id)
+        logger.info("Linhas gravadas: tabela=%s linhas=%d", table_id, rows_loaded)
         return rows_loaded
 
     return _with_retry(_do_load, operation_name=f"load_to_staging → {table_id}")
@@ -995,28 +1008,30 @@ def _upload_df_to_gcs_temp(df, bucket: storage.Bucket) -> str:
 def _load_gcs_csv_to_staging(bucket: storage.Bucket, temp_name: str) -> int:
     client = get_bq_client()
     table_id = _staging_table_id()
+    _ensure_staging_table_exists(client, table_id)
     uri = f"gs://{bucket.name}/{temp_name}"
 
     def _do_load():
+        logger.info("Upload iniciado: tabela=%s origem=%s", table_id, uri)
         job = client.load_table_from_uri(
             uri,
             table_id,
             job_config=bigquery.LoadJobConfig(
-                schema=STAGING_SCHEMA,
                 source_format=bigquery.SourceFormat.CSV,
                 skip_leading_rows=1,
                 field_delimiter=",",
                 quote_character='"',
                 allow_quoted_newlines=True,
                 encoding="UTF-8",
-                create_disposition=bigquery.CreateDisposition.CREATE_IF_NEEDED,
-                write_disposition=bigquery.WriteDisposition.WRITE_TRUNCATE,
+                create_disposition=bigquery.CreateDisposition.CREATE_NEVER,
+                write_disposition=bigquery.WriteDisposition.WRITE_APPEND,
             ),
             location=_bq_location(),
         )
         job.result()
         rows_loaded = int(getattr(job, "output_rows", 0) or 0)
-        logger.info("BQ Load Job concluído: job_id=%s tabela=%s linhas=%d", job.job_id, table_id, rows_loaded)
+        logger.info("Upload concluído: job_id=%s tabela=%s", job.job_id, table_id)
+        logger.info("Linhas gravadas: tabela=%s linhas=%d", table_id, rows_loaded)
         return rows_loaded
 
     return _with_retry(_do_load, operation_name=f"BQ load_table_from_uri → {table_id}")
