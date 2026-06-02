@@ -197,9 +197,12 @@ def get_storage_client() -> storage.Client:
     return _thread_local.storage_client
 
 
-def _get_upload_bucket() -> storage.Bucket:
+def _get_upload_bucket() -> Optional[storage.Bucket]:
     if not GCS_UPLOAD_BUCKET:
-        raise RuntimeError("Defina GCS_UPLOAD_BUCKET no ambiente.")
+        logger.info(
+            "GCS_UPLOAD_BUCKET não configurado; upload via GCS desabilitado e frontend deve usar upload direto."
+        )
+        return None
     return get_storage_client().bucket(GCS_UPLOAD_BUCKET)
 
 
@@ -731,8 +734,10 @@ def _build_import_report(
     received_columns: List[str],
     rejection_reasons: Dict[str, int],
     staging_rows: Optional[int] = None,
+    staging_schema: Optional[List[bigquery.SchemaField]] = None,
 ) -> Dict[str, Any]:
     normalized_columns = [_normalize_column_name(c) for c in received_columns]
+    staging_columns = tuple(field.name for field in (staging_schema or STAGING_SCHEMA))
     return {
         "arquivo": filename,
         "tabela_destino": _staging_table_id(),
@@ -744,19 +749,25 @@ def _build_import_report(
         "tempo_processamento_s": round(perf_counter() - started, 3),
         "colunas_recebidas": received_columns,
         "colunas_recebidas_normalizadas": normalized_columns,
-        "colunas_esperadas": list(STAGING_COLUMNS),
+        "colunas_esperadas": list(staging_columns),
         "colunas_obrigatorias": list(REQUIRED_UPLOAD_COLUMNS),
-        "colunas_opcionais": list(STAGING_COLUMNS),
-        "colunas_faltantes": [c for c in STAGING_COLUMNS if c not in normalized_columns],
-        "colunas_extras": [c for c in normalized_columns if c not in STAGING_COLUMNS],
+        "colunas_opcionais": list(staging_columns),
+        "colunas_faltantes": [c for c in staging_columns if c not in normalized_columns],
+        "colunas_extras": [c for c in normalized_columns if c not in staging_columns],
     }
 
 
-def _prepare_dataframe_for_staging(df, filename: str, started: float) -> Tuple[Any, Dict[str, Any]]:
+def _prepare_dataframe_for_staging(
+    df,
+    filename: str,
+    started: float,
+    *,
+    staging_schema: Optional[List[bigquery.SchemaField]] = None,
+) -> Tuple[Any, Dict[str, Any]]:
     """Normaliza o DataFrame, rejeita apenas linhas vazias e monta relatório."""
     received_columns = [str(c) for c in df.columns]
     rows_received = len(df)
-    df2 = _coerce_df_to_staging_schema(df)
+    df2 = _coerce_df_to_staging_schema(df, staging_schema=staging_schema)
     empty_mask = _empty_row_mask(df2)
     rejected_df = df.loc[empty_mask].copy()
     accepted_df = df2.loc[~empty_mask].copy()
@@ -787,11 +798,12 @@ def _prepare_dataframe_for_staging(df, filename: str, started: float) -> Tuple[A
         rows_rejected=len(rejected_df),
         received_columns=received_columns,
         rejection_reasons=rejection_reasons,
+        staging_schema=staging_schema,
     )
     return accepted_df, report
 
 
-def _coerce_df_to_staging_schema(df):
+def _coerce_df_to_staging_schema(df, *, staging_schema: Optional[List[bigquery.SchemaField]] = None):
     """
     Ajusta o DataFrame para bater com o schema da staging.
     Blindado:
@@ -805,7 +817,8 @@ def _coerce_df_to_staging_schema(df):
     df.columns = [_normalize_column_name(c) for c in df.columns]
     df = df.loc[:, ~df.columns.duplicated()]
 
-    expected_cols = [f.name for f in STAGING_SCHEMA]
+    schema = staging_schema or STAGING_SCHEMA
+    expected_cols = [f.name for f in schema]
 
     # cria colunas faltantes
     for c in expected_cols:
@@ -831,31 +844,75 @@ def _coerce_df_to_staging_schema(df):
 # ============================================================
 # STAGING + PROCEDURE (upload)  AGORA ASSÍNCRONO
 # ============================================================
-def _ensure_staging_table_exists(client: bigquery.Client, table_id: str) -> None:
+def _client_identity(client: bigquery.Client) -> str:
+    credentials = getattr(client, "_credentials", None)
+    if not credentials:
+        return "desconhecida"
+    return (
+        getattr(credentials, "service_account_email", None)
+        or getattr(credentials, "signer_email", None)
+        or getattr(credentials, "quota_project_id", None)
+        or credentials.__class__.__name__
+    )
+
+
+def _ensure_staging_table_exists(client: bigquery.Client, table_id: str) -> bigquery.Table:
     try:
-        client.get_table(table_id)
+        table = client.get_table(table_id)
     except NotFound as exc:
         raise RuntimeError(
             f"Tabela destino não encontrada no BigQuery: {table_id}. "
             "O upload não cria tabelas automaticamente; crie a tabela de staging antes de enviar arquivos."
         ) from exc
-    logger.info("Tabela destino encontrada: tabela=%s", table_id)
+
+    schema_summary = [f"{field.name}:{field.field_type}:{field.mode}" for field in table.schema]
+    logger.info(
+        "Tabela de staging encontrada antes do load: projeto=%s dataset=%s tabela=%s "
+        "service_account=%s schema_encontrado=%s total_colunas=%d",
+        GCP_PROJECT_ID,
+        BQ_DATASET,
+        table_id,
+        _client_identity(client),
+        schema_summary,
+        len(table.schema),
+    )
+    return table
 
 
-def load_to_staging(df, *, already_coerced: bool = False) -> int:
+def load_to_staging(
+    df,
+    *,
+    already_coerced: bool = False,
+    staging_table: Optional[bigquery.Table] = None,
+) -> int:
     client = get_bq_client()
     table_id = _staging_table_id()
-    _ensure_staging_table_exists(client, table_id)
-    df2 = df.copy() if already_coerced else _coerce_df_to_staging_schema(df)
+    table = staging_table or _ensure_staging_table_exists(client, table_id)
+    df2 = df.copy() if already_coerced else _coerce_df_to_staging_schema(df, staging_schema=table.schema)
+    write_disposition = bigquery.WriteDisposition.WRITE_APPEND
+    create_disposition = bigquery.CreateDisposition.CREATE_NEVER
 
     def _do_load():
-        logger.info("Upload iniciado: tabela=%s linhas=%d", table_id, len(df2))
+        logger.info(
+            "Upload iniciado: service_account=%s dataset=%s tabela=%s linhas=%d "
+            "write_disposition=%s create_disposition=%s schema_colunas=%d autodetect=%s",
+            _client_identity(client),
+            BQ_DATASET,
+            table_id,
+            len(df2),
+            write_disposition,
+            create_disposition,
+            len(table.schema),
+            False,
+        )
         job = client.load_table_from_dataframe(
             df2,
             table_id,
             job_config=bigquery.LoadJobConfig(
-                create_disposition=bigquery.CreateDisposition.CREATE_NEVER,
-                write_disposition=bigquery.WriteDisposition.WRITE_APPEND,
+                schema=table.schema,
+                autodetect=False,
+                create_disposition=create_disposition,
+                write_disposition=write_disposition,
             ),
             location=_bq_location(),
         )
@@ -889,7 +946,9 @@ def process_upload_dataframe(df, filename: str = "upload") -> Dict[str, Any]:
     4) retorna job_id + relatório de importação
     """
     started = perf_counter()
-    df2, report = _prepare_dataframe_for_staging(df, filename, started)
+    client = get_bq_client()
+    staging_table = _ensure_staging_table_exists(client, _staging_table_id())
+    df2, report = _prepare_dataframe_for_staging(df, filename, started, staging_schema=staging_table.schema)
     logger.info(
         "Upload recebido: arquivo=%s tabela=%s linhas_recebidas=%d linhas_importadas=%d "
         "linhas_rejeitadas=%d colunas_recebidas=%s colunas_esperadas=%s",
@@ -901,7 +960,7 @@ def process_upload_dataframe(df, filename: str = "upload") -> Dict[str, Any]:
         report["colunas_recebidas"],
         report["colunas_esperadas"],
     )
-    rows_loaded = load_to_staging(df2, already_coerced=True)
+    rows_loaded = load_to_staging(df2, already_coerced=True, staging_table=staging_table)
     job_id = run_procedure_async()
     report["linhas_gravadas_staging"] = rows_loaded
     report["tempo_processamento_s"] = round(perf_counter() - started, 3)
@@ -1008,11 +1067,24 @@ def _upload_df_to_gcs_temp(df, bucket: storage.Bucket) -> str:
 def _load_gcs_csv_to_staging(bucket: storage.Bucket, temp_name: str) -> int:
     client = get_bq_client()
     table_id = _staging_table_id()
-    _ensure_staging_table_exists(client, table_id)
+    table = _ensure_staging_table_exists(client, table_id)
     uri = f"gs://{bucket.name}/{temp_name}"
+    write_disposition = bigquery.WriteDisposition.WRITE_APPEND
+    create_disposition = bigquery.CreateDisposition.CREATE_NEVER
 
     def _do_load():
-        logger.info("Upload iniciado: tabela=%s origem=%s", table_id, uri)
+        logger.info(
+            "Upload iniciado: service_account=%s dataset=%s tabela=%s origem=%s "
+            "write_disposition=%s create_disposition=%s schema_colunas=%d autodetect=%s",
+            _client_identity(client),
+            BQ_DATASET,
+            table_id,
+            uri,
+            write_disposition,
+            create_disposition,
+            len(table.schema),
+            False,
+        )
         job = client.load_table_from_uri(
             uri,
             table_id,
@@ -1023,8 +1095,10 @@ def _load_gcs_csv_to_staging(bucket: storage.Bucket, temp_name: str) -> int:
                 quote_character='"',
                 allow_quoted_newlines=True,
                 encoding="UTF-8",
-                create_disposition=bigquery.CreateDisposition.CREATE_NEVER,
-                write_disposition=bigquery.WriteDisposition.WRITE_APPEND,
+                schema=table.schema,
+                autodetect=False,
+                create_disposition=create_disposition,
+                write_disposition=write_disposition,
             ),
             location=_bq_location(),
         )
@@ -1040,7 +1114,12 @@ def _load_gcs_csv_to_staging(bucket: storage.Bucket, temp_name: str) -> int:
 def _load_dataframe_to_staging_via_gcs(df, *, already_coerced: bool = False) -> int:
     """Coerção → upload CSV temp no GCS → BQ load job → limpeza garantida."""
     bucket = _get_upload_bucket()
-    df2 = df.copy() if already_coerced else _coerce_df_to_staging_schema(df)
+    if bucket is None:
+        logger.info("Bucket GCS ausente no processamento; usando load direto para staging.")
+        return load_to_staging(df, already_coerced=already_coerced)
+    client = get_bq_client()
+    staging_table = _ensure_staging_table_exists(client, _staging_table_id())
+    df2 = df.copy() if already_coerced else _coerce_df_to_staging_schema(df, staging_schema=staging_table.schema)
     temp_name = _upload_df_to_gcs_temp(df2, bucket)
     try:
         return _load_gcs_csv_to_staging(bucket, temp_name)
@@ -1058,6 +1137,11 @@ def generate_gcs_signed_upload(filename: str, source_tag: str = "manual") -> Dic
     Expiração controlada por GCS_SIGNED_URL_EXPIRY_MINUTES (padrão 30).
     """
     bucket = _get_upload_bucket()
+    if bucket is None:
+        logger.info(
+            "Signed URL não gerada porque GCS_UPLOAD_BUCKET não está configurado; retornando modo upload direto."
+        )
+        return {"mode": "direct"}
     safe_name = Path(filename).name
     safe_source = (source_tag or "manual").replace("/", "_").replace("\\", "_")
     object_name = f"{GCS_UPLOAD_PREFIX.strip('/')}/{safe_source}/{uuid.uuid4().hex}_{safe_name}"
@@ -1079,6 +1163,7 @@ def generate_gcs_signed_upload(filename: str, source_tag: str = "manual") -> Dic
 
     logger.info("Signed URL gerado: object=%s expiry_min=%d", object_name, GCS_SIGNED_URL_EXPIRY_MINUTES)
     return {
+        "mode": "gcs",
         "upload_url": signed_url,
         "object_name": object_name,
         "bucket": bucket.name,
@@ -1096,6 +1181,8 @@ def process_gcs_upload(object_name: str) -> Dict[str, Any]:
       5. Remove o blob original (melhor esforço)
     """
     bucket = _get_upload_bucket()
+    if bucket is None:
+        raise ValueError("Processamento via GCS indisponível sem GCS_UPLOAD_BUCKET; use upload direto.")
     blob = bucket.blob(object_name)
 
     if not blob.exists():
@@ -1112,7 +1199,11 @@ def process_gcs_upload(object_name: str) -> Dict[str, Any]:
 
     safe_filename = Path(object_name).name
     started = perf_counter()
-    df2, report = _prepare_dataframe_for_staging(df, safe_filename, started)
+    client = get_bq_client()
+    staging_table = _ensure_staging_table_exists(client, _staging_table_id())
+    df2, report = _prepare_dataframe_for_staging(
+        df, safe_filename, started, staging_schema=staging_table.schema
+    )
     logger.info(
         "Arquivo lido: object=%s tabela=%s linhas_recebidas=%d linhas_importadas=%d "
         "linhas_rejeitadas=%d colunas_recebidas=%s colunas_esperadas=%s",
