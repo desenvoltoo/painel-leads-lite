@@ -28,6 +28,7 @@ from services.bigquery import (
     query_leads_count,
     query_options,
     query_gestao_dashboard,
+    query_gestao_exportar_prioritarios,
     process_gcs_upload,
     process_upload_dataframe,
     generate_gcs_signed_upload,
@@ -423,6 +424,25 @@ def create_app() -> Flask:
             ui_version=ui_version,
             current_user=getattr(g, "current_user", None),
         )
+
+    @app.get("/gestao/exportar-prioritarios")
+    def gestao_exportar_prioritarios():
+        try:
+            limit = int(request.args.get("limit", "500"))
+        except (TypeError, ValueError):
+            limit = 500
+        filename, content, rows_count = query_gestao_exportar_prioritarios(limit=limit)
+        logger.info(
+            "Gestão exportação prioritários solicitada user=%s limit=%s rows=%s filename=%s",
+            getattr(g, "current_user", None),
+            limit,
+            rows_count,
+            filename,
+        )
+        response = make_response(content)
+        response.headers["Content-Type"] = "text/csv; charset=utf-8-sig"
+        response.headers["Content-Disposition"] = f"attachment; filename={filename}"
+        return response
 
     @app.get("/gestao")
     def gestao():

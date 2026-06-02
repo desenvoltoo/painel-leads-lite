@@ -66,66 +66,90 @@
     <section class="kpi-grid mb-4" aria-label="KPIs operacionais">
       <article class="kpi-card kpi-primary"><span>Total Leads</span><strong data-kpi="total_leads">0</strong><small>Carteira operacional</small></article>
       <article class="kpi-card"><span>Nunca Trabalhados</span><strong data-kpi="nunca_trabalhados">0</strong><small>Leads sem status definido</small></article>
-      <article class="kpi-card kpi-warning"><span>Sem Acionamento</span><strong data-kpi="sem_acionamento">0</strong><small>Leads nunca disparados</small></article>
-      <article class="kpi-card"><span>Leads Parados</span><strong data-kpi="leads_parados">0</strong><small>Sem evolução operacional</small></article>
-      <article class="kpi-card kpi-danger"><span>Leads Críticos</span><strong data-kpi="leads_criticos">0</strong><small>Prioridade máxima</small></article>
-      <article class="kpi-card kpi-info"><span>Alta Prioridade</span><strong data-kpi="leads_alta_prioridade">0</strong><small>Fila estratégica</small></article>
+      <article class="kpi-card"><span>Leads em Carteira</span><strong data-kpi="leads_em_carteira">0</strong><small>Status preenchido sem matrícula</small></article>
+      <article class="kpi-card kpi-danger"><span>Leads Críticos</span><strong data-kpi="leads_criticos">0</strong><small>Status sem definição</small></article>
       <article class="kpi-card kpi-success"><span>Matriculados</span><strong data-kpi="matriculados">0</strong><small>Conversões confirmadas</small></article>
-      <article class="kpi-card"><span>Tempo Médio Primeiro Contato</span><strong data-kpi="media_horas_primeiro_contato">0h</strong><small>Horas até primeira ação</small></article>
+      <article class="kpi-card kpi-info"><span>Taxa Geral de Conversão</span><strong data-kpi="taxa_geral_conversao" data-format="pct">0%</strong><small>MAT / Total Leads</small></article>
+      <article class="kpi-card"><span>Tempo Médio Primeiro Contato</span><strong data-kpi="media_horas_primeiro_contato" data-format="hours">0h</strong><small>Horas até primeira ação</small></article>
+      <article class="kpi-card"><span>Tempo Médio Matrícula</span><strong data-kpi="media_horas_ate_matricula" data-format="hours">0h</strong><small>Horas até matrícula</small></article>
+    </section>
+
+    <section class="data-panel mb-4" aria-label="Exportação prioritária">
+      <div class="panel-header flex-wrap gap-2">
+        <div><h2>Exportação da Fila Prioritária</h2><span>Somente leads com status IS NULL, ordenados por score e inscrição</span></div>
+        <form class="export-form" method="get" action="/gestao/exportar-prioritarios">
+          <a class="btn btn-primary" href="/gestao/exportar-prioritarios?limit=500">Baixar Próximos 500 Leads</a>
+          <select class="form-select" name="limit" aria-label="Quantidade para exportar">
+            <option value="100">100 Leads</option>
+            <option value="500" selected>500 Leads</option>
+            <option value="1000">1000 Leads</option>
+            <option value="5000">5000 Leads</option>
+          </select>
+          <button class="btn btn-outline-primary" type="submit">Exportar</button>
+        </form>
+      </div>
+    </section>
+
+    <section class="data-panel mb-4" aria-label="Centro de comando">
+      <div class="panel-header"><h2>Centro de Comando</h2><span>Indicadores executivos da operação comercial</span></div>
+      <div class="command-grid">
+        <div><span>Total Leads</span><strong data-command="total_leads">0</strong></div>
+        <div><span>Nunca Trabalhados</span><strong data-command="nunca_trabalhados">0</strong></div>
+        <div><span>Leads em Carteira</span><strong data-command="leads_em_carteira">0</strong></div>
+        <div><span>Matriculados</span><strong data-command="matriculados">0</strong></div>
+        <div><span>Taxa Geral de Conversão</span><strong data-command="taxa_geral_conversao" data-format="pct">0%</strong></div>
+        <div><span>Tempo Médio Primeiro Contato</span><strong data-command="media_horas_primeiro_contato" data-format="hours">0h</strong></div>
+        <div><span>Tempo Médio Matrícula</span><strong data-command="media_horas_ate_matricula" data-format="hours">0h</strong></div>
+        <div><span>Consultor Campeão do Dia</span><strong data-command="consultor_campeao_dia">-</strong></div>
+        <div><span>Origem com Melhor Conversão</span><strong data-command="origem_melhor_conversao">-</strong></div>
+        <div><span>Curso com Melhor Conversão</span><strong data-command="curso_melhor_conversao">-</strong></div>
+      </div>
     </section>
 
     <section class="row g-3 mb-4" aria-label="Alertas operacionais">
-      <div class="col-12"><h2 class="section-title">Alertas</h2></div>
-      <div class="col-12 col-md-6 col-xl-3"><div class="alert-card"><span>Leads sem ação há mais de 7 dias</span><strong data-alert="leads_sem_acao_7_dias">0</strong></div></div>
-      <div class="col-12 col-md-6 col-xl-3"><div class="alert-card warning"><span>Leads sem disparo</span><strong data-alert="leads_sem_disparo">0</strong></div></div>
-      <div class="col-12 col-md-6 col-xl-3"><div class="alert-card danger"><span>Leads críticos</span><strong data-alert="leads_criticos">0</strong></div></div>
-      <div class="col-12 col-md-6 col-xl-3"><div class="alert-card dark"><span>Consultores sem atividade recente</span><strong data-alert="consultores_sem_atividade_recente">0</strong></div></div>
+      <div class="col-12"><h2 class="section-title">Alertas Operacionais</h2></div>
+      <div class="col-12 col-md-6 col-xl"><div class="alert-card danger"><span>Leads sem status</span><strong data-alert="leads_sem_status">0</strong></div></div>
+      <div class="col-12 col-md-6 col-xl"><div class="alert-card warning"><span>Leads parados há mais de 7 dias</span><strong data-alert="leads_sem_acao_7_dias">0</strong></div></div>
+      <div class="col-12 col-md-6 col-xl"><div class="alert-card dark"><span>Consultores sem atividade</span><strong data-alert="consultores_sem_atividade_recente">0</strong></div></div>
+      <div class="col-12 col-md-6 col-xl"><div class="alert-card"><span>Carteira acima da média</span><strong data-alert="consultores_carteira_acima_media">0</strong></div></div>
+      <div class="col-12 col-md-6 col-xl"><div class="alert-card"><span>Melhor conversão</span><strong data-alert="consultores_melhor_conversao">0</strong></div></div>
     </section>
 
     <section class="row g-4 mb-4" aria-label="Rankings de consultores">
-      <div class="col-12 col-xl-6">
-        <div class="data-panel h-100">
-          <div class="panel-header"><h2>Top Consultores por Matrículas</h2><span>Ranking horizontal</span></div>
-          <div class="chart-box"><canvas id="chartMatriculas"></canvas></div>
-        </div>
-      </div>
-      <div class="col-12 col-xl-6">
-        <div class="data-panel h-100">
-          <div class="panel-header"><h2>Top Consultores por Taxa de Conversão</h2><span>Taxa de matrícula</span></div>
-          <div class="chart-box"><canvas id="chartConversao"></canvas></div>
-        </div>
-      </div>
+      <div class="col-12 col-xl-6"><div class="data-panel h-100"><div class="panel-header"><h2>Top Consultores por Matrículas</h2><span>Ranking horizontal</span></div><div class="chart-box"><canvas id="chartMatriculas"></canvas></div></div></div>
+      <div class="col-12 col-xl-6"><div class="data-panel h-100"><div class="panel-header"><h2>Top Consultores por Taxa de Conversão</h2><span>MAT / Total Leads</span></div><div class="chart-box"><canvas id="chartConversao"></canvas></div></div></div>
+    </section>
+
+    <section class="row g-4 mb-4" aria-label="Top origens e cursos">
+      <div class="col-12 col-xl-6"><div class="data-panel h-100"><div class="panel-header"><h2>Top Origens por Volume</h2><span>Total de leads</span></div><div class="chart-box"><canvas id="chartOrigensVolume"></canvas></div></div></div>
+      <div class="col-12 col-xl-6"><div class="data-panel h-100"><div class="panel-header"><h2>Top Origens por Conversão</h2><span>MAT / Total Leads</span></div><div class="chart-box"><canvas id="chartOrigensConversao"></canvas></div></div></div>
+      <div class="col-12 col-xl-6"><div class="data-panel h-100"><div class="panel-header"><h2>Top Cursos por Volume</h2><span>Total de leads</span></div><div class="chart-box"><canvas id="chartCursosVolume"></canvas></div></div></div>
+      <div class="col-12 col-xl-6"><div class="data-panel h-100"><div class="panel-header"><h2>Top Cursos por Conversão</h2><span>MAT / Total Leads</span></div><div class="chart-box"><canvas id="chartCursosConversao"></canvas></div></div></div>
     </section>
 
     <section class="data-panel mb-4">
-      <div class="panel-header flex-wrap gap-2">
-        <div><h2>Produtividade dos Consultores</h2><span>Ordenação, busca e exportação CSV habilitadas</span></div>
-      </div>
-      <div class="table-responsive">
-        <table id="produtividadeTable" class="table table-hover table-striped align-middle nowrap w-100">
-          <thead>
-            <tr>
-              <th>Consultor</th><th>Total Leads</th><th>Não Disparados</th><th>Disparados</th><th>Matriculados</th><th>Taxa Matrícula</th><th>Última Atividade</th><th>Score Médio</th><th>Leads Críticos</th><th>Leads Parados</th>
-            </tr>
-          </thead>
-          <tbody></tbody>
-        </table>
-      </div>
+      <div class="panel-header flex-wrap gap-2"><div><h2>Produtividade dos Consultores</h2><span>Conversão calculada por Matriculados / Total Leads</span></div></div>
+      <div class="table-responsive"><table id="produtividadeTable" class="table table-hover table-striped align-middle nowrap w-100"><thead><tr>
+        <th>Consultor</th><th>Total Leads</th><th>Tempo médio até matrícula</th><th>Tempo médio até primeiro contato</th><th>Leads sem status</th><th>Leads em carteira</th><th>MAT</th><th>Taxa de conversão</th><th>Última atividade</th><th>Score médio</th>
+      </tr></thead><tbody></tbody></table></div>
     </section>
 
-    <section class="data-panel">
-      <div class="panel-header flex-wrap gap-2">
-        <div><h2>Fila Operacional</h2><span>Top 500 registros ordenados por Score Prioridade DESC</span></div>
-      </div>
-      <div class="table-responsive">
-        <table id="filaTable" class="table table-hover table-striped align-middle nowrap w-100">
-          <thead>
-            <tr>
-              <th>Nome</th><th>Celular</th><th>Curso</th><th>Polo</th><th>Status</th><th>Consultor</th><th>Score Prioridade</th><th>Nível Prioridade</th><th>Etapa Operacional</th><th>Dias Sem Ação</th>
-            </tr>
-          </thead>
-          <tbody></tbody>
-        </table>
+    <section class="data-panel mb-4">
+      <div class="panel-header flex-wrap gap-2"><div><h2>Fila Operacional Inteligente</h2><span>Top registros ordenados por Score Prioridade DESC</span></div></div>
+      <div class="table-responsive"><table id="filaTable" class="table table-hover table-striped align-middle nowrap w-100"><thead><tr>
+        <th>Nome</th><th>Telefone</th><th>Curso</th><th>Polo</th><th>Origem</th><th>Status</th><th>Consultor</th><th>Score</th><th>Prioridade</th><th>Dias sem ação</th>
+      </tr></thead><tbody></tbody></table></div>
+    </section>
+
+    <section class="data-panel mb-4" aria-label="Qualidade dos dados">
+      <div class="panel-header"><h2>Qualidade dos Dados</h2><span>Inconsistências para saneamento operacional</span></div>
+      <div class="quality-grid">
+        <div><span>Leads sem telefone</span><strong data-quality="leads_sem_telefone">0</strong></div>
+        <div><span>Leads sem email</span><strong data-quality="leads_sem_email">0</strong></div>
+        <div><span>Duplicados por CPF</span><strong data-quality="leads_duplicados_cpf">0</strong></div>
+        <div><span>Duplicados por telefone</span><strong data-quality="leads_duplicados_telefone">0</strong></div>
+        <div><span>Leads sem origem</span><strong data-quality="leads_sem_origem">0</strong></div>
+        <div><span>Leads sem curso</span><strong data-quality="leads_sem_curso">0</strong></div>
       </div>
     </section>
     {% endif %}
