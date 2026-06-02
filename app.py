@@ -27,6 +27,7 @@ from services.bigquery import (
     query_leads_iter,
     query_leads_count,
     query_options,
+    query_gestao_dashboard,
     process_gcs_upload,
     process_upload_dataframe,
     generate_gcs_signed_upload,
@@ -422,6 +423,39 @@ def create_app() -> Flask:
             ui_version=ui_version,
             current_user=getattr(g, "current_user", None),
         )
+
+    @app.get("/gestao")
+    def gestao():
+        try:
+            force_refresh = str(request.args.get("refresh") or "").lower() in ("1", "true", "yes", "sim")
+            gestao_data = query_gestao_dashboard(force_refresh=force_refresh)
+            return render_template(
+                "gestao.html",
+                asset_version=asset_version,
+                ui_version=ui_version,
+                current_user=getattr(g, "current_user", None),
+                gestao_data=gestao_data,
+            )
+        except TimeoutError as e:
+            logger.exception("Timeout ao carregar Gestão Operacional: %s", e)
+            return render_template(
+                "gestao.html",
+                asset_version=asset_version,
+                ui_version=ui_version,
+                current_user=getattr(g, "current_user", None),
+                gestao_data=None,
+                gestao_error="Timeout ao carregar Gestão Operacional. Tente novamente em alguns instantes.",
+            ), 504
+        except Exception as e:
+            logger.exception("Erro ao carregar Gestão Operacional: %s", e)
+            return render_template(
+                "gestao.html",
+                asset_version=asset_version,
+                ui_version=ui_version,
+                current_user=getattr(g, "current_user", None),
+                gestao_data=None,
+                gestao_error="Erro ao carregar dados da Gestão Operacional.",
+            ), 500
 
     @app.get("/login")
     def login():
