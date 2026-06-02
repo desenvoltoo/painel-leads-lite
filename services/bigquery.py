@@ -1065,16 +1065,46 @@ def _apply_filters(sql: str, filters: Dict[str, Any], params: List[Any]) -> str:
 # ============================================================
 # GESTÃO OPERACIONAL (/gestao)
 # ============================================================
+def _format_bq_params_for_log(params: Optional[List[Any]]) -> List[Dict[str, Any]]:
+    formatted = []
+    for param in params or []:
+        formatted.append({
+            "name": getattr(param, "name", None),
+            "type": getattr(param, "type_", None),
+            "value": getattr(param, "value", None),
+        })
+    return formatted
+
+
 def _run_gestao_query(sql: str, params: Optional[List[Any]] = None, operation_name: str = "gestão operacional") -> Any:
     client = get_bq_client()
     job_config = bigquery.QueryJobConfig(query_parameters=params or [])
-    job = client.query(sql, job_config=job_config, location=_bq_location())
+    job = None
     try:
+        logger.info(
+            "BQ %s iniciando location=%s params=%s sql=%s",
+            operation_name,
+            _bq_location(),
+            _format_bq_params_for_log(params),
+            sql,
+        )
+        job = client.query(sql, job_config=job_config, location=_bq_location())
         result = job.result(timeout=QUERY_TIMEOUT_SECONDS)
     except FuturesTimeoutError as exc:
-        logger.exception("BQ %s timeout job_id=%s", operation_name, getattr(job, "job_id", None))
-        job.cancel()
+        logger.exception("BQ %s timeout job_id=%s sql=%s", operation_name, getattr(job, "job_id", None), sql)
+        if job is not None:
+            job.cancel()
         raise TimeoutError(f"Consulta excedeu timeout de {QUERY_TIMEOUT_SECONDS}s") from exc
+    except Exception:
+        logger.exception(
+            "BQ %s falhou job_id=%s errors=%s params=%s sql=%s",
+            operation_name,
+            getattr(job, "job_id", None),
+            getattr(job, "errors", None),
+            _format_bq_params_for_log(params),
+            sql,
+        )
+        raise
     logger.info("BQ %s concluído job_id=%s", operation_name, getattr(job, "job_id", None))
     return result
 
@@ -1118,11 +1148,15 @@ def query_gestao_produtividade() -> List[Dict[str, Any]]:
         _select_table_col(view_name, "p", "leads_criticos", bq_type="INT64"),
         _select_table_col(view_name, "p", "leads_alta_prioridade", bq_type="INT64"),
     ])
+    logger.info("Colunas disponíveis em %s: %s", _table_id(view_name), sorted(_table_columns(view_name)))
     sql = f"""
-    SELECT
-      {select_cols}
-    FROM {_tbl(view_name)} p
-    ORDER BY COALESCE(p.matriculados, 0) DESC, COALESCE(p.taxa_matricula_pct, 0) DESC
+    SELECT *
+    FROM (
+      SELECT
+        {select_cols}
+      FROM {_tbl(view_name)} p
+    )
+    ORDER BY COALESCE(matriculados, 0) DESC, COALESCE(taxa_matricula_pct, 0) DESC
     """
     return _rows_to_json_safe(_run_gestao_query(sql, operation_name="query_gestao_produtividade"))
 
@@ -1151,11 +1185,15 @@ def query_gestao_fila_operacional(limit: int = GESTAO_FILA_LIMIT) -> List[Dict[s
         _select_table_col(view_name, "lp", "data_inscricao", bq_type="DATE"),
         _select_table_col(view_name, "lp", "data_ultima_acao", bq_type="TIMESTAMP"),
     ])
+    logger.info("Colunas disponíveis em %s: %s", _table_id(view_name), sorted(columns))
     sql = f"""
-    SELECT
-      {select_cols}
-    FROM {_tbl(view_name)} lp
-    ORDER BY COALESCE(lp.score_prioridade, 0) DESC
+    SELECT *
+    FROM (
+      SELECT
+        {select_cols}
+      FROM {_tbl(view_name)} lp
+    )
+    ORDER BY COALESCE(score_prioridade, 0) DESC
     LIMIT @limit
     """
     params = [bigquery.ScalarQueryParameter("limit", "INT64", limit)]
@@ -1219,9 +1257,15 @@ def query_gestao_dashboard(force_refresh: bool = False) -> Dict[str, Any]:
             return cached
 
     started = perf_counter()
+    logger.info("Gestão Operacional iniciando query_gestao_operacao")
     operacao = query_gestao_operacao()
+    logger.info("Gestão Operacional query_gestao_operacao concluída")
+    logger.info("Gestão Operacional iniciando query_gestao_produtividade")
     produtividade = query_gestao_produtividade()
+    logger.info("Gestão Operacional query_gestao_produtividade concluída rows=%s", len(produtividade))
+    logger.info("Gestão Operacional iniciando query_gestao_fila_operacional limit=%s", GESTAO_FILA_LIMIT)
     fila = query_gestao_fila_operacional(limit=GESTAO_FILA_LIMIT)
+    logger.info("Gestão Operacional query_gestao_fila_operacional concluída rows=%s", len(fila))
     payload = {
         "operacao": operacao,
         "produtividade": produtividade,
