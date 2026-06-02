@@ -753,6 +753,10 @@ async function uploadDirectToServer(file, source) {
 async function uploadViaSignedUrl(file, source) {
   const signed = await apiGet("/api/upload-url", { filename: file.name, source });
   const info = signed?.data;
+  if (info?.mode === "direct") {
+    console.info("Upload via GCS indisponível; usando envio direto informado pela API.");
+    return uploadDirectToServer(file, source);
+  }
   if (!info?.upload_url || !info?.object_name) {
     throw new Error("URL assinada não retornada pela API.");
   }
