@@ -12,7 +12,7 @@ import re
 import unicodedata
 from concurrent.futures import TimeoutError as FuturesTimeoutError
 from decimal import Decimal, InvalidOperation
-from datetime import timedelta, datetime
+from datetime import timedelta, datetime, timezone
 from io import BytesIO, StringIO
 from pathlib import Path
 from time import perf_counter
@@ -673,6 +673,7 @@ STAGING_SCHEMA: List[bigquery.SchemaField] = [
     bigquery.SchemaField("canal", "STRING", mode="NULLABLE"),
     bigquery.SchemaField("acao_comercial", "STRING", mode="NULLABLE"),
     bigquery.SchemaField("consultor_comercial", "STRING", mode="NULLABLE"),
+    bigquery.SchemaField("dt_upload", "TIMESTAMP", mode="NULLABLE"),
 ]
 
 STAGING_COLUMNS = tuple(field.name for field in STAGING_SCHEMA)
@@ -689,8 +690,14 @@ def _json_dump_record(record: Dict[str, Any]) -> str:
 
 
 def _empty_row_mask(df) -> Any:
-    """Retorna máscara booleana para linhas totalmente vazias após normalização."""
-    return df.apply(lambda row: all(value is None or str(value).strip() == "" for value in row), axis=1)
+    """Retorna máscara booleana para linhas vazias, ignorando metadados do backend."""
+    content_columns = [col for col in df.columns if col != "dt_upload"]
+    if not content_columns:
+        return df.apply(lambda _row: True, axis=1)
+    return df[content_columns].apply(
+        lambda row: all(value is None or str(value).strip() == "" for value in row),
+        axis=1,
+    )
 
 
 def _rejection_log_table_id() -> str:
@@ -744,6 +751,7 @@ def _build_import_report(
         "tabela_destino": _staging_table_id(),
         "linhas_recebidas": rows_received,
         "linhas_importadas": rows_imported,
+        "linhas_processadas": rows_imported,
         "linhas_rejeitadas": rows_rejected,
         "linhas_gravadas_staging": staging_rows if staging_rows is not None else rows_imported,
         "motivos_rejeicoes": rejection_reasons,
@@ -764,11 +772,13 @@ def _prepare_dataframe_for_staging(
     started: float,
     *,
     staging_schema: Optional[List[bigquery.SchemaField]] = None,
+    upload_ts: Optional[datetime] = None,
 ) -> Tuple[Any, Dict[str, Any]]:
-    """Normaliza o DataFrame, rejeita apenas linhas vazias e monta relatório."""
+    """Normaliza o DataFrame, injeta dt_upload UTC, rejeita linhas vazias e monta relatório."""
+    upload_ts = upload_ts or datetime.now(timezone.utc)
     received_columns = [str(c) for c in df.columns]
     rows_received = len(df)
-    df2 = _coerce_df_to_staging_schema(df, staging_schema=staging_schema)
+    df2 = _coerce_df_to_staging_schema(df, staging_schema=staging_schema, upload_ts=upload_ts)
     empty_mask = _empty_row_mask(df2)
     rejected_df = df.loc[empty_mask].copy()
     accepted_df = df2.loc[~empty_mask].copy()
@@ -804,11 +814,17 @@ def _prepare_dataframe_for_staging(
     return accepted_df, report
 
 
-def _coerce_df_to_staging_schema(df, *, staging_schema: Optional[List[bigquery.SchemaField]] = None):
+def _coerce_df_to_staging_schema(
+    df,
+    *,
+    staging_schema: Optional[List[bigquery.SchemaField]] = None,
+    upload_ts: Optional[datetime] = None,
+):
     """
     Ajusta o DataFrame para bater com o schema da staging.
     Blindado:
-    - manda tudo como STRING;
+    - manda colunas da planilha como STRING para a SP parsear formatos brasileiros;
+    - injeta dt_upload com timestamp UTC do backend;
     - protege CPF/celular de .0 / float / notação científica;
     - mantém ordem do schema.
     """
@@ -819,6 +835,7 @@ def _coerce_df_to_staging_schema(df, *, staging_schema: Optional[List[bigquery.S
     df = df.loc[:, ~df.columns.duplicated()]
 
     schema = staging_schema or STAGING_SCHEMA
+    schema_by_name = {field.name: field for field in schema}
     expected_cols = [f.name for f in schema]
 
     # cria colunas faltantes
@@ -826,11 +843,28 @@ def _coerce_df_to_staging_schema(df, *, staging_schema: Optional[List[bigquery.S
         if c not in df.columns:
             df[c] = None
 
+    if "dt_upload" in expected_cols:
+        # A planilha não precisa trazer dt_upload; o backend sempre sobrescreve
+        # com o mesmo instante UTC para todas as linhas desta carga.
+        df["dt_upload"] = upload_ts or datetime.now(timezone.utc)
+
     # remove extras e mantém ordem
     df = df[expected_cols]
 
     for col in expected_cols:
-        if col in PHONEISH_COLUMNS:
+        if col == "dt_upload":
+            field_type = schema_by_name[col].field_type.upper()
+            if field_type == "TIMESTAMP":
+                df[col] = df[col].map(lambda value: value if value is not None else upload_ts)
+            elif field_type == "DATETIME":
+                df[col] = df[col].map(
+                    lambda value: (value if value is not None else upload_ts).replace(tzinfo=None)
+                )
+            else:
+                df[col] = df[col].map(
+                    lambda value: value.isoformat() if hasattr(value, "isoformat") else _normalize_generic_string(value)
+                )
+        elif col in PHONEISH_COLUMNS:
             df[col] = df[col].map(_normalize_phoneish_value)
         else:
             df[col] = df[col].map(_normalize_generic_string)
@@ -867,6 +901,11 @@ def _ensure_staging_table_exists(client: bigquery.Client, table_id: str) -> bigq
         ) from exc
 
     schema_summary = [f"{field.name}:{field.field_type}:{field.mode}" for field in table.schema]
+    if "dt_upload" not in {field.name for field in table.schema}:
+        raise RuntimeError(
+            f"Schema da staging incompatível: {table_id} não possui a coluna obrigatória dt_upload. "
+            "A procedure sp_import_star_from_site depende dessa coluna para selecionar a carga mais recente."
+        )
     logger.info(
         "Tabela de staging encontrada antes do load: projeto=%s dataset=%s tabela=%s "
         "service_account=%s schema_encontrado=%s total_colunas=%d",
@@ -890,14 +929,14 @@ def load_to_staging(
     table_id = _staging_table_id()
     table = staging_table or _ensure_staging_table_exists(client, table_id)
     df2 = df.copy() if already_coerced else _coerce_df_to_staging_schema(df, staging_schema=table.schema)
-    write_disposition = bigquery.WriteDisposition.WRITE_APPEND
+    write_disposition = bigquery.WriteDisposition.WRITE_TRUNCATE
     create_disposition = bigquery.CreateDisposition.CREATE_NEVER
 
     def _do_load():
         credentials, project = google.auth.default()
         credential_service_account = getattr(credentials, "service_account_email", "N/A")
         location = _bq_location()
-        logger.error(
+        logger.info(
             "BQ DEBUG | project=%s | cred_type=%s | service_account=%s | table=%s | "
             "dataset=%s | location=%s | write_disposition=%s | create_disposition=%s",
             project,
@@ -911,7 +950,7 @@ def load_to_staging(
         )
 
         table_check = client.get_table(table_id)
-        logger.error(
+        logger.info(
             "BQ TABLE CHECK | project=%s | dataset=%s | table_id=%s | columns=%d | table_location=%s",
             table_check.project,
             table_check.dataset_id,
@@ -957,7 +996,7 @@ def load_to_staging(
 
         rows_loaded = int(getattr(job, "output_rows", 0) or len(df2))
         logger.info("Upload concluído: job_id=%s tabela=%s", job.job_id, table_id)
-        logger.info("Linhas gravadas: tabela=%s linhas=%d", table_id, rows_loaded)
+        logger.info("Linhas gravadas na staging: tabela=%s linhas=%d", table_id, rows_loaded)
         return rows_loaded
 
     return _with_retry(_do_load, operation_name=f"load_to_staging → {table_id}")
@@ -1001,7 +1040,19 @@ def process_upload_dataframe(df, filename: str = "upload") -> Dict[str, Any]:
     rows_loaded = load_to_staging(df2, already_coerced=True, staging_table=staging_table)
     job_id = run_procedure_async()
     report["linhas_gravadas_staging"] = rows_loaded
+    report["procedure_job_id"] = job_id
     report["tempo_processamento_s"] = round(perf_counter() - started, 3)
+    logger.info(
+        "Processamento BigQuery iniciado: arquivo=%s staging=%s linhas_recebidas=%d "
+        "linhas_processadas=%d linhas_gravadas_staging=%d procedure=%s procedure_job_id=%s",
+        filename,
+        _staging_table_id(),
+        report["linhas_recebidas"],
+        report["linhas_processadas"],
+        rows_loaded,
+        BQ_PROCEDURE,
+        job_id,
+    )
     return {
         "message": "Upload recebido. Processamento iniciado no BigQuery.",
         "job_id": job_id,
@@ -1107,7 +1158,7 @@ def _load_gcs_csv_to_staging(bucket: storage.Bucket, temp_name: str) -> int:
     table_id = _staging_table_id()
     table = _ensure_staging_table_exists(client, table_id)
     uri = f"gs://{bucket.name}/{temp_name}"
-    write_disposition = bigquery.WriteDisposition.WRITE_APPEND
+    write_disposition = bigquery.WriteDisposition.WRITE_TRUNCATE
     create_disposition = bigquery.CreateDisposition.CREATE_NEVER
 
     def _do_load():
@@ -1143,7 +1194,7 @@ def _load_gcs_csv_to_staging(bucket: storage.Bucket, temp_name: str) -> int:
         job.result()
         rows_loaded = int(getattr(job, "output_rows", 0) or 0)
         logger.info("Upload concluído: job_id=%s tabela=%s", job.job_id, table_id)
-        logger.info("Linhas gravadas: tabela=%s linhas=%d", table_id, rows_loaded)
+        logger.info("Linhas gravadas na staging: tabela=%s linhas=%d", table_id, rows_loaded)
         return rows_loaded
 
     return _with_retry(_do_load, operation_name=f"BQ load_table_from_uri → {table_id}")
@@ -1257,7 +1308,19 @@ def process_gcs_upload(object_name: str) -> Dict[str, Any]:
     rows_loaded = _load_dataframe_to_staging_via_gcs(df2, already_coerced=True)
     job_id = run_procedure_async()
     report["linhas_gravadas_staging"] = rows_loaded
+    report["procedure_job_id"] = job_id
     report["tempo_processamento_s"] = round(perf_counter() - started, 3)
+    logger.info(
+        "Processamento BigQuery iniciado: object=%s staging=%s linhas_recebidas=%d "
+        "linhas_processadas=%d linhas_gravadas_staging=%d procedure=%s procedure_job_id=%s",
+        object_name,
+        _staging_table_id(),
+        report["linhas_recebidas"],
+        report["linhas_processadas"],
+        rows_loaded,
+        BQ_PROCEDURE,
+        job_id,
+    )
 
     try:
         blob.delete()
