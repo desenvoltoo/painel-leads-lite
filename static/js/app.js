@@ -43,11 +43,29 @@ function setStatus(msg, type = "ok") {
   el.className = `status-line ${type === "err" ? "error" : "status-ok"}`;
 }
 
-function setUploadStatus(msg, type = "ok") {
+function setUploadStatus(msg, type = "info") {
   const el = $("#uploadStatus");
   if (!el) return;
+  const normalized = type === "err" ? "danger" : type === "ok" ? "success" : type;
   el.textContent = msg;
-  el.className = type === "err" ? "error" : "muted";
+  el.className = `alert alert-${normalized}`;
+}
+
+function setUploadButtonLoading(loading) {
+  const btn = $("#btnUpload");
+  if (!btn) return;
+  btn.disabled = loading;
+  btn.classList.toggle("is-loading", loading);
+  btn.textContent = loading ? "Importando planilha..." : "Importar planilha";
+}
+
+function updateSelectedFileName() {
+  const input = $("#uploadFile");
+  const label = $("#uploadFileName");
+  if (!input || !label) return;
+  const file = input.files?.[0];
+  label.textContent = file ? file.name : "Nenhum arquivo selecionado";
+  if (file) setUploadStatus("Arquivo recebido. Pronto para enviar para staging.", "info");
 }
 
 
@@ -103,6 +121,21 @@ function fmtBool(b) {
   if (b === true || String(b).toLowerCase() === "true") return "Sim";
   if (b === false || String(b).toLowerCase() === "false") return "Não";
   return "-";
+}
+
+function badgeClass(value, kind = "status") {
+  const text = String(value || "").toLowerCase();
+  if (kind === "matriculado") return text === "sim" ? "badge-success" : text === "não" ? "badge-warning" : "badge-neutral";
+  if (/matric|conclu|aprov|ativo|convert|sucesso/.test(text)) return "badge-success";
+  if (/erro|cancel|reprov|falh|perdid|inv[aá]lid/.test(text)) return "badge-danger";
+  if (/pend|aguard|aten|andamento|process/.test(text)) return "badge-warning";
+  if (/lead|novo|contato/.test(text)) return "badge-info";
+  return "badge-neutral";
+}
+
+function tableCell(value, extraClass = "") {
+  const safe = escapeHtml(value || "-");
+  return `<span class="${extraClass}" title="${safe}">${safe}</span>`;
 }
 
 /* =========================
@@ -699,12 +732,12 @@ function renderTable(rows, { loading = false } = {}) {
   if (!tbody) return;
 
   if (loading) {
-    tbody.innerHTML = `<tr><td colspan="${TABLE_COLS}" class="table-feedback">Carregando dados...</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="${TABLE_COLS}" class="table-feedback"><div class="spinner" aria-hidden="true"></div><strong>Carregando dados...</strong><span>Consultando leads consolidados no BigQuery.</span></td></tr>`;
     return;
   }
 
   if (!rows || rows.length === 0) {
-    tbody.innerHTML = `<tr><td colspan="${TABLE_COLS}" class="table-feedback">Nenhum dado encontrado</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="${TABLE_COLS}" class="table-feedback"><strong>Nenhum lead encontrado</strong><span>Ajuste os filtros ou limpe a busca rápida para ampliar a consulta.</span></td></tr>`;
     return;
   }
 
@@ -712,19 +745,19 @@ function renderTable(rows, { loading = false } = {}) {
     .map(
       (r) => `
     <tr>
-      <td>${escapeHtml(fmtDate(r.data_inscricao))}</td>
-      <td>${escapeHtml(r.nome || "-")}</td>
-      <td>${escapeHtml(r.cpf || "-")}</td>
-      <td>${escapeHtml(r.celular || "-")}</td>
-      <td>${escapeHtml(r.origem || "-")}</td>
-      <td>${escapeHtml(r.polo || "-")}</td>
-      <td>${escapeHtml(r.curso || "-")}</td>
-      <td>${escapeHtml(r.modalidade || "-")}</td>
-      <td><span class="badge">${escapeHtml(r.status || "LEAD")}</span></td>
-      <td>${escapeHtml(fmtBool(r.flag_matriculado))}</td>
-      <td>${escapeHtml(r.consultor_disparo || "-")}</td>
-      <td>${escapeHtml(r.campanha || "-")}</td>
-      <td>${escapeHtml(r.canal || "-")}</td>
+      <td>${tableCell(fmtDate(r.data_inscricao), "cell-muted")}</td>
+      <td>${tableCell(r.nome || "-", "lead-name")}</td>
+      <td>${tableCell(r.cpf || "-", "cell-muted")}</td>
+      <td>${tableCell(r.celular || "-", "cell-muted")}</td>
+      <td>${tableCell(r.origem || "-")}</td>
+      <td>${tableCell(r.polo || "-")}</td>
+      <td>${tableCell(r.curso || "-")}</td>
+      <td>${tableCell(r.modalidade || "-")}</td>
+      <td><span class="badge ${badgeClass(r.status || "LEAD")}" title="${escapeHtml(r.status || "LEAD")}">${escapeHtml(r.status || "LEAD")}</span></td>
+      <td><span class="badge ${badgeClass(fmtBool(r.flag_matriculado), "matriculado")}">${escapeHtml(fmtBool(r.flag_matriculado))}</span></td>
+      <td>${tableCell(r.consultor_disparo || "-")}</td>
+      <td>${tableCell(r.campanha || "-")}</td>
+      <td>${tableCell(r.canal || "-")}</td>
     </tr>
   `
     )
@@ -763,23 +796,23 @@ async function pollUploadStatus(jobId) {
         throw new Error(data?.error?.message || JSON.stringify(data.error) || "Procedure falhou.");
       }
 
-      setUploadStatus("Processamento concluído. Atualizando painel...", "ok");
+      setUploadStatus("Processamento concluído com sucesso. Atualizando painel...", "ok");
       await loadOptions();
       await loadLeadsAndKpis();
       return;
     }
 
-    setUploadStatus(`Processando no BigQuery... (${attempt}/${maxAttempts})`, "ok");
+    setUploadStatus(`Dados carregados. Executando procedure no BigQuery... (${attempt}/${maxAttempts})`, "info");
     await new Promise((resolve) => setTimeout(resolve, 1500));
   }
 
-  setUploadStatus("Upload iniciado. O processamento ainda está em andamento; atualize o painel em instantes.", "ok");
+  setUploadStatus("Upload iniciado. O processamento ainda está em andamento; atualize o painel em instantes.", "warning");
 }
 
 async function doUpload() {
   const fileInput = $("#uploadFile");
   if (!fileInput || !fileInput.files || fileInput.files.length === 0) {
-    setUploadStatus("Selecione um arquivo primeiro.", "err");
+    setUploadStatus("Selecione um arquivo .xlsx, .xls ou .csv antes de importar.", "err");
     return;
   }
 
@@ -787,22 +820,26 @@ async function doUpload() {
   const source = ($("#uploadSource")?.value || "").trim();
   const validExtension = /\.(csv|xlsx|xls)$/i.test(file.name || "");
   if (!validExtension) {
-    setUploadStatus("Formato inválido. Envie CSV ou XLSX.", "err");
+    setUploadStatus("Formato inválido. Envie uma planilha CSV, XLS ou XLSX.", "err");
     return;
   }
 
-  setUploadStatus("Preparando upload...", "ok");
+  setUploadStatus("Arquivo recebido. Enviando para staging...", "info");
+  setUploadButtonLoading(true);
 
   try {
     const resp = await uploadDirectToServer(file, source);
     const jobId = resp?.job_id;
     const reportText = formatImportReport(resp?.report);
-    setUploadStatus(reportText || resp?.message || "Upload recebido. Processando...", "ok");
+    const jobText = jobId ? ` Job BigQuery: ${jobId}.` : "";
+    setUploadStatus(reportText ? `${reportText}${jobText}` : (resp?.message || `Arquivo enviado com sucesso. Processamento iniciado.${jobText}`), "success");
     await pollUploadStatus(jobId);
-    if (reportText) setUploadStatus(`Processamento concluído. ${reportText}`, "ok");
+    if (reportText) setUploadStatus(`Processamento concluído com sucesso. ${jobText} ${reportText}`, "success");
   } catch (e) {
     console.error(e);
-    setUploadStatus(e.message || "Erro no upload.", "err");
+    setUploadStatus(e.message || "Não foi possível concluir a importação. Verifique o arquivo ou tente novamente.", "err");
+  } finally {
+    setUploadButtonLoading(false);
   }
 }
 
@@ -953,11 +990,41 @@ function clearFilters() {
   loadLeadsAndKpis();
 }
 
+
+function initUploadInteractions() {
+  const input = $("#uploadFile");
+  const dropzone = $("#uploadDropzone");
+  input?.addEventListener("change", updateSelectedFileName);
+  if (!dropzone || !input) return;
+
+  ["dragenter", "dragover"].forEach((eventName) => {
+    dropzone.addEventListener(eventName, (event) => {
+      event.preventDefault();
+      dropzone.classList.add("is-dragover");
+    });
+  });
+
+  ["dragleave", "drop"].forEach((eventName) => {
+    dropzone.addEventListener(eventName, (event) => {
+      event.preventDefault();
+      dropzone.classList.remove("is-dragover");
+    });
+  });
+
+  dropzone.addEventListener("drop", (event) => {
+    const files = event.dataTransfer?.files;
+    if (!files || files.length === 0) return;
+    input.files = files;
+    updateSelectedFileName();
+  });
+}
+
 /* =========================
    Eventos
 ========================= */
 document.addEventListener("DOMContentLoaded", async () => {
   initMultiSelects();
+  initUploadInteractions();
 
   refreshSavedFiltersSelect();
 
