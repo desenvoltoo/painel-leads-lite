@@ -5,7 +5,6 @@ import os
 import logging
 import threading
 import time
-import uuid
 import csv
 import json
 import re
@@ -19,7 +18,7 @@ from time import perf_counter
 from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 import google.auth
-from google.cloud import bigquery, storage
+from google.cloud import bigquery
 from cachetools import TTLCache
 from google.api_core.exceptions import (
     GoogleAPICallError,
@@ -61,13 +60,6 @@ MAX_LIMIT = int(os.getenv("BQ_MAX_LIMIT", "2000"))
 EXPORT_MAX_ROWS = int(os.getenv("BQ_EXPORT_MAX_ROWS", "50000"))
 QUERY_TIMEOUT_SECONDS = int(os.getenv("BQ_QUERY_TIMEOUT_SECONDS", "180"))
 
-# GCS upload
-GCS_UPLOAD_BUCKET = os.getenv("GCS_UPLOAD_BUCKET", "")
-GCS_UPLOAD_PREFIX = os.getenv("GCS_UPLOAD_PREFIX", "uploads")
-GCS_SIGNED_URL_EXPIRY_MINUTES = int(os.getenv("GCS_SIGNED_URL_EXPIRY_MINUTES", "30"))
-MAX_FILE_SIZE_BYTES = int(os.getenv("GCS_MAX_FILE_SIZE_BYTES", str(50 * 1024 * 1024)))
-ALLOWED_EXTENSIONS = {".csv", ".xlsx", ".xls"}
-
 # Retry
 RETRY_MAX_ATTEMPTS = int(os.getenv("BQ_RETRY_MAX_ATTEMPTS", "3"))
 RETRY_BASE_DELAY_S = float(os.getenv("BQ_RETRY_BASE_DELAY_S", "2.0"))
@@ -77,6 +69,10 @@ RETRY_MAX_DELAY_S = float(os.getenv("BQ_RETRY_MAX_DELAY_S", "30.0"))
 PHONEISH_COLUMNS = {"cpf", "celular"}
 
 EMPTY_FILTER_TOKEN = "__EMPTY__"
+
+
+def _current_upload_timestamp() -> datetime:
+    return datetime.now(timezone.utc)
 
 
 def _split_empty_filter(values: List[str]) -> Tuple[List[str], bool]:
@@ -191,20 +187,6 @@ def get_bq_client() -> bigquery.Client:
         _thread_local.bq_client = bigquery.Client(project=GCP_PROJECT_ID)
     return _thread_local.bq_client
 
-
-def get_storage_client() -> storage.Client:
-    if not getattr(_thread_local, "storage_client", None):
-        _thread_local.storage_client = storage.Client(project=GCP_PROJECT_ID)
-    return _thread_local.storage_client
-
-
-def _get_upload_bucket() -> Optional[storage.Bucket]:
-    if not GCS_UPLOAD_BUCKET:
-        logger.info(
-            "GCS_UPLOAD_BUCKET não configurado; upload via GCS desabilitado e frontend deve usar upload direto."
-        )
-        return None
-    return get_storage_client().bucket(GCS_UPLOAD_BUCKET)
 
 
 def _export_jobs_table_id() -> str:
@@ -743,6 +725,7 @@ def _build_import_report(
     rejection_reasons: Dict[str, int],
     staging_rows: Optional[int] = None,
     staging_schema: Optional[List[bigquery.SchemaField]] = None,
+    upload_ts: Optional[datetime] = None,
 ) -> Dict[str, Any]:
     normalized_columns = [_normalize_column_name(c) for c in received_columns]
     staging_columns = tuple(field.name for field in (staging_schema or STAGING_SCHEMA))
@@ -763,6 +746,8 @@ def _build_import_report(
         "colunas_opcionais": list(staging_columns),
         "colunas_faltantes": [c for c in staging_columns if c not in normalized_columns],
         "colunas_extras": [c for c in normalized_columns if c not in staging_columns],
+        "dt_upload": upload_ts.isoformat() if upload_ts else None,
+        "observacao_staging": "A staging é temporária e será limpa pela procedure ao final do processamento.",
     }
 
 
@@ -775,7 +760,7 @@ def _prepare_dataframe_for_staging(
     upload_ts: Optional[datetime] = None,
 ) -> Tuple[Any, Dict[str, Any]]:
     """Normaliza o DataFrame, injeta dt_upload UTC, rejeita linhas vazias e monta relatório."""
-    upload_ts = upload_ts or datetime.now(timezone.utc)
+    upload_ts = upload_ts or _current_upload_timestamp()
     received_columns = [str(c) for c in df.columns]
     rows_received = len(df)
     df2 = _coerce_df_to_staging_schema(df, staging_schema=staging_schema, upload_ts=upload_ts)
@@ -810,6 +795,7 @@ def _prepare_dataframe_for_staging(
         received_columns=received_columns,
         rejection_reasons=rejection_reasons,
         staging_schema=staging_schema,
+        upload_ts=upload_ts,
     )
     return accepted_df, report
 
@@ -822,54 +808,36 @@ def _coerce_df_to_staging_schema(
 ):
     """
     Ajusta o DataFrame para bater com o schema da staging.
-    Blindado:
-    - manda colunas da planilha como STRING para a SP parsear formatos brasileiros;
-    - injeta dt_upload com timestamp UTC do backend;
-    - protege CPF/celular de .0 / float / notação científica;
-    - mantém ordem do schema.
+    Datas brasileiras permanecem como STRING para a procedure fazer o parse.
     """
-    import pandas as pd
+    upload_ts = upload_ts or _current_upload_timestamp()
 
     df = df.copy()
     df.columns = [_normalize_column_name(c) for c in df.columns]
     df = df.loc[:, ~df.columns.duplicated()]
 
     schema = staging_schema or STAGING_SCHEMA
-    schema_by_name = {field.name: field for field in schema}
     expected_cols = [f.name for f in schema]
 
-    # cria colunas faltantes
-    for c in expected_cols:
-        if c not in df.columns:
-            df[c] = None
+    for col in expected_cols:
+        if col not in df.columns:
+            df[col] = None
 
+    # Sempre definido pelo backend; qualquer valor enviado na planilha é ignorado.
     if "dt_upload" in expected_cols:
-        # A planilha não precisa trazer dt_upload; o backend sempre sobrescreve
-        # com o mesmo instante UTC para todas as linhas desta carga.
-        df["dt_upload"] = upload_ts or datetime.now(timezone.utc)
+        df["dt_upload"] = upload_ts
+        logger.info("dt_upload aplicado pelo backend: linhas=%d dt_upload=%s", len(df), upload_ts)
 
-    # remove extras e mantém ordem
     df = df[expected_cols]
 
     for col in expected_cols:
         if col == "dt_upload":
-            field_type = schema_by_name[col].field_type.upper()
-            if field_type == "TIMESTAMP":
-                df[col] = df[col].map(lambda value: value if value is not None else upload_ts)
-            elif field_type == "DATETIME":
-                df[col] = df[col].map(
-                    lambda value: (value if value is not None else upload_ts).replace(tzinfo=None)
-                )
-            else:
-                df[col] = df[col].map(
-                    lambda value: value.isoformat() if hasattr(value, "isoformat") else _normalize_generic_string(value)
-                )
-        elif col in PHONEISH_COLUMNS:
+            continue
+        if col in PHONEISH_COLUMNS:
             df[col] = df[col].map(_normalize_phoneish_value)
         else:
             df[col] = df[col].map(_normalize_generic_string)
 
-    # reforça dtype object/string-like
     for col in expected_cols:
         df[col] = df[col].astype("object")
 
@@ -891,6 +859,16 @@ def _client_identity(client: bigquery.Client) -> str:
     )
 
 
+def _assert_staging_has_dt_upload(table: bigquery.Table) -> None:
+    if not any(field.name == "dt_upload" and field.field_type.upper() == "TIMESTAMP" for field in table.schema):
+        raise RuntimeError(
+            "A tabela stg_leads_site não possui a coluna dt_upload TIMESTAMP. "
+            "Execute no BigQuery: "
+            "ALTER TABLE `painel-universidade.modelo_estrela.stg_leads_site` "
+            "ADD COLUMN IF NOT EXISTS dt_upload TIMESTAMP;"
+        )
+
+
 def _ensure_staging_table_exists(client: bigquery.Client, table_id: str) -> bigquery.Table:
     try:
         table = client.get_table(table_id)
@@ -901,11 +879,7 @@ def _ensure_staging_table_exists(client: bigquery.Client, table_id: str) -> bigq
         ) from exc
 
     schema_summary = [f"{field.name}:{field.field_type}:{field.mode}" for field in table.schema]
-    if "dt_upload" not in {field.name for field in table.schema}:
-        raise RuntimeError(
-            f"Schema da staging incompatível: {table_id} não possui a coluna obrigatória dt_upload. "
-            "A procedure sp_import_star_from_site depende dessa coluna para selecionar a carga mais recente."
-        )
+    _assert_staging_has_dt_upload(table)
     logger.info(
         "Tabela de staging encontrada antes do load: projeto=%s dataset=%s tabela=%s "
         "service_account=%s schema_encontrado=%s total_colunas=%d",
@@ -960,16 +934,11 @@ def load_to_staging(
         )
 
         logger.info(
-            "Upload iniciado: service_account=%s dataset=%s tabela=%s linhas=%d "
-            "write_disposition=%s create_disposition=%s schema_colunas=%d autodetect=%s",
-            _client_identity(client),
-            BQ_DATASET,
+            "Upload iniciado BigQuery: tabela=%s linhas=%d write_disposition=%s create_disposition=%s",
             table_id,
             len(df2),
             write_disposition,
             create_disposition,
-            len(table.schema),
-            False,
         )
         try:
             job = client.load_table_from_dataframe(
@@ -994,9 +963,17 @@ def load_to_staging(
             )
             raise
 
-        rows_loaded = int(getattr(job, "output_rows", 0) or len(df2))
-        logger.info("Upload concluído: job_id=%s tabela=%s", job.job_id, table_id)
-        logger.info("Linhas gravadas na staging: tabela=%s linhas=%d", table_id, rows_loaded)
+        rows_loaded = int(getattr(job, "output_rows", 0) or 0)
+        logger.info(
+            "Upload concluído BigQuery: job_id=%s tabela=%s linhas_gravadas_staging=%d",
+            job.job_id,
+            table_id,
+            rows_loaded,
+        )
+        logger.info(
+            "A staging é temporária e será limpa pela procedure ao final do processamento: tabela=%s",
+            table_id,
+        )
         return rows_loaded
 
     return _with_retry(_do_load, operation_name=f"load_to_staging → {table_id}")
@@ -1009,7 +986,17 @@ def run_procedure_async() -> str:
 
     def _do_call():
         job = client.query(sql, location=_bq_location())
-        logger.info("Procedure disparada: job_id=%s location=%s procedure=%s", job.job_id, job.location, BQ_PROCEDURE)
+        logger.info(
+            "Procedure disparada: procedure=%s job_id=%s location=%s",
+            BQ_PROCEDURE,
+            job.job_id,
+            job.location,
+        )
+        logger.info(
+            "Procedure iniciada em modo assíncrono: procedure=%s job_id=%s. Consulte /api/upload/status.",
+            BQ_PROCEDURE,
+            job.job_id,
+        )
         return job.job_id
 
     return _with_retry(_do_call, operation_name=f"run_procedure_async ({BQ_PROCEDURE})")
@@ -1027,15 +1014,11 @@ def process_upload_dataframe(df, filename: str = "upload") -> Dict[str, Any]:
     staging_table = _ensure_staging_table_exists(client, _staging_table_id())
     df2, report = _prepare_dataframe_for_staging(df, filename, started, staging_schema=staging_table.schema)
     logger.info(
-        "Upload recebido: arquivo=%s tabela=%s linhas_recebidas=%d linhas_importadas=%d "
-        "linhas_rejeitadas=%d colunas_recebidas=%s colunas_esperadas=%s",
+        "DataFrame preparado para staging: arquivo=%s linhas=%d colunas=%d dt_upload=%s",
         filename,
-        _staging_table_id(),
-        report["linhas_recebidas"],
-        report["linhas_importadas"],
-        report["linhas_rejeitadas"],
-        report["colunas_recebidas"],
-        report["colunas_esperadas"],
+        len(df2),
+        len(df2.columns),
+        df2["dt_upload"].iloc[0] if "dt_upload" in df2.columns and len(df2) else None,
     )
     rows_loaded = load_to_staging(df2, already_coerced=True, staging_table=staging_table)
     job_id = run_procedure_async()
@@ -1054,282 +1037,7 @@ def process_upload_dataframe(df, filename: str = "upload") -> Dict[str, Any]:
         job_id,
     )
     return {
-        "message": "Upload recebido. Processamento iniciado no BigQuery.",
-        "job_id": job_id,
-        "rows_read": report["linhas_recebidas"],
-        "report": report,
-    }
-
-
-# ============================================================
-# SIGNED URL + PROCESS GCS UPLOAD
-# ============================================================
-def _detect_csv_encoding(raw_bytes: bytes) -> str:
-    try:
-        import chardet
-        detected = chardet.detect(raw_bytes)
-        encoding = (detected.get("encoding") or "utf-8").lower()
-        confidence = detected.get("confidence") or 0
-        if confidence >= 0.7:
-            return "utf-8" if encoding == "ascii" else encoding
-    except ImportError:
-        pass
-    return "utf-8"
-
-
-def _csv_blob_to_dataframe(blob) -> Any:
-    import pandas as pd
-
-    payload = blob.download_as_bytes()
-    detected_enc = _detect_csv_encoding(payload)
-    encodings_to_try: List[str] = []
-    for enc in (detected_enc, "utf-8-sig", "utf-8", "latin-1"):
-        if enc not in encodings_to_try:
-            encodings_to_try.append(enc)
-
-    last_error: Optional[Exception] = None
-    best_df = None
-    for sep in (";", ","):
-        for enc in encodings_to_try:
-            try:
-                df = pd.read_csv(BytesIO(payload), sep=sep, encoding=enc, dtype=str)
-                if len(df.columns) > 1:
-                    return df
-                if best_df is None:
-                    best_df = df
-            except Exception as exc:
-                logger.debug("Tentativa de leitura CSV via GCS falhou: sep=%s encoding=%s", sep, enc, exc_info=True)
-                last_error = exc
-
-    if best_df is not None:
-        return best_df
-    raise RuntimeError("Não foi possível ler o CSV enviado via GCS.") from last_error
-
-
-def _xlsx_blob_to_dataframe(blob) -> Any:
-    from openpyxl import load_workbook
-    import pandas as pd
-
-    payload = blob.download_as_bytes()
-    wb = load_workbook(BytesIO(payload), data_only=True, read_only=True)
-    ws = wb.active
-    rows = ws.iter_rows(values_only=True)
-    try:
-        first_row = next(rows)
-    except StopIteration:
-        raise RuntimeError("Arquivo XLSX está vazio.")
-    headers = [str(c).strip() if c is not None else "" for c in first_row]
-    if not any(headers):
-        raise RuntimeError("Cabeçalho do XLSX não encontrado.")
-    data = [{headers[i]: r[i] if i < len(r) else None for i in range(len(headers))} for r in rows]
-    return pd.DataFrame(data)
-
-
-def _validate_blob(blob: storage.Blob, object_name: str) -> None:
-    """Valida extensão e tamanho antes de qualquer processamento pesado."""
-    blob.reload()
-    suffix = Path(object_name).suffix.lower()
-    if suffix not in ALLOWED_EXTENSIONS:
-        raise ValueError(f"Extensão '{suffix}' não suportada. Use: {', '.join(sorted(ALLOWED_EXTENSIONS))}.")
-    size = blob.size or 0
-    if size == 0:
-        raise ValueError("O arquivo enviado está vazio.")
-    if size > MAX_FILE_SIZE_BYTES:
-        mb = MAX_FILE_SIZE_BYTES // (1024 * 1024)
-        raise ValueError(f"O arquivo excede o limite de {mb} MB ({size / (1024 * 1024):.1f} MB recebidos).")
-    logger.info("Arquivo validado: object=%s ext=%s size_bytes=%d", object_name, suffix, size)
-
-
-def _upload_df_to_gcs_temp(df, bucket: storage.Bucket) -> str:
-    temp_name = f"{GCS_UPLOAD_PREFIX.strip('/')}/tmp/staging_{uuid.uuid4().hex}.csv"
-    blob = bucket.blob(temp_name)
-    csv_bytes = df.to_csv(index=False, na_rep="", quoting=csv.QUOTE_MINIMAL).encode("utf-8")
-
-    def _do_upload():
-        blob.upload_from_string(csv_bytes, content_type="text/csv")
-
-    _with_retry(_do_upload, operation_name="upload CSV temporário para GCS")
-    logger.info("CSV temporário enviado: gs://%s/%s (%d bytes)", bucket.name, temp_name, len(csv_bytes))
-    return temp_name
-
-
-def _load_gcs_csv_to_staging(bucket: storage.Bucket, temp_name: str) -> int:
-    client = get_bq_client()
-    table_id = _staging_table_id()
-    table = _ensure_staging_table_exists(client, table_id)
-    uri = f"gs://{bucket.name}/{temp_name}"
-    write_disposition = bigquery.WriteDisposition.WRITE_TRUNCATE
-    create_disposition = bigquery.CreateDisposition.CREATE_NEVER
-
-    def _do_load():
-        logger.info(
-            "Upload iniciado: service_account=%s dataset=%s tabela=%s origem=%s "
-            "write_disposition=%s create_disposition=%s schema_colunas=%d autodetect=%s",
-            _client_identity(client),
-            BQ_DATASET,
-            table_id,
-            uri,
-            write_disposition,
-            create_disposition,
-            len(table.schema),
-            False,
-        )
-        job = client.load_table_from_uri(
-            uri,
-            table_id,
-            job_config=bigquery.LoadJobConfig(
-                source_format=bigquery.SourceFormat.CSV,
-                skip_leading_rows=1,
-                field_delimiter=",",
-                quote_character='"',
-                allow_quoted_newlines=True,
-                encoding="UTF-8",
-                schema=table.schema,
-                autodetect=False,
-                create_disposition=create_disposition,
-                write_disposition=write_disposition,
-            ),
-            location=_bq_location(),
-        )
-        job.result()
-        rows_loaded = int(getattr(job, "output_rows", 0) or 0)
-        logger.info("Upload concluído: job_id=%s tabela=%s", job.job_id, table_id)
-        logger.info("Linhas gravadas na staging: tabela=%s linhas=%d", table_id, rows_loaded)
-        return rows_loaded
-
-    return _with_retry(_do_load, operation_name=f"BQ load_table_from_uri → {table_id}")
-
-
-def _load_dataframe_to_staging_via_gcs(df, *, already_coerced: bool = False) -> int:
-    """Coerção → upload CSV temp no GCS → BQ load job → limpeza garantida."""
-    bucket = _get_upload_bucket()
-    if bucket is None:
-        logger.info("Bucket GCS ausente no processamento; usando load direto para staging.")
-        return load_to_staging(df, already_coerced=already_coerced)
-    client = get_bq_client()
-    staging_table = _ensure_staging_table_exists(client, _staging_table_id())
-    df2 = df.copy() if already_coerced else _coerce_df_to_staging_schema(df, staging_schema=staging_table.schema)
-    temp_name = _upload_df_to_gcs_temp(df2, bucket)
-    try:
-        return _load_gcs_csv_to_staging(bucket, temp_name)
-    finally:
-        try:
-            bucket.blob(temp_name).delete()
-            logger.debug("Blob temporário removido: %s", temp_name)
-        except Exception as exc:
-            logger.warning("Falha ao remover blob temporário '%s': %s", temp_name, exc)
-
-
-def generate_gcs_signed_upload(filename: str, source_tag: str = "manual") -> Dict[str, str]:
-    """
-    Gera signed URL PUT para upload direto ao GCS pelo cliente.
-    Expiração controlada por GCS_SIGNED_URL_EXPIRY_MINUTES (padrão 30).
-    """
-    bucket = _get_upload_bucket()
-    if bucket is None:
-        logger.info(
-            "Signed URL não gerada porque GCS_UPLOAD_BUCKET não está configurado; retornando modo upload direto."
-        )
-        return {"mode": "direct"}
-    safe_name = Path(filename).name
-    safe_source = (source_tag or "manual").replace("/", "_").replace("\\", "_")
-    object_name = f"{GCS_UPLOAD_PREFIX.strip('/')}/{safe_source}/{uuid.uuid4().hex}_{safe_name}"
-    blob = bucket.blob(object_name)
-
-    try:
-        signed_url = blob.generate_signed_url(
-            version="v4",
-            expiration=timedelta(minutes=GCS_SIGNED_URL_EXPIRY_MINUTES),
-            method="PUT",
-            content_type="application/octet-stream",
-        )
-    except Exception as exc:
-        raise RuntimeError(
-            "Não foi possível assinar URL do GCS. "
-            "Verifique se a Service Account tem permissão roles/iam.serviceAccountTokenCreator "
-            "e se GCS_UPLOAD_BUCKET está configurado corretamente."
-        ) from exc
-
-    logger.info("Signed URL gerado: object=%s expiry_min=%d", object_name, GCS_SIGNED_URL_EXPIRY_MINUTES)
-    return {
-        "mode": "gcs",
-        "upload_url": signed_url,
-        "object_name": object_name,
-        "bucket": bucket.name,
-        "expires_in_minutes": GCS_SIGNED_URL_EXPIRY_MINUTES,
-    }
-
-
-def process_gcs_upload(object_name: str) -> Dict[str, Any]:
-    """
-    Processa arquivo já presente no GCS:
-      1. Valida extensão e tamanho (falha rápido)
-      2. Lê CSV ou XLSX como DataFrame
-      3. Carrega na staging via GCS (com retry e limpeza garantida)
-      4. Dispara a procedure de forma assíncrona
-      5. Remove o blob original (melhor esforço)
-    """
-    bucket = _get_upload_bucket()
-    if bucket is None:
-        raise ValueError("Processamento via GCS indisponível sem GCS_UPLOAD_BUCKET; use upload direto.")
-    blob = bucket.blob(object_name)
-
-    if not blob.exists():
-        raise FileNotFoundError(f"Arquivo não encontrado no GCS: {object_name}")
-
-    _validate_blob(blob, object_name)
-
-    suffix = Path(object_name).suffix.lower()
-    try:
-        df = _xlsx_blob_to_dataframe(blob) if suffix in {".xlsx", ".xls"} else _csv_blob_to_dataframe(blob)
-    except Exception as exc:
-        logger.exception("Falha ao ler arquivo '%s': %s", object_name, exc)
-        raise RuntimeError(f"Não foi possível ler o arquivo: {exc}") from exc
-
-    safe_filename = Path(object_name).name
-    started = perf_counter()
-    client = get_bq_client()
-    staging_table = _ensure_staging_table_exists(client, _staging_table_id())
-    df2, report = _prepare_dataframe_for_staging(
-        df, safe_filename, started, staging_schema=staging_table.schema
-    )
-    logger.info(
-        "Arquivo lido: object=%s tabela=%s linhas_recebidas=%d linhas_importadas=%d "
-        "linhas_rejeitadas=%d colunas_recebidas=%s colunas_esperadas=%s",
-        object_name,
-        _staging_table_id(),
-        report["linhas_recebidas"],
-        report["linhas_importadas"],
-        report["linhas_rejeitadas"],
-        report["colunas_recebidas"],
-        report["colunas_esperadas"],
-    )
-
-    rows_loaded = _load_dataframe_to_staging_via_gcs(df2, already_coerced=True)
-    job_id = run_procedure_async()
-    report["linhas_gravadas_staging"] = rows_loaded
-    report["procedure_job_id"] = job_id
-    report["tempo_processamento_s"] = round(perf_counter() - started, 3)
-    logger.info(
-        "Processamento BigQuery iniciado: object=%s staging=%s linhas_recebidas=%d "
-        "linhas_processadas=%d linhas_gravadas_staging=%d procedure=%s procedure_job_id=%s",
-        object_name,
-        _staging_table_id(),
-        report["linhas_recebidas"],
-        report["linhas_processadas"],
-        rows_loaded,
-        BQ_PROCEDURE,
-        job_id,
-    )
-
-    try:
-        blob.delete()
-        logger.info("Blob original removido: %s", object_name)
-    except Exception as exc:
-        logger.warning("Não foi possível remover blob original '%s': %s", object_name, exc)
-
-    return {
-        "message": "Upload processado com sucesso.",
+        "message": "Upload recebido. Dados carregados na staging e procedure iniciada. A staging será limpa ao final da procedure.",
         "job_id": job_id,
         "rows_read": report["linhas_recebidas"],
         "report": report,
@@ -1355,6 +1063,8 @@ def get_bq_job_status(job_id: str) -> Dict[str, Any]:
         payload["errors"] = job.errors
     else:
         payload["ok"] = True if job.state == "DONE" else None
+        payload["error"] = None
+        payload["errors"] = None
 
     return payload
 
