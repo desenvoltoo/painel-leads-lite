@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>Painel Leads Lite | Modelo Estrela (Star)</title>
+  <title>Painel de Leads | Dashboard Comercial</title>
 
   <link href="https://cdn.jsdelivr.net/npm/tom-select@2.2.2/dist/css/tom-select.css" rel="stylesheet">
   <link rel="stylesheet" href="{{ url_for('static', filename='css/styles.css', v=asset_version) }}"> 
@@ -16,16 +16,16 @@
     <div class="brand">
       <div class="logo">PL</div>
       <div>
-        <div class="title">Painel Leads Lite</div>
-        <div class="subtitle">Modelo Estrela • BigQuery</div>
+        <div class="title">Painel de Leads</div>
+        <div class="subtitle">Gestão, importação e acompanhamento comercial</div>
       </div>
     </div>
 
     <div class="actions">
       <span class="user-chip">Usuário: {{ current_user or "—" }}</span>
-      <button id="btnReload" class="btn">Recarregar Dados</button>
-      <button id="btnExport" class="btn btn-ghost">Exportar XLSX</button>
-      <button id="btnBatchExport" class="btn btn-primary">Exportar em lote</button>
+      <button id="btnReload" class="btn" type="button">Recarregar dados</button>
+      <button id="btnExport" class="btn btn-ghost" type="button">Exportar XLSX</button>
+      <button id="btnBatchExport" class="btn btn-primary" type="button">Exportar em lote</button>
       <form action="{{ url_for('logout') }}" method="post" class="logout-form">
         <button type="submit" class="btn btn-danger">Sair</button>
       </form>
@@ -33,82 +33,120 @@
   </header>
 
   <main class="container">
-
-    <section class="kpis">
-      <div class="kpi">
-        <div class="kpi-label">Total de Leads</div>
-        <div class="kpi-value" id="kpiCount">—</div>
+    <section class="dashboard-hero" aria-labelledby="dashboardTitle">
+      <div>
+        <span class="eyebrow">Dashboard comercial</span>
+        <h1 id="dashboardTitle">Painel de Leads</h1>
+        <p>Importe planilhas, acompanhe KPIs e consulte leads consolidados no BigQuery com uma experiência mais clara e responsiva.</p>
       </div>
-      <div class="kpi">
-        <div class="kpi-label">Status Predominante</div>
-        <div class="kpi-value" id="kpiTopStatus">—</div>
-      </div>
-      <div class="kpi">
-        <div class="kpi-label">Base de Dados</div>
-        <div class="kpi-value kpi-value-small">Star Schema</div>
+      <div class="hero-metadata" aria-label="Resumo técnico">
+        <span>BigQuery</span>
+        <span>Modelo Estrela</span>
+        <span>UI {{ ui_version }}</span>
       </div>
     </section>
 
-    <section class="card">
-      <div class="card-header">
-        <h2>Importar Planilha</h2>
-        <p>O arquivo será processado por uma <strong>Stored Procedure</strong> e distribuído para as dimensões + fato.</p>
+    <section class="kpis" aria-label="Indicadores principais">
+      <div class="kpi kpi-card kpi-blue">
+        <div class="kpi-icon" aria-hidden="true">👥</div>
+        <div>
+          <div class="kpi-label">Total de leads</div>
+          <div class="kpi-value" id="kpiCount">—</div>
+          <div class="kpi-caption">Registros conforme filtros ativos</div>
+        </div>
+      </div>
+      <div class="kpi kpi-card kpi-green">
+        <div class="kpi-icon" aria-hidden="true">🏷️</div>
+        <div>
+          <div class="kpi-label">Status predominante</div>
+          <div class="kpi-value" id="kpiTopStatus">—</div>
+          <div class="kpi-caption">Maior concentração na consulta</div>
+        </div>
+      </div>
+      <div class="kpi kpi-card kpi-amber">
+        <div class="kpi-icon" aria-hidden="true">🧩</div>
+        <div>
+          <div class="kpi-label">Base de dados</div>
+          <div class="kpi-value kpi-value-small">Star Schema</div>
+          <div class="kpi-caption">Dimensões + fato no BigQuery</div>
+        </div>
+      </div>
+    </section>
+
+    <section class="card upload-card" aria-labelledby="uploadTitle">
+      <div class="card-header card-header-row">
+        <div>
+          <span class="eyebrow">Importação</span>
+          <h2 id="uploadTitle">Importar planilha de leads</h2>
+          <p>Envie arquivos <strong>.xlsx</strong>, <strong>.xls</strong> ou <strong>.csv</strong> para processar no BigQuery pela rota atual de upload.</p>
+        </div>
+        <div class="header-badge">Stored Procedure</div>
       </div>
 
-      <div class="filters filters-6">
-        <div class="field col-4">
-          <label>Arquivo (CSV ou XLSX)</label>
+      <div class="upload-layout">
+        <label class="upload-dropzone" for="uploadFile" id="uploadDropzone">
+          <span class="upload-icon" aria-hidden="true">⇧</span>
+          <span class="upload-title">Selecionar arquivo</span>
+          <span class="upload-copy">Clique ou arraste uma planilha para esta área.</span>
           <input id="uploadFile" type="file" accept=".csv,.xlsx,.xls" />
-        </div>
+          <span id="uploadFileName" class="upload-file-name">Nenhum arquivo selecionado</span>
+        </label>
 
-        <div class="field col-2">
-          <label>Tag de Lote (Opcional)</label>
-          <input id="uploadSource" placeholder="Ex: Lote_Fevereiro" />
-          <small class="muted">Obs.: tag reservada para auditoria/versões futuras.</small>
-        </div>
+        <div class="upload-side-panel">
+          <div class="field">
+            <label for="uploadSource">Tag de lote (opcional)</label>
+            <input id="uploadSource" placeholder="Ex: Lote_Fevereiro" aria-describedby="uploadSourceHelp" />
+            <small id="uploadSourceHelp" class="muted">Tag reservada para auditoria/versões futuras.</small>
+          </div>
 
-        <div class="field field-actions col-6">
-          <button id="btnUpload" class="btn btn-primary">Processar no BigQuery</button>
-          <span id="uploadStatus" class="muted"></span>
+          <div class="upload-note">
+            <strong>Importante:</strong> a tabela staging é temporária e pode ficar vazia após o processamento, pois a procedure limpa os dados ao final.
+          </div>
+
+          <div class="field field-actions upload-actions">
+            <button id="btnUpload" class="btn btn-primary" type="button">Importar planilha</button>
+            <span id="uploadStatus" class="alert alert-info" role="status" aria-live="polite">Aguardando seleção de arquivo.</span>
+          </div>
         </div>
       </div>
     </section>
 
     <section class="card">
       <div class="card-header">
-        <h2>Filtros Dinâmicos</h2>
+        <span class="eyebrow">Consulta</span>
+        <h2>Filtros dinâmicos</h2>
         <p>Seleção múltipla com busca. Filtros já alinhados ao novo Modelo Estrela.</p>
       </div>
 
       <!-- Linha 1 -->
       <div class="filters filters-6">
         <div class="field col-2">
-          <label>Status (Multi)</label>
+          <label for="fStatus">Status (Multi)</label>
           <select id="fStatus" multiple placeholder="Todos os status..."></select>
         </div>
 
         <div class="field col-2">
-          <label>Cursos (Multi)</label>
+          <label for="fCurso">Cursos (Multi)</label>
           <select id="fCurso" multiple placeholder="Todos os cursos..."></select>
         </div>
 
         <div class="field col-2">
-          <label>Modalidade (Multi)</label>
+          <label for="fModalidade">Modalidade (Multi)</label>
           <select id="fModalidade" multiple placeholder="Todas as modalidades..."></select>
         </div>
 
         <div class="field col-2">
-          <label>Turno (Multi)</label>
+          <label for="fTurno">Turno (Multi)</label>
           <select id="fTurno" multiple placeholder="Todos os turnos..."></select>
         </div>
 
         <div class="field col-2">
-          <label>Polos (Multi)</label>
+          <label for="fPolo">Polos (Multi)</label>
           <select id="fPolo" multiple placeholder="Todos os polos..."></select>
         </div>
 
         <div class="field col-2">
-          <label>Origem (Multi)</label>
+          <label for="fOrigem">Origem (Multi)</label>
           <select id="fOrigem" multiple placeholder="Todas as origens..."></select>
         </div>
       </div>
@@ -116,32 +154,32 @@
       <!-- Linha 2 -->
       <div class="filters filters-6">
         <div class="field col-2">
-          <label>Consultor Disparo (Multi)</label>
+          <label for="fConsultorDisparo">Consultor Disparo (Multi)</label>
           <select id="fConsultorDisparo" multiple placeholder="Todos os consultores..."></select>
         </div>
 
         <div class="field col-2">
-          <label>Consultor Comercial (Multi)</label>
+          <label for="fConsultorComercial">Consultor Comercial (Multi)</label>
           <select id="fConsultorComercial" multiple placeholder="Todos os consultores..."></select>
         </div>
 
         <div class="field col-2">
-          <label>Canal (Multi)</label>
+          <label for="fCanal">Canal (Multi)</label>
           <select id="fCanal" multiple placeholder="Todos os canais..."></select>
         </div>
 
         <div class="field col-2">
-          <label>Campanha (Multi)</label>
+          <label for="fCampanha">Campanha (Multi)</label>
           <select id="fCampanha" multiple placeholder="Todas as campanhas..."></select>
         </div>
 
         <div class="field col-2">
-          <label>Tipo Disparo (Multi)</label>
+          <label for="fTipoDisparo">Tipo Disparo (Multi)</label>
           <select id="fTipoDisparo" multiple placeholder="Todos os tipos..."></select>
         </div>
 
         <div class="field col-2">
-          <label>Tipo Negócio (Multi)</label>
+          <label for="fTipoNegocio">Tipo Negócio (Multi)</label>
           <select id="fTipoNegocio" multiple placeholder="Todos os tipos..."></select>
         </div>
       </div>
@@ -149,17 +187,17 @@
       <!-- Linha 3 -->
       <div class="filters filters-6">
         <div class="field col-1">
-          <label>Data Inicial</label>
+          <label for="fIni">Data Inicial</label>
           <input id="fIni" type="date" />
         </div>
 
         <div class="field col-1">
-          <label>Data Final</label>
+          <label for="fFim">Data Final</label>
           <input id="fFim" type="date" />
         </div>
 
         <div class="field col-1">
-          <label>Matriculado</label>
+          <label for="fMatriculado">Matriculado</label>
           <select id="fMatriculado">
             <option value="">Todos</option>
             <option value="true">Sim</option>
@@ -168,13 +206,13 @@
         </div>
 
         <div class="field col-1">
-          <label>Limite</label>
+          <label for="fLimit">Limite</label>
           <input id="fLimit" type="number" min="50" step="50" value="500" />
         </div>
 
         <div class="field field-actions col-3">
-          <button id="btnApply" class="btn btn-primary">Aplicar Filtros</button>
-          <button id="btnClear" class="btn btn-ghost">Limpar Tudo</button>
+          <button id="btnApply" class="btn btn-primary">Filtrar</button>
+          <button id="btnClear" class="btn btn-ghost">Limpar filtros</button>
           <select id="savedFilterSelect">
             <option value="">Filtros salvos...</option>
           </select>
@@ -183,7 +221,7 @@
         </div>
 
         <div class="field col-5">
-          <label>Busca rápida (Nome / CPF / Celular / Email)</label>
+          <label for="fBusca">Busca rápida (Nome / CPF / Celular / Email)</label>
           <input id="fBusca" placeholder="Ex.: Maria / 12345678900 / 11999999999 / email@..." />
           <small class="muted">O painel detecta automaticamente o tipo de busca e envia os parâmetros corretos.</small>
         </div>
@@ -197,7 +235,8 @@
 
     <section class="card">
       <div class="card-header">
-        <h2>Leads Consolidados</h2>
+        <span class="eyebrow">Listagem</span>
+        <h2>Leads consolidados</h2>
         <p id="statusLine">Aguardando consulta...</p>
       </div>
 
@@ -232,9 +271,9 @@
       </div>
 
       <div class="pagination-bar">
-        <button id="btnPrevPage" class="btn btn-ghost">Página anterior</button>
+        <button id="btnPrevPage" class="btn btn-ghost" type="button">Página anterior</button>
         <span class="muted" id="lblPage">Página 1</span>
-        <button id="btnNextPage" class="btn btn-ghost">Próxima página</button>
+        <button id="btnNextPage" class="btn btn-ghost" type="button">Próxima página</button>
       </div>
 
       <div class="loading-row" id="searchLoading" hidden>
