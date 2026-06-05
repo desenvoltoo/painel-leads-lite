@@ -4,7 +4,7 @@
 //   POST /api/leads/search -> { ok:true, total:N, data:[...] }
 //   POST /api/kpis/search  -> { ok:true, total:N, top_status:{status,cnt} }
 //   GET  /api/export/xlsx -> XLSX (download)
-//   GET  /api/upload-url + PUT signed URL + POST /api/process-upload
+//   POST /api/upload -> upload direto de CSV/XLSX
 //
 // HTML (ids):
 // upload: #uploadFile #btnUpload #uploadStatus #uploadSource
@@ -750,31 +750,6 @@ async function uploadDirectToServer(file, source) {
   return apiPostForm("/api/upload", fd);
 }
 
-async function uploadViaSignedUrl(file, source) {
-  const signed = await apiGet("/api/upload-url", { filename: file.name, source });
-  const info = signed?.data;
-  if (info?.mode === "direct") {
-    console.info("Upload via GCS indisponível; usando envio direto informado pela API.");
-    return uploadDirectToServer(file, source);
-  }
-  if (!info?.upload_url || !info?.object_name) {
-    throw new Error("URL assinada não retornada pela API.");
-  }
-
-  setUploadStatus("Enviando arquivo para o storage...", "ok");
-  const putResp = await fetch(info.upload_url, {
-    method: "PUT",
-    headers: { "Content-Type": "application/octet-stream" },
-    body: file,
-  });
-  if (!putResp.ok) {
-    throw new Error(`Falha ao enviar arquivo ao storage (${putResp.status}).`);
-  }
-
-  setUploadStatus("Arquivo enviado. Iniciando processamento no BigQuery...", "ok");
-  return apiPostJson("/api/process-upload", { object_name: info.object_name });
-}
-
 async function pollUploadStatus(jobId) {
   if (!jobId) return;
 
@@ -783,11 +758,11 @@ async function pollUploadStatus(jobId) {
     const resp = await apiGet("/api/upload/status", { job_id: jobId });
     const data = resp?.data || {};
 
-    if (data.ok === false) {
-      throw new Error(data?.error?.message || data?.error || "Falha no job do BigQuery.");
-    }
-
     if (data.state === "DONE") {
+      if (data.ok === false) {
+        throw new Error(data?.error?.message || JSON.stringify(data.error) || "Procedure falhou.");
+      }
+
       setUploadStatus("Processamento concluído. Atualizando painel...", "ok");
       await loadOptions();
       await loadLeadsAndKpis();
@@ -819,15 +794,7 @@ async function doUpload() {
   setUploadStatus("Preparando upload...", "ok");
 
   try {
-    let resp;
-    try {
-      resp = await uploadViaSignedUrl(file, source);
-    } catch (signedError) {
-      console.warn("Upload via URL assinada falhou; usando envio direto.", signedError);
-      setUploadStatus("Upload direto pelo servidor...", "ok");
-      resp = await uploadDirectToServer(file, source);
-    }
-
+    const resp = await uploadDirectToServer(file, source);
     const jobId = resp?.job_id;
     const reportText = formatImportReport(resp?.report);
     setUploadStatus(reportText || resp?.message || "Upload recebido. Processando...", "ok");

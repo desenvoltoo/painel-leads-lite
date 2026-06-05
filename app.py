@@ -29,9 +29,7 @@ from services.bigquery import (
     query_options,
     query_gestao_dashboard,
     query_gestao_exportar_prioritarios,
-    process_gcs_upload,
     process_upload_dataframe,
-    generate_gcs_signed_upload,
     get_bq_job_status,          # novo
     export_leads_rows,
     export_leads_rows_iter,
@@ -795,39 +793,18 @@ def create_app() -> Flask:
     # ✅ AGORA ASSÍNCRONO: retorna job_id e NÃO trava request
     # ============================================================
     @app.get("/api/upload-url")
-    def api_upload_url():
-        filename = (request.args.get("filename") or "").strip()
-        if not filename:
-            return jsonify({"ok": False, "error": "filename é obrigatório."}), 400
-        if not _validate_upload_filename(filename):
-            return jsonify({"ok": False, "error": "Formato inválido. Envie CSV ou XLSX."}), 400
-
-        try:
-            source = (request.args.get("source") or "manual").strip() or "manual"
-            payload = generate_gcs_signed_upload(filename=filename, source_tag=source)
-            return jsonify({"ok": True, "data": payload}), 200
-        except Exception as e:
-            logger.exception("Falha ao gerar signed URL de upload: %s", e)
-            return jsonify(
-                _error_payload(
-                    e,
-                    f"Falha ao gerar URL de upload: {e}",
-                )
-            ), 500
+    def api_upload_url_disabled():
+        return jsonify({
+            "ok": False,
+            "error": "Fluxo via GCS desativado. Use POST /api/upload.",
+        }), 410
 
     @app.post("/api/process-upload")
-    def api_process_upload():
-        payload = request.get_json(silent=True) or {}
-        object_name = (payload.get("object_name") or "").strip()
-        if not object_name:
-            return jsonify({"ok": False, "error": "object_name é obrigatório."}), 400
-
-        try:
-            result = process_gcs_upload(object_name)
-            return jsonify({"ok": True, **result}), 202
-        except Exception as e:
-            logger.exception("Falha na ingestão via GCS: object_name=%s", object_name)
-            return jsonify(_error_payload(e, "Falha na ingestão via GCS.")), 500
+    def api_process_upload_disabled():
+        return jsonify({
+            "ok": False,
+            "error": "Fluxo via GCS desativado. Use POST /api/upload.",
+        }), 410
 
     @app.post("/api/upload")
     def api_upload():
@@ -843,10 +820,16 @@ def create_app() -> Flask:
 
         try:
             df = _read_upload_to_df(file_storage)
+            logger.info(
+                "Upload recebido: arquivo=%s linhas_recebidas=%d colunas_recebidas=%s",
+                filename,
+                len(df),
+                list(df.columns),
+            )
             result = process_upload_dataframe(df, filename=filename)
             return jsonify({"ok": True, **result}), 202
         except Exception as e:
-            logger.exception("Falha no upload direto: %s", e)
+            logger.exception("Erro no processamento de upload: arquivo=%s etapa=rota_upload", filename)
             return jsonify(_error_payload(e, "Falha ao processar upload.")), 500
 
     @app.get("/api/upload/status")
