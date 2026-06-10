@@ -115,3 +115,6 @@ button, a, input, select { min-height: 40px; }
 @media (max-width: 1399.98px) { .filters-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); } .kpi-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); } .rankings-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 @media (max-width: 991.98px) { .filters-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } .filter-search, .filter-actions { grid-column: span 2; } .kpi-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } .quality-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } .header-actions { justify-content: flex-start; } }
 @media (max-width: 575.98px) { .filters-grid, .kpi-grid, .rankings-grid, .quality-grid { grid-template-columns: 1fr; } .filter-search, .filter-actions { grid-column: span 1; } .filter-actions { flex-direction: column; } .filter-actions .btn, .header-actions .btn, .header-actions form { width: 100%; } .panel-heading, .funnel-row div:first-child { flex-direction: column; align-items: flex-start; } .chart-box { height: 320px; } .toast-region { left: 1rem; right: 1rem; top: 6rem; } }
+.quality-card .d-flex { margin-top: .4rem; }
+.quality-card .btn[disabled], .panel-heading .btn[disabled] { opacity: .65; cursor: wait; }
+.mini-table .empty-state { border: 0; min-height: 72px; }

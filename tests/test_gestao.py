@@ -193,3 +193,103 @@ def test_json_safe_bigquery_values():
     now = datetime(2026, 6, 10, 12, 0, tzinfo=timezone.utc)
     assert bq._json_safe_value(Decimal("10.5")) == 10.5
     assert "2026" in bq._json_safe_value(now)
+
+
+def test_phone_and_cpf_validation_and_masks():
+    assert gestao.is_valid_phone("(11) 98765-4321") is True
+    assert gestao.is_valid_phone("11111111111") is False
+    assert gestao.is_valid_phone("123") is False
+    assert gestao.is_valid_cpf("529.982.247-25") is True
+    assert gestao.is_valid_cpf("111.111.111-11") is False
+    assert gestao.is_valid_cpf("123") is False
+    masked = gestao.mask_rejection_row({"cpf_raw": "52998224725", "celular_raw": "11987654321", "email_raw": "maria@example.com", "payload": "segredo"})
+    assert masked["cpf_raw"] == "***.***.***-4725"
+    assert masked["celular_raw"] == "*******4321"
+    assert masked["email_raw"] == "m***@example.com"
+    assert "payload" not in masked
+
+
+def test_status_empty_and_ec_rules():
+    assert gestao.is_status_empty(None) is True
+    assert gestao.is_status_empty("") is True
+    assert gestao.is_status_empty(" SEM INFORMAÇÃO ") is True
+    assert gestao.is_status_empty("MAT") is False
+    assert gestao.is_status_ec(" ec ") is True
+    assert gestao.is_status_ec("EC") is True
+    assert gestao.is_status_ec("E C") is False
+
+
+def test_fila_priority_order_with_dates_and_exclusions():
+    rows = [
+        {"nome": "lead EC antigo", "status": "ec", "celular": "11999999996", "data_inscricao": "01/06/2026"},
+        {"nome": "lead comum recente", "status": "ABERTO", "celular": "11999999995", "data_inscricao": "2026-06-10"},
+        {"nome": "lead matriculado", "status": "MAT", "celular": "11999999994", "data_inscricao": "2026-06-11"},
+        {"nome": "lead antigo sem status", "status": "   ", "celular": "11999999998", "data_inscricao": "01/06/2026"},
+        {"nome": "lead EC recente", "status": "EC", "celular": "11999999997", "data_inscricao": "2026-06-09"},
+        {"nome": "lead novo sem status", "status": None, "celular": "11999999999", "data_inscricao": "10/06/2026"},
+    ]
+    ordered = gestao.prioritize_fila_rows(rows)
+    assert [r["nome"] for r in ordered] == [
+        "lead novo sem status",
+        "lead antigo sem status",
+        "lead EC recente",
+        "lead EC antigo",
+        "lead comum recente",
+    ]
+    assert all(r["nome"] != "lead matriculado" for r in ordered)
+
+
+def test_quality_sql_uses_duplicate_excedent_and_closed_type(monkeypatch):
+    monkeypatch.setattr(gestao.bq, "_first_existing_col", lambda *cols: cols[0])
+    monkeypatch.setattr(gestao, "_has", lambda col: True)
+    sql, params = gestao._quality_details_sql("duplicado_cpf", {}, {"limit": 10, "offset": 0})
+    assert "SUM(qtd - 1)" not in sql  # detail lists rows; summary uses excedent aggregation
+    assert "dup_cpf" in sql
+    with pytest.raises(gestao.GestaoValidationError):
+        gestao._quality_details_sql("campo_livre", {}, {"limit": 10, "offset": 0})
+
+
+def test_exports_generate_csv_with_masked_data(monkeypatch):
+    monkeypatch.setattr(gestao.bq, "_first_existing_col", lambda *cols: cols[0])
+    monkeypatch.setattr(gestao, "_has", lambda col: True)
+    monkeypatch.setattr(gestao, "_run", lambda sql, params, op: [{"motivo": "Sem status", "identificador": "***.***.***-4725", "nome": "Ana", "curso": "Direito", "consultor": "João", "data_inscricao": "2026-06-10", "data_upload": "2026-06-10", "origem": "Site", "status": ""}])
+    filename, content, count = gestao.export_qualidade({}, {"limit": 10, "offset": 0}, "sem_status")
+    assert filename.startswith("qualidade_sem_status_")
+    assert count == 1
+    text = content.decode("utf-8-sig")
+    assert "Identificador mascarado" in text
+    assert "52998224725" not in text
+
+
+def test_importacoes_missing_table_returns_clear_payload(monkeypatch):
+    from google.api_core.exceptions import NotFound
+    def fake_run(sql, params, op):
+        raise NotFound("missing")
+    monkeypatch.setattr(gestao, "_run", fake_run)
+    data, cached = gestao.get_importacoes({}, {"limit": 20, "offset": 0, "order_dir": "DESC", "order_by": "dt_upload", "force_refresh": True})
+    assert cached is False
+    assert data["items"] == []
+    assert data["tabelas_disponiveis"]["logs_importacoes"] is False
+    assert "migração" in data["message"]
+
+
+def test_importacoes_csv_has_no_payload(monkeypatch):
+    monkeypatch.setattr(gestao, "_run", lambda sql, params, op: [{"id_importacao": "1", "nome_arquivo": "leads.csv", "usuario": "matheus", "dt_upload": "2026-06-10", "payload": "segredo"}])
+    filename, content, count = gestao.export_importacoes({}, {"order_dir": "DESC", "order_by": "dt_upload"})
+    assert filename.startswith("historico_importacoes_")
+    assert count == 1
+    assert "payload" not in content.decode("utf-8-sig").lower()
+
+
+def test_fila_export_uses_same_order_function(monkeypatch):
+    captured = {}
+    def fake_run(sql, params, op):
+        captured["sql"] = sql
+        return [{"nome": "A", "celular": "11987654321", "grupo_prioridade": 1, "prioridade": 100, "motivo_prioridade": "Lead recente sem status"}]
+    monkeypatch.setattr(gestao.bq, "_first_existing_col", lambda *cols: cols[0])
+    monkeypatch.setattr(gestao, "_has", lambda col: True)
+    monkeypatch.setattr(gestao, "_run", fake_run)
+    filename, content, count = gestao.export_fila({}, {"limit": 10, "offset": 0})
+    assert "ORDER BY grupo_prioridade ASC, data_inscricao DESC NULLS LAST" in captured["sql"]
+    assert "*******4321" in content.decode("utf-8-sig")
+    assert count == 1

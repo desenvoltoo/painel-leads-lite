@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+import csv
 import hashlib
+import io
 import json
+import math
 import logging
 import os
 import threading
 from collections import OrderedDict
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timezone, timedelta
 from time import perf_counter
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
 
@@ -66,14 +69,38 @@ ORDERABLE_PRODUTIVIDADE = {
 }
 
 ORDERABLE_FILA = {
-    "score": "score_prioridade",
-    "score_prioridade": "score_prioridade",
-    "nome": "nome",
+    "grupo_prioridade": "grupo_prioridade",
     "data_inscricao": "data_inscricao",
-    "data_ultima_acao": "data_ultima_acao",
-    "dias_sem_acao": "dias_sem_acao",
+    "dt_upload": "dt_upload",
     "prioridade": "prioridade",
+    "nome": "nome",
 }
+
+ORDERABLE_IMPORTACOES = {
+    "dt_upload": "dt_upload",
+    "nome_arquivo": "nome_arquivo",
+    "usuario": "usuario",
+    "status": "status",
+    "total_recebido": "total_recebido",
+}
+
+EMPTY_TEXTS = {"", "NULL", "N/A", "NA", "SEM INFORMACAO", "SEM INFORMAÇÃO", "-"}
+QUALITY_TYPES = OrderedDict([
+    ("sem_celular", "Sem celular"),
+    ("sem_email", "Sem e-mail"),
+    ("sem_cpf", "Sem CPF"),
+    ("sem_origem", "Sem origem"),
+    ("sem_curso", "Sem curso"),
+    ("sem_consultor", "Sem consultor"),
+    ("sem_status", "Sem status"),
+    ("telefone_invalido", "Telefone inválido"),
+    ("cpf_invalido", "CPF inválido ou incompleto"),
+    ("duplicado_celular", "Duplicado por celular"),
+    ("duplicado_cpf", "Duplicado por CPF"),
+    ("rejeitado", "Registro rejeitado no upload"),
+    ("sem_dt_upload", "Sem dt_upload"),
+    ("data_invalida", "Data inválida ou não interpretada"),
+])
 
 class GestaoValidationError(ValueError):
     pass
@@ -147,6 +174,11 @@ def parse_filters(source: Mapping[str, Any]) -> Tuple[Dict[str, Any], Dict[str, 
     matriculado = _bool_filter(source.get("matriculado"))
     if matriculado is not None:
         filters["matriculado"] = matriculado
+
+    for key in ("status_importacao", "nome_arquivo", "usuario", "motivo", "id_importacao", "tipo"):
+        value = str(source.get(key) or "").strip()
+        if value:
+            filters[key] = value[:200]
 
     busca = str(source.get("busca") or source.get("q") or "").strip()
     if busca:
@@ -240,6 +272,36 @@ def _timestamp_col(*candidates: str, alias: str = "v") -> str:
 
 def _date_from_ts(expr: str) -> str:
     return f"DATE({expr})"
+
+
+def _empty_text_sql(expr: str) -> str:
+    return f"(NULLIF(TRIM(CAST({expr} AS STRING)), '') IS NULL OR UPPER(TRIM(CAST({expr} AS STRING))) IN ('NULL','N/A','NA','SEM INFORMACAO','SEM INFORMAÇÃO','-'))"
+
+
+def _filled_text_sql(expr: str) -> str:
+    return f"NOT {_empty_text_sql(expr)}"
+
+
+def _digits_sql(expr: str) -> str:
+    return f"REGEXP_REPLACE(COALESCE(CAST({expr} AS STRING), ''), r'[^0-9]', '')"
+
+
+def _mask_sql(expr: str, kind: str) -> str:
+    digits = _digits_sql(expr)
+    if kind == "cpf":
+        return f"IF({digits} = '', '***', CONCAT('***.***.***-', RIGHT({digits}, 4)))"
+    if kind == "celular":
+        return f"IF({digits} = '', '', CONCAT('*******', RIGHT({digits}, 4)))"
+    return f"CAST({expr} AS STRING)"
+
+
+def _email_mask_sql(expr: str) -> str:
+    txt = f"CAST({expr} AS STRING)"
+    return f"CASE WHEN {_empty_text_sql(expr)} OR STRPOS({txt}, '@') = 0 THEN '' ELSE CONCAT(SUBSTR({txt}, 1, LEAST(2, GREATEST(1, STRPOS({txt}, '@') - 1))), '***', SUBSTR({txt}, STRPOS({txt}, '@'))) END"
+
+
+def _data_inscricao_ts(alias: str = "v") -> str:
+    return _timestamp_col("data_inscricao", alias=alias)
 
 
 def _date_bucket_expr(granularidade: str, date_expr: str) -> str:
@@ -542,133 +604,354 @@ def get_produtividade(filters: Mapping[str, Any], meta: Mapping[str, Any]) -> Tu
     return _with_cache("produtividade", filters, {k: meta.get(k) for k in ("limit", "offset", "order_by", "order_dir")}, meta.get("force_refresh", False), load)
 
 
-def get_fila(filters: Mapping[str, Any], meta: Mapping[str, Any]) -> Tuple[Dict[str, Any], bool]:
-    params: List[Any] = [bigquery.ScalarQueryParameter("limit", "INT64", meta["limit"]), bigquery.ScalarQueryParameter("offset", "INT64", meta["offset"])]
-    where = _where_sql(filters, params)
-    comps = _score_components()
+
+def _status_norm_expr(alias: str = "v") -> str:
+    candidates = [c for c in ("status", "status_inscricao", "tipo_negocio") if _has(c)]
+    if not candidates:
+        return "''"
+    return "COALESCE(" + ", ".join([f"NULLIF(UPPER(TRIM(CAST({alias}.{c} AS STRING))), '')" for c in candidates]) + ", '')"
+
+
+def _status_ec_expr(alias: str = "v") -> str:
+    parts = [f"UPPER(TRIM(CAST({alias}.{c} AS STRING))) = 'EC'" for c in ("status", "status_inscricao", "tipo_negocio") if _has(c)]
+    return "(" + " OR ".join(parts) + ")" if parts else "FALSE"
+
+
+def _status_excluded_expr(alias: str = "v") -> str:
+    parts = [f"UPPER(TRIM(CAST({alias}.{c} AS STRING))) IN ('MAT','MATRICULADO','CANCELADO','CANCELADA','CANC','DESCARTADO','DESCARTADA','ENCERRADO','ENCERRADA','PERDIDO','PERDIDA')" for c in ("status", "status_inscricao", "tipo_negocio") if _has(c)]
+    return "(" + " OR ".join(parts) + ")" if parts else "FALSE"
+
+
+def _valid_phone_sql(alias: str = "v") -> str:
+    tel_col = bq._first_existing_col("celular", "telefone")
+    if not tel_col:
+        return "FALSE"
+    digits = _digits_sql(f"{alias}.{tel_col}")
+    return f"({digits} != '' AND LENGTH({digits}) IN (10, 11) AND NOT REGEXP_CONTAINS({digits}, r'^(\\d)\\1+$'))"
+
+
+def _fila_sql(filters: Mapping[str, Any], meta: Mapping[str, Any], *, export: bool = False) -> Tuple[str, List[Any]]:
+    limit = min(int(meta.get("limit", DEFAULT_PAGE_SIZE)), 5000 if export else MAX_PAGE_SIZE)
+    offset = max(0, int(meta.get("offset", 0)))
+    params: List[Any] = [] if export else [bigquery.ScalarQueryParameter("limit", "INT64", limit), bigquery.ScalarQueryParameter("offset", "INT64", offset)]
+    where = ["1=1"]
+    _apply_filters(where, params, filters, alias="v")
+    data_inscricao = _data_inscricao_ts("v")
+    ultima = _timestamp_col("data_ultima_acao", "ultima_atividade", "data_disparo", alias="v")
+    dt_upload = _timestamp_col("dt_upload", "data_atualizacao", alias="v")
+    sem_status = bq._gestao_status_empty_expr("v")
+    matriculado = bq._gestao_matriculado_expr("v")
+    status_ec = _status_ec_expr("v")
+    excluido = _status_excluded_expr("v")
+    telefone_valido = _valid_phone_sql("v")
+    status_norm = _status_norm_expr("v")
     polo_expr = "v.polo" if _has("polo") else "v.unidade" if _has("unidade") else "CAST(NULL AS STRING)"
     status_expr = "v.status" if _has("status") else "v.status_inscricao" if _has("status_inscricao") else "CAST(NULL AS STRING)"
-    order_by = ORDERABLE_FILA.get(meta.get("order_by") or "score_prioridade", "score_prioridade")
-    order_dir = meta.get("order_dir", "DESC")
+    grupo = f"""
+      CASE
+        WHEN NOT {matriculado} AND {sem_status} AND {data_inscricao} IS NOT NULL THEN 1
+        WHEN NOT {matriculado} AND {status_ec} THEN 2
+        WHEN NOT {matriculado} AND NOT {excluido} THEN 3
+        ELSE 99
+      END
+    """
+    prioridade = f"CASE WHEN ({grupo}) = 1 THEN 100 WHEN ({grupo}) = 2 THEN 70 WHEN ({grupo}) = 3 THEN 40 ELSE 0 END"
+    motivo = f"CASE WHEN ({grupo}) = 1 THEN 'Lead recente sem status' WHEN ({grupo}) = 2 THEN 'Lead classificado como EC' WHEN ({grupo}) = 3 THEN 'Lead elegível para acompanhamento' ELSE 'Lead não elegível' END"
     sql = f"""
-    WITH scored AS (
+    WITH base AS (
       SELECT
         {_safe_select('nome')}, {_safe_select('celular')}, {_safe_select('curso')}, {polo_expr} AS polo,
         {_safe_select('origem')}, {_safe_select('campanha')}, {_safe_select('consultor_comercial')},
-        {status_expr} AS status, {comps['data_inscricao']} AS data_inscricao, {comps['ultima_acao']} AS data_ultima_acao,
-        {comps['dias_sem_acao']} AS dias_sem_acao, ROUND({comps['score']}, 2) AS score_prioridade,
-        {comps['prioridade']} AS prioridade, {comps['motivo']} AS motivo_prioridade,
-        COUNT(*) OVER() AS total_registros
-      FROM {bq._tbl(bq.BQ_VIEW_LEADS)} v WHERE {where} AND NOT {bq._gestao_matriculado_expr('v')}
-    )
-    SELECT scored.* FROM scored
-    ORDER BY {order_by} {order_dir}, data_inscricao DESC
-    LIMIT @limit OFFSET @offset
+        {status_expr} AS status, {data_inscricao} AS data_inscricao, {ultima} AS data_ultima_acao, {dt_upload} AS dt_upload,
+        IF({ultima} IS NULL, NULL, GREATEST(DATE_DIFF(CURRENT_DATE(), DATE({ultima}), DAY), 0)) AS dias_sem_acao,
+        IF({data_inscricao} IS NULL, NULL, GREATEST(DATE_DIFF(CURRENT_DATE(), DATE({data_inscricao}), DAY), 0)) AS dias_desde_inscricao,
+        {status_norm} AS status_normalizado,
+        {grupo} AS grupo_prioridade,
+        {prioridade} AS prioridade,
+        {motivo} AS motivo_prioridade
+      FROM {bq._tbl(bq.BQ_VIEW_LEADS)} v
+      WHERE {' AND '.join(where)} AND NOT {matriculado} AND NOT {excluido} AND {telefone_valido}
+    ), numbered AS (SELECT base.*, COUNT(*) OVER() AS total_registros FROM base WHERE grupo_prioridade < 99)
+    SELECT * FROM numbered
+    ORDER BY grupo_prioridade ASC, data_inscricao DESC NULLS LAST, dt_upload DESC NULLS LAST, prioridade DESC
     """
+    if not export:
+        sql += "\nLIMIT @limit OFFSET @offset"
+    return sql, params
+
+
+def get_fila(filters: Mapping[str, Any], meta: Mapping[str, Any]) -> Tuple[Dict[str, Any], bool]:
+    sql, params = _fila_sql(filters, meta)
     rows = _run(sql, params, "gestao_fila")
-    return {"rows": rows, "total": rows[0].get("total_registros", 0) if rows else 0, "limit": meta["limit"], "offset": meta["offset"], "score_regra": score_rule_documentation()}, False
+    total = rows[0].get("total_registros", 0) if rows else 0
+    return {"items": rows, "rows": rows, "pagination": _pagination(meta, total), "total": total, "limit": meta["limit"], "offset": meta["offset"], "score_regra": score_rule_documentation()}, False
+
+
+def _pagination(meta: Mapping[str, Any], total: int) -> Dict[str, Any]:
+    page_size = int(meta.get("limit", DEFAULT_PAGE_SIZE))
+    offset = int(meta.get("offset", 0))
+    page = offset // page_size + 1 if page_size else 1
+    return {"page": page, "page_size": page_size, "total": int(total or 0), "total_pages": math.ceil((total or 0) / page_size) if page_size else 0}
+
+
+def _cpf_valid_sql(digits_expr: str) -> str:
+    nums = [f"CAST(SUBSTR({digits_expr}, {i}, 1) AS INT64)" for i in range(1, 12)]
+    d1 = "MOD(MOD(" + " + ".join([f"{nums[i]} * {10-i}" for i in range(9)]) + ", 11) * 10, 11)"
+    d1 = f"IF({d1} = 10, 0, {d1})"
+    d2 = "MOD(MOD(" + " + ".join([f"{nums[i]} * {11-i}" for i in range(10)]) + ", 11) * 10, 11)"
+    d2 = f"IF({d2} = 10, 0, {d2})"
+    return f"(LENGTH({digits_expr}) = 11 AND NOT REGEXP_CONTAINS({digits_expr}, r'^(\\d)\\1+$') AND {d1} = {nums[9]} AND {d2} = {nums[10]})"
+
+
+def _quality_base_exprs(alias: str = "v") -> Dict[str, str]:
+    cpf_col = bq._first_existing_col("cpf")
+    tel_col = bq._first_existing_col("celular", "telefone")
+    return {
+        "cpf_col": cpf_col or "",
+        "tel_col": tel_col or "",
+        "cpf_digits": _digits_sql(f"{alias}.{cpf_col}") if cpf_col else "''",
+        "tel_digits": _digits_sql(f"{alias}.{tel_col}") if tel_col else "''",
+        "email_expr": f"{alias}.email" if _has("email") else "CAST(NULL AS STRING)",
+        "origem_expr": f"{alias}.origem" if _has("origem") else "CAST(NULL AS STRING)",
+        "curso_expr": f"{alias}.curso" if _has("curso") else "CAST(NULL AS STRING)",
+        "consultor_expr": f"{alias}.consultor_comercial" if _has("consultor_comercial") else "CAST(NULL AS STRING)",
+        "status_expr": f"{alias}.status" if _has("status") else "CAST(NULL AS STRING)",
+    }
+
+
+def _quality_conditions(alias: str = "v") -> Dict[str, str]:
+    e = _quality_base_exprs(alias)
+    cpf_valid = _cpf_valid_sql(e["cpf_digits"])
+    data_raw = f"{alias}.data_inscricao" if _has("data_inscricao") else "CAST(NULL AS STRING)"
+    data_ts = _timestamp_col("data_inscricao", alias=alias)
+    dup_cpf = f"{e['cpf_digits']} IN (SELECT cpf_key FROM dup_cpf)" if e["cpf_col"] else "FALSE"
+    dup_tel = f"{e['tel_digits']} IN (SELECT tel_key FROM dup_tel)" if e["tel_col"] else "FALSE"
+    return {
+        "sem_celular": f"{e['tel_digits']} = ''",
+        "sem_email": _empty_text_sql(e["email_expr"]),
+        "sem_cpf": f"{e['cpf_digits']} = ''",
+        "sem_origem": _empty_text_sql(e["origem_expr"]),
+        "sem_curso": _empty_text_sql(e["curso_expr"]),
+        "sem_consultor": _empty_text_sql(e["consultor_expr"]),
+        "sem_status": bq._gestao_status_empty_expr(alias),
+        "telefone_invalido": f"{e['tel_digits']} != '' AND (LENGTH({e['tel_digits']}) NOT IN (10, 11) OR REGEXP_CONTAINS({e['tel_digits']}, r'^(\\d)\\1+$'))",
+        "cpf_invalido": f"{e['cpf_digits']} != '' AND (LENGTH({e['cpf_digits']}) != 11 OR NOT {cpf_valid})",
+        "duplicado_celular": dup_tel,
+        "duplicado_cpf": dup_cpf,
+        "sem_dt_upload": f"{_timestamp_col('dt_upload', 'data_atualizacao', alias=alias)} IS NULL",
+        "data_invalida": f"NOT {_empty_text_sql(data_raw)} AND {data_ts} IS NULL",
+    }
 
 
 def get_qualidade(filters: Mapping[str, Any], meta: Mapping[str, Any]) -> Tuple[Dict[str, Any], bool]:
     def load():
         params: List[Any] = []
         where = _where_sql(filters, params)
-        cpf = bq._first_existing_col("cpf")
-        tel = bq._first_existing_col("celular", "telefone")
-        cpf_dup_cte = f"SELECT SUM(qtd - 1) FROM (SELECT TRIM(CAST(v.{cpf} AS STRING)) k, COUNT(*) qtd FROM base v WHERE TRIM(CAST(v.{cpf} AS STRING)) != '' GROUP BY k HAVING qtd > 1)" if cpf else "SELECT 0"
-        tel_dup_cte = f"SELECT SUM(qtd - 1) FROM (SELECT REGEXP_REPLACE(CAST(v.{tel} AS STRING), r'\\D', '') k, COUNT(*) qtd FROM base v WHERE REGEXP_REPLACE(CAST(v.{tel} AS STRING), r'\\D', '') != '' GROUP BY k HAVING qtd > 1)" if tel else "SELECT 0"
-        cpf_expr = f"REGEXP_REPLACE(CAST(v.{cpf} AS STRING), r'\\D', '')" if cpf else "''"
-        tel_expr = f"REGEXP_REPLACE(CAST(v.{tel} AS STRING), r'\\D', '')" if tel else "''"
+        e = _quality_base_exprs("v")
+        cpf_valid = _cpf_valid_sql(e["cpf_digits"])
+        cond = _quality_conditions("v")
+        dup_cpf_cte = f"SELECT {e['cpf_digits']} cpf_key, COUNT(*) qtd FROM base v WHERE {e['cpf_digits']} != '' AND {cpf_valid} GROUP BY cpf_key HAVING qtd > 1" if e["cpf_col"] else "SELECT '' cpf_key, 0 qtd WHERE FALSE"
+        dup_tel_cte = f"SELECT {e['tel_digits']} tel_key, COUNT(*) qtd FROM base v WHERE {e['tel_digits']} != '' GROUP BY tel_key HAVING qtd > 1" if e["tel_col"] else "SELECT '' tel_key, 0 qtd WHERE FALSE"
+        # registros rejeitados não depende de filtros de leads; conta a tabela se existir.
         sql = f"""
-        WITH base AS (SELECT v.* FROM {bq._tbl(bq.BQ_VIEW_LEADS)} v WHERE {where})
+        WITH base AS (SELECT v.* FROM {bq._tbl(bq.BQ_VIEW_LEADS)} v WHERE {where}),
+        dup_cpf AS ({dup_cpf_cte}), dup_tel AS ({dup_tel_cte})
         SELECT
-          COUNTIF({_text_col('celular','telefone', default='')} = '') AS leads_sem_telefone,
-          COUNTIF({_text_col('email', default='')} = '') AS leads_sem_email,
-          COUNTIF({_text_col('cpf', default='')} = '') AS leads_sem_cpf,
-          COUNTIF({_text_col('origem', default='')} = '') AS leads_sem_origem,
-          COUNTIF({_text_col('curso', default='')} = '') AS leads_sem_curso,
-          COUNTIF({_text_col('consultor_comercial', default='')} = '') AS leads_sem_consultor,
-          COUNTIF({cpf_expr} != '' AND LENGTH({cpf_expr}) != 11) AS cpf_invalido_ou_incompleto,
-          COUNTIF({tel_expr} != '' AND LENGTH({tel_expr}) < 10) AS telefone_invalido,
-          COALESCE(({cpf_dup_cte}), 0) AS duplicados_por_cpf_excedentes,
-          COALESCE(({tel_dup_cte}), 0) AS duplicados_por_telefone_excedentes,
-          0 AS registros_rejeitados_upload,
-          COUNTIF({_timestamp_col('dt_upload', 'data_atualizacao')} IS NULL) AS registros_sem_dt_upload,
-          0 AS datas_nao_interpretadas
+          COUNTIF({cond['sem_celular']}) AS sem_celular,
+          COUNTIF({cond['sem_email']}) AS sem_email,
+          COUNTIF({cond['sem_cpf']}) AS sem_cpf,
+          COUNTIF({cond['sem_origem']}) AS sem_origem,
+          COUNTIF({cond['sem_curso']}) AS sem_curso,
+          COUNTIF({cond['sem_consultor']}) AS sem_consultor,
+          COUNTIF({cond['sem_status']}) AS sem_status,
+          COUNTIF({cond['telefone_invalido']}) AS telefone_invalido,
+          COUNTIF({cond['cpf_invalido']}) AS cpf_invalido,
+          COALESCE((SELECT SUM(qtd - 1) FROM dup_tel), 0) AS duplicado_celular,
+          COALESCE((SELECT SUM(qtd - 1) FROM dup_cpf), 0) AS duplicado_cpf,
+          0 AS rejeitado,
+          COUNTIF({cond['sem_dt_upload']}) AS sem_dt_upload,
+          COUNTIF({cond['data_invalida']}) AS data_invalida
         FROM base v
         """
-        return _single(sql, params, "gestao_qualidade")
+        indicadores = _single(sql, params, "gestao_qualidade")
+        try:
+            rej_sql = f"SELECT COUNT(*) AS total FROM {bq._tbl('logs_rejeicoes_import')}"
+            indicadores["rejeitado"] = _single(rej_sql, [], "gestao_qualidade_rejeitados").get("total", 0)
+        except NotFound:
+            indicadores["rejeitado"] = None
+        # aliases legados
+        indicadores.update({
+            "leads_sem_telefone": indicadores.get("sem_celular"),
+            "leads_sem_email": indicadores.get("sem_email"),
+            "leads_sem_cpf": indicadores.get("sem_cpf"),
+            "leads_sem_origem": indicadores.get("sem_origem"),
+            "leads_sem_curso": indicadores.get("sem_curso"),
+            "leads_sem_consultor": indicadores.get("sem_consultor"),
+            "telefone_invalido": indicadores.get("telefone_invalido"),
+            "cpf_invalido_ou_incompleto": indicadores.get("cpf_invalido"),
+            "duplicados_por_cpf_excedentes": indicadores.get("duplicado_cpf"),
+            "duplicados_por_telefone_excedentes": indicadores.get("duplicado_celular"),
+            "registros_rejeitados_upload": indicadores.get("rejeitado"),
+            "registros_sem_dt_upload": indicadores.get("sem_dt_upload"),
+            "datas_nao_interpretadas": indicadores.get("data_invalida"),
+        })
+        return {"indicadores": indicadores, "items": [], "pagination": _pagination(meta, 0), "regras": {"telefone_invalido": "Remove caracteres não numéricos; inválido se preenchido com tamanho diferente de 10/11 ou todos os dígitos iguais.", "cpf_invalido": "Remove caracteres não numéricos; separa ausente de inválido/incompleto e valida dígitos verificadores para CPFs com 11 dígitos."}}
     return _with_cache("qualidade", filters, {}, meta.get("force_refresh", False), load)
 
 
-def _mask_cpf(value: Any) -> str:
-    digits = "".join(ch for ch in str(value or "") if ch.isdigit())
-    return f"***.***.***-{digits[-2:]}" if len(digits) >= 2 else "***"
+def _quality_details_sql(tipo: str, filters: Mapping[str, Any], meta: Mapping[str, Any], *, export: bool = False) -> Tuple[str, List[Any]]:
+    if tipo not in QUALITY_TYPES:
+        raise GestaoValidationError("Tipo de indicador inválido.")
+    params: List[Any] = [] if export else [bigquery.ScalarQueryParameter("limit", "INT64", meta.get("limit", DEFAULT_PAGE_SIZE)), bigquery.ScalarQueryParameter("offset", "INT64", meta.get("offset", 0))]
+    where = _where_sql(filters, params)
+    e = _quality_base_exprs("v")
+    cond = _quality_conditions("v")
+    data_insc = _timestamp_col("data_inscricao", alias="v")
+    dt_upload = _timestamp_col("dt_upload", "data_atualizacao", alias="v")
+    cpf_valid = _cpf_valid_sql(e["cpf_digits"])
+    dup_cpf_cte = f"SELECT {e['cpf_digits']} cpf_key, COUNT(*) qtd FROM base v WHERE {e['cpf_digits']} != '' AND {cpf_valid} GROUP BY cpf_key HAVING qtd > 1" if e["cpf_col"] else "SELECT '' cpf_key, 0 qtd WHERE FALSE"
+    dup_tel_cte = f"SELECT {e['tel_digits']} tel_key, COUNT(*) qtd FROM base v WHERE {e['tel_digits']} != '' GROUP BY tel_key HAVING qtd > 1" if e["tel_col"] else "SELECT '' tel_key, 0 qtd WHERE FALSE"
+    condition = cond[tipo] if tipo != "rejeitado" else "FALSE"
+    if tipo == "rejeitado":
+        sql = f"""
+        SELECT motivo, COALESCE(nome_raw, nome, '') AS nome, '' AS curso, '' AS consultor, ts AS data_upload,
+               {_mask_sql('cpf_raw', 'cpf')} AS identificador, {_email_mask_sql('email_raw')} AS email_mascarado,
+               {_mask_sql('celular_raw', 'celular')} AS celular_mascarado, CAST(NULL AS TIMESTAMP) AS data_inscricao,
+               '' AS origem, '' AS status, COUNT(*) OVER() AS total_registros
+        FROM {bq._tbl('logs_rejeicoes_import')}
+        ORDER BY ts DESC NULLS LAST
+        """
+    else:
+        sql = f"""
+        WITH base AS (SELECT v.* FROM {bq._tbl(bq.BQ_VIEW_LEADS)} v WHERE {where}),
+        dup_cpf AS ({dup_cpf_cte}), dup_tel AS ({dup_tel_cte})
+        SELECT '{QUALITY_TYPES[tipo]}' AS motivo,
+               {_mask_sql('v.cpf', 'cpf') if e['cpf_col'] else "''"} AS identificador,
+               {_safe_select('nome')}, {_safe_select('curso')}, {_safe_select('consultor_comercial', 'consultor')},
+               {data_insc} AS data_inscricao, {dt_upload} AS data_upload,
+               {_safe_select('origem')}, {_safe_select('status')},
+               {_mask_sql('v.celular', 'celular') if e['tel_col'] == 'celular' else "''"} AS celular_mascarado,
+               {_email_mask_sql('v.email') if _has('email') else "''"} AS email_mascarado,
+               COUNT(*) OVER() AS total_registros
+        FROM base v
+        WHERE {condition}
+        ORDER BY data_inscricao DESC NULLS LAST, data_upload DESC NULLS LAST
+        """
+    if not export:
+        sql += "\nLIMIT @limit OFFSET @offset"
+    return sql, params
 
 
-def _mask_last4(value: Any) -> str:
-    digits = "".join(ch for ch in str(value or "") if ch.isdigit())
-    return f"***{digits[-4:]}" if digits else ""
+def get_qualidade_detalhes(filters: Mapping[str, Any], meta: Mapping[str, Any], tipo: str) -> Tuple[Dict[str, Any], bool]:
+    sql, params = _quality_details_sql(tipo, filters, meta)
+    rows = [mask_rejection_row(r) for r in _run(sql, params, "gestao_qualidade_detalhes")]
+    total = rows[0].get("total_registros", 0) if rows else 0
+    return {"indicadores": {}, "items": rows, "pagination": _pagination(meta, total)}, False
 
 
-def mask_email(value: Any) -> str:
-    text = str(value or "").strip()
-    if "@" not in text:
-        return ""
-    user, domain = text.split("@", 1)
-    if not user:
-        return f"***@{domain}"
-    return f"{user[:1]}***@{domain}"
+def _csv_response_bytes(headers: List[Tuple[str, str]], rows: List[Dict[str, Any]]) -> bytes:
+    output = io.StringIO()
+    writer = csv.writer(output, lineterminator="\n")
+    writer.writerow([label for _key, label in headers])
+    for row in rows:
+        writer.writerow([row.get(key, "") for key, _label in headers])
+    return output.getvalue().encode("utf-8-sig")
 
 
-def mask_rejection_row(row: Dict[str, Any]) -> Dict[str, Any]:
-    masked = dict(row)
-    for key in list(masked):
-        lk = key.lower()
-        if lk == "payload":
-            masked.pop(key, None)
-        elif "cpf" in lk:
-            masked[key] = _mask_cpf(masked[key])
-        elif "celular" in lk or "telefone" in lk:
-            masked[key] = _mask_last4(masked[key])
-        elif "email" in lk:
-            masked[key] = mask_email(masked[key])
-    return masked
+def export_qualidade(filters: Mapping[str, Any], meta: Mapping[str, Any], tipo: str) -> Tuple[str, bytes, int]:
+    sql, params = _quality_details_sql(tipo, filters, {**meta, "limit": 5000, "offset": 0}, export=True)
+    rows = [mask_rejection_row(r) for r in _run(sql, params, "gestao_qualidade_exportar")]
+    headers = [("motivo", "Motivo"), ("identificador", "Identificador mascarado"), ("nome", "Nome"), ("curso", "Curso"), ("consultor", "Consultor"), ("data_inscricao", "Data de inscrição"), ("data_upload", "Data do upload"), ("origem", "Origem"), ("status", "Status")]
+    filename = f"qualidade_{tipo}_{date.today().isoformat()}.csv"
+    return filename, _csv_response_bytes(headers, rows), len(rows)
+
+
+def _importacoes_where(filters: Mapping[str, Any], params: List[Any], alias: str = "i") -> str:
+    where = ["1=1"]
+    if filters.get("data_ini"):
+        where.append(f"DATE({alias}.dt_upload) >= @data_ini")
+        params.append(bigquery.ScalarQueryParameter("data_ini", "DATE", filters["data_ini"]))
+    if filters.get("data_fim"):
+        where.append(f"DATE({alias}.dt_upload) <= @data_fim")
+        params.append(bigquery.ScalarQueryParameter("data_fim", "DATE", filters["data_fim"]))
+    for key in ("status_importacao", "nome_arquivo", "usuario"):
+        if filters.get(key):
+            col = "status" if key == "status_importacao" else key
+            op = "=" if key == "status_importacao" else "LIKE"
+            param = f"imp_{key}"
+            if op == "=":
+                where.append(f"UPPER(TRIM(CAST({alias}.{col} AS STRING))) = UPPER(@{param})")
+                params.append(bigquery.ScalarQueryParameter(param, "STRING", filters[key]))
+            else:
+                where.append(f"UPPER(CAST({alias}.{col} AS STRING)) LIKE CONCAT('%', UPPER(@{param}), '%')")
+                params.append(bigquery.ScalarQueryParameter(param, "STRING", filters[key]))
+    return " AND ".join(where)
 
 
 def get_importacoes(filters: Mapping[str, Any], meta: Mapping[str, Any]) -> Tuple[Dict[str, Any], bool]:
     def load():
-        limit = min(meta.get("limit", 20), 100)
-        out = {"historico": [], "rejeicoes": [], "tabelas_disponiveis": {"logs_importacoes": False, "logs_rejeicoes_import": False}}
+        limit = min(meta.get("limit", 20), MAX_PAGE_SIZE)
+        offset = meta.get("offset", 0)
+        params = [bigquery.ScalarQueryParameter("limit", "INT64", limit), bigquery.ScalarQueryParameter("offset", "INT64", offset)]
+        where = _importacoes_where(filters, params)
+        order_by = ORDERABLE_IMPORTACOES.get(meta.get("order_by") or "dt_upload", "dt_upload")
+        order_dir = meta.get("order_dir", "DESC")
         try:
-            params = [bigquery.ScalarQueryParameter("limit", "INT64", limit)]
             sql = f"""
-            SELECT nome_arquivo, dt_upload, usuario, total_recebido, total_valido, total_rejeitado,
-                   total_inserido, total_atualizado, total_ignorado_antigo, total_sem_celular,
-                   status, duracao_segundos, mensagem_erro_resumida, job_id_bigquery
-            FROM {bq._tbl('logs_importacoes')}
-            ORDER BY dt_upload DESC
-            LIMIT @limit
+            SELECT id_importacao, nome_arquivo, usuario, dt_upload, dt_inicio, dt_fim,
+                   total_recebido, total_valido, total_rejeitado, total_inserido,
+                   total_atualizado, total_ignorado_antigo, total_sem_celular,
+                   status, etapa, mensagem_erro, job_id, duracao_segundos,
+                   COUNT(*) OVER() AS total_registros
+            FROM {bq._tbl('logs_importacoes')} i
+            WHERE {where}
+            ORDER BY {order_by} {order_dir}
+            LIMIT @limit OFFSET @offset
             """
-            out["historico"] = _run(sql, params, "gestao_importacoes_historico")
-            out["tabelas_disponiveis"]["logs_importacoes"] = True
+            rows = _run(sql, params, "gestao_importacoes")
+            total = rows[0].get("total_registros", 0) if rows else 0
+            return {"items": rows, "pagination": _pagination({**meta, "limit": limit, "offset": offset}, total), "tabelas_disponiveis": {"logs_importacoes": True}}
         except NotFound:
-            logger.info("logs_importacoes não encontrada; use a migração SQL entregue.")
-        try:
-            params = [bigquery.ScalarQueryParameter("limit", "INT64", limit)]
-            sql = f"""
-            SELECT dt_rejeicao, nome_arquivo, linha, motivo, cpf, celular, email
-            FROM {bq._tbl('logs_rejeicoes_import')}
-            ORDER BY dt_rejeicao DESC
-            LIMIT @limit
-            """
-            out["rejeicoes"] = [mask_rejection_row(r) for r in _run(sql, params, "gestao_importacoes_rejeicoes")]
-            out["tabelas_disponiveis"]["logs_rejeicoes_import"] = True
-        except NotFound:
-            logger.info("logs_rejeicoes_import não encontrada.")
-        return out
-    return _with_cache("importacoes", {}, {"limit": meta.get("limit", 20)}, meta.get("force_refresh", False), load)
+            return {"items": [], "pagination": _pagination({**meta, "limit": limit, "offset": offset}, 0), "tabelas_disponiveis": {"logs_importacoes": False}, "message": "Tabela logs_importacoes não encontrada. Aplique a migração SQL entregue."}
+    return _with_cache("importacoes", filters, {k: meta.get(k) for k in ("limit", "offset", "order_by", "order_dir")}, meta.get("force_refresh", False), load)
 
+
+def export_importacoes(filters: Mapping[str, Any], meta: Mapping[str, Any]) -> Tuple[str, bytes, int]:
+    params: List[Any] = []
+    where = _importacoes_where(filters, params)
+    order_by = ORDERABLE_IMPORTACOES.get(meta.get("order_by") or "dt_upload", "dt_upload")
+    order_dir = meta.get("order_dir", "DESC")
+    sql = f"""
+    SELECT id_importacao, nome_arquivo, usuario, dt_upload, dt_inicio, dt_fim, duracao_segundos,
+           total_recebido, total_valido, total_rejeitado, total_inserido, total_atualizado,
+           total_ignorado_antigo, total_sem_celular, status, etapa, mensagem_erro, job_id
+    FROM {bq._tbl('logs_importacoes')} i
+    WHERE {where}
+    ORDER BY {order_by} {order_dir}
+    LIMIT 5000
+    """
+    rows = _run(sql, params, "gestao_importacoes_exportar")
+    headers = [("id_importacao", "ID da importação"), ("nome_arquivo", "Arquivo"), ("usuario", "Usuário"), ("dt_upload", "Data do upload"), ("dt_inicio", "Início"), ("dt_fim", "Fim"), ("duracao_segundos", "Duração (s)"), ("total_recebido", "Recebidos"), ("total_valido", "Válidos"), ("total_rejeitado", "Rejeitados"), ("total_inserido", "Inseridos"), ("total_atualizado", "Atualizados"), ("total_ignorado_antigo", "Ignorados antigos"), ("total_sem_celular", "Sem celular"), ("status", "Status"), ("etapa", "Etapa"), ("mensagem_erro", "Mensagem resumida"), ("job_id", "Job ID")]
+    return f"historico_importacoes_{date.today().isoformat()}.csv", _csv_response_bytes(headers, rows), len(rows)
+
+
+def export_fila(filters: Mapping[str, Any], meta: Mapping[str, Any]) -> Tuple[str, bytes, int]:
+    sql, params = _fila_sql(filters, {**meta, "limit": 5000, "offset": 0}, export=True)
+    rows = _run(sql, params, "gestao_fila_exportar")
+    for row in rows:
+        row["celular"] = _mask_last4(row.get("celular"))
+    headers = [("nome", "Nome"), ("celular", "Celular"), ("curso", "Curso"), ("polo", "Unidade"), ("origem", "Origem"), ("campanha", "Campanha"), ("consultor_comercial", "Consultor"), ("status", "Status"), ("data_inscricao", "Data de inscrição"), ("data_ultima_acao", "Última ação"), ("grupo_prioridade", "Grupo de prioridade"), ("prioridade", "Prioridade"), ("motivo_prioridade", "Motivo da prioridade")]
+    return f"fila_operacional_{date.today().isoformat()}.csv", _csv_response_bytes(headers, rows), len(rows)
+
+
+def registrar_importacao_upload(*, id_importacao: str, nome_arquivo: str, usuario: str, dt_upload: datetime, dt_inicio: datetime, dt_fim: Optional[datetime], total_recebido: int, total_valido: int, total_rejeitado: int, total_inserido: Optional[int], total_atualizado: Optional[int], total_ignorado_antigo: Optional[int], total_sem_celular: int, status: str, etapa: str, mensagem_erro: Optional[str], job_id: Optional[str], duracao_segundos: Optional[float]) -> None:
+    row = {"id_importacao": id_importacao, "nome_arquivo": nome_arquivo, "usuario": usuario, "dt_upload": dt_upload.isoformat(), "dt_inicio": dt_inicio.isoformat(), "dt_fim": dt_fim.isoformat() if dt_fim else None, "total_recebido": total_recebido, "total_valido": total_valido, "total_rejeitado": total_rejeitado, "total_inserido": total_inserido, "total_atualizado": total_atualizado, "total_ignorado_antigo": total_ignorado_antigo, "total_sem_celular": total_sem_celular, "status": status, "etapa": etapa, "mensagem_erro": (mensagem_erro or "")[:500] or None, "job_id": job_id, "duracao_segundos": duracao_segundos}
+    try:
+        errors = bq.get_bq_client().insert_rows_json(f"{bq.GCP_PROJECT_ID}.{bq.BQ_DATASET}.logs_importacoes", [row])
+        if errors:
+            logger.error("gestao_import_log_error operation=registrar_importacao_upload error_type=insert_rows_json errors=%s", errors)
+    except Exception as exc:
+        logger.warning("gestao_import_log_unavailable operation=registrar_importacao_upload error_type=%s", exc.__class__.__name__)
 
 def get_opcoes(filters: Mapping[str, Any], meta: Mapping[str, Any]) -> Tuple[Dict[str, Any], bool]:
     def load():
@@ -695,14 +978,10 @@ def get_opcoes(filters: Mapping[str, Any], meta: Mapping[str, Any]) -> Tuple[Dic
 
 def score_rule_documentation() -> List[Dict[str, Any]]:
     return [
-        {"componente": "Matrícula", "regra": "Leads matriculados recebem score 5 e prioridade baixa."},
-        {"componente": "Sem status", "regra": "+35 pontos quando status está vazio."},
-        {"componente": "Sem ação", "regra": "+25 pontos quando não há última ação; dias sem ação também pesam."},
-        {"componente": "Idade do lead", "regra": "+0,35 ponto por dia desde a inscrição, limitado a 20."},
-        {"componente": "Dias sem ação", "regra": "+0,60 ponto por dia sem ação, limitado a 30."},
-        {"componente": "Acionamentos", "regra": "+10 sem acionamento, +5 com 1 a 2 acionamentos, -5 com mais acionamentos."},
-        {"componente": "Origem/campanha", "regra": "Pequeno acréscimo quando origem ou campanha não informadas."},
-        {"componente": "Carga recente", "regra": "+8 quando dt_upload/data_atualizacao ocorreu nos últimos 3 dias."},
+        {"componente": "Grupo 1", "regra": "Leads não matriculados, com data_inscricao válida e sem status vêm primeiro, ordenados por data_inscricao desc e dt_upload desc."},
+        {"componente": "Grupo 2", "regra": "Depois vêm leads não matriculados classificados exatamente como EC em status, status_inscricao ou tipo_negocio."},
+        {"componente": "Grupo 3", "regra": "Por fim vêm demais leads elegíveis, excluindo matriculados, cancelados, descartados, encerrados e sem telefone válido."},
+        {"componente": "Score", "regra": "A prioridade 100/70/40 é explicativa e não altera a ordem entre grupos; dt_upload é usado somente como desempate após data_inscricao."},
     ]
 
 
@@ -716,10 +995,89 @@ def is_matriculado_row(row: Mapping[str, Any]) -> bool:
 
 
 def is_status_empty(value: Any) -> bool:
-    return value is None or str(value).strip() == ""
+    return value is None or str(value).strip().upper() in EMPTY_TEXTS
 
 
 def should_accept_upload_version(staging_dt_upload: datetime, fact_data_atualizacao: Optional[datetime]) -> bool:
     if fact_data_atualizacao is None:
         return True
     return staging_dt_upload >= fact_data_atualizacao
+
+
+
+def normalize_phone(value: Any) -> str:
+    return "".join(ch for ch in str(value or "") if ch.isdigit())
+
+
+def is_valid_phone(value: Any) -> bool:
+    digits = normalize_phone(value)
+    return len(digits) in {10, 11} and len(set(digits)) > 1
+
+
+def normalize_cpf(value: Any) -> str:
+    return "".join(ch for ch in str(value or "") if ch.isdigit())
+
+
+def is_valid_cpf(value: Any) -> bool:
+    cpf = normalize_cpf(value)
+    if len(cpf) != 11 or len(set(cpf)) == 1:
+        return False
+    nums = [int(c) for c in cpf]
+    s1 = sum(nums[i] * (10 - i) for i in range(9))
+    d1 = (s1 * 10) % 11
+    d1 = 0 if d1 == 10 else d1
+    s2 = sum(nums[i] * (11 - i) for i in range(10))
+    d2 = (s2 * 10) % 11
+    d2 = 0 if d2 == 10 else d2
+    return nums[9] == d1 and nums[10] == d2
+
+
+def is_status_ec(*values: Any) -> bool:
+    return any(str(v or "").strip().upper() == "EC" for v in values)
+
+
+def parse_lead_date(value: Any) -> Optional[date]:
+    if value in (None, ""):
+        return None
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    text = str(value).strip()
+    if not text:
+        return None
+    for fmt in ("%Y-%m-%d", "%d/%m/%Y", "%Y-%m-%d %H:%M:%S"):
+        try:
+            return datetime.strptime(text[:19] if "%H" in fmt else text[:10], fmt).date()
+        except ValueError:
+            pass
+    try:
+        serial = int(float(text))
+        if serial > 0:
+            return date(1899, 12, 30) + timedelta(days=serial)
+    except ValueError:
+        pass
+    return None
+
+
+def prioritize_fila_rows(rows: List[Mapping[str, Any]]) -> List[Dict[str, Any]]:
+    out = []
+    for raw in rows:
+        row = dict(raw)
+        if is_matriculado_row(row) or not is_valid_phone(row.get("celular") or row.get("telefone")):
+            continue
+        status = row.get("status")
+        status_norm = str(status or row.get("status_inscricao") or row.get("tipo_negocio") or "").strip().upper()
+        if status_norm in {"CANCELADO", "CANCELADA", "CANC", "DESCARTADO", "DESCARTADA", "ENCERRADO", "ENCERRADA", "PERDIDO", "PERDIDA", "MAT", "MATRICULADO"}:
+            continue
+        dt = parse_lead_date(row.get("data_inscricao"))
+        if is_status_empty(status) and dt is not None:
+            grupo, prioridade, motivo = 1, 100, "Lead recente sem status"
+        elif is_status_ec(row.get("status"), row.get("status_inscricao"), row.get("tipo_negocio")):
+            grupo, prioridade, motivo = 2, 70, "Lead classificado como EC"
+        else:
+            grupo, prioridade, motivo = 3, 40, "Lead elegível para acompanhamento"
+        row.update({"grupo_prioridade": grupo, "prioridade": prioridade, "motivo_prioridade": motivo, "data_inscricao_normalizada": dt, "status_normalizado": status_norm, "dias_desde_inscricao": (date.today() - dt).days if dt else None})
+        out.append(row)
+    out.sort(key=lambda r: (r["grupo_prioridade"], -(r["data_inscricao_normalizada"].toordinal() if r.get("data_inscricao_normalizada") else 0)))
+    return out
