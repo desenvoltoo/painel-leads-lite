@@ -81,13 +81,13 @@
     </section>
 
     <section class="data-panel mb-4">
-      <div class="panel-heading flex-wrap gap-2"><div><h2>Fila operacional inteligente</h2><p>Matriculados não entram como prioridade alta; score calculado no backend/BigQuery.</p></div><a class="btn btn-outline-primary" href="/gestao/exportar-prioritarios?limit=500">Exportar prioritários</a></div>
-      <div class="table-responsive"><table id="filaTable" class="table table-hover align-middle w-100"><thead><tr><th>Nome</th><th>Celular</th><th>Curso</th><th>Polo</th><th>Origem</th><th>Campanha</th><th>Consultor</th><th>Status</th><th>Inscrição</th><th>Última ação</th><th>Dias sem ação</th><th>Score</th><th>Prioridade</th><th>Motivo</th></tr></thead><tbody></tbody></table></div>
+      <div class="panel-heading flex-wrap gap-2"><div><h2>Fila operacional inteligente</h2><p>Ordenação: grupo 1 sem status recente, grupo 2 EC, grupo 3 demais elegíveis.</p></div><button id="btnExportFila" class="btn btn-outline-primary" type="button">Exportar fila</button></div>
+      <div class="table-responsive"><table id="filaTable" class="table table-hover align-middle w-100"><thead><tr><th>Nome</th><th>Celular</th><th>Curso</th><th>Polo</th><th>Origem</th><th>Campanha</th><th>Consultor</th><th>Status</th><th>Inscrição</th><th>Última ação</th><th>Dias sem ação</th><th>Grupo</th><th>Prioridade</th><th>Motivo</th></tr></thead><tbody></tbody></table></div>
     </section>
 
     <section class="row g-4 mb-4">
-      <div class="col-12 col-xl-6"><div class="data-panel h-100"><div class="panel-heading"><div><h2>Qualidade dos dados</h2><p>Duplicidades calculadas como excedente por chave.</p></div></div><div id="qualityGrid" class="quality-grid"></div></div></div>
-      <div class="col-12 col-xl-6"><div class="data-panel h-100"><div class="panel-heading"><div><h2>Histórico de Importações</h2><p>Exibe logs quando as tabelas estiverem criadas.</p></div></div><div id="importsPanel" class="imports-panel empty-state">Carregando histórico...</div></div></div>
+      <div class="col-12 col-xl-6"><div class="data-panel h-100"><div class="panel-heading"><div><h2>Qualidade dos dados</h2><p>Duplicidades calculadas como registros excedentes por chave normalizada.</p></div></div><div id="qualityGrid" class="quality-grid"></div><div id="qualityDetails" class="mini-table mt-3 d-none"></div></div></div>
+      <div class="col-12 col-xl-6"><div class="data-panel h-100"><div class="panel-heading"><div><h2>Histórico de Importações</h2><p>Ordenado por upload mais recente e protegido contra payloads.</p></div><button id="btnExportImportacoes" class="btn btn-outline-primary btn-sm" type="button">Exportar histórico</button></div><div id="importsPanel" class="imports-panel empty-state">Carregando histórico...</div></div></div>
     </section>
   </main>
 

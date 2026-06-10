@@ -695,11 +695,13 @@ def _insert_rejection_logs(rejections: List[Dict[str, Any]]) -> None:
     table_id = _rejection_log_table_id()
     rows = [
         {
-            "data_hora": item["data_hora"],
-            "arquivo": item["arquivo"],
-            "linha": item["linha"],
+            "ts": item["data_hora"],
             "motivo": item["motivo"],
-            "conteudo": item["conteudo"],
+            "cpf_raw": item.get("cpf_raw"),
+            "celular_raw": item.get("celular_raw"),
+            "nome_raw": item.get("nome_raw"),
+            "email_raw": item.get("email_raw"),
+            "id_importacao": item.get("id_importacao"),
         }
         for item in rejections
     ]
@@ -781,7 +783,11 @@ def _prepare_dataframe_for_staging(
                     "arquivo": filename,
                     "linha": int(idx) + 2,
                     "motivo": reason,
-                    "conteudo": _json_dump_record(row.to_dict()),
+                    "cpf_raw": row.get("cpf"),
+                    "celular_raw": row.get("celular"),
+                    "nome_raw": row.get("nome"),
+                    "email_raw": row.get("email"),
+                    "id_importacao": None,
                 }
             )
         _insert_rejection_logs(rejections)
@@ -1226,14 +1232,19 @@ def _gestao_timestamp_expr(*candidate_cols: str, alias: str = "v") -> str:
     col = _first_existing_col(*candidate_cols)
     if not col:
         return "CAST(NULL AS TIMESTAMP)"
-    return f"SAFE_CAST({alias}.{col} AS TIMESTAMP)"
+    raw = f"CAST({alias}.{col} AS STRING)"
+    return (
+        f"COALESCE(SAFE_CAST({alias}.{col} AS TIMESTAMP), "
+        f"TIMESTAMP(SAFE_CAST({alias}.{col} AS DATE)), "
+        f"SAFE.PARSE_TIMESTAMP('%d/%m/%Y', {raw}), "
+        f"SAFE.PARSE_TIMESTAMP('%Y-%m-%d', {raw}), "
+        f"IF(SAFE_CAST({raw} AS INT64) IS NULL, NULL, TIMESTAMP(DATE_ADD(DATE '1899-12-30', INTERVAL SAFE_CAST({raw} AS INT64) DAY))))"
+    )
 
 
 def _gestao_date_expr(*candidate_cols: str, alias: str = "v") -> str:
-    col = _first_existing_col(*candidate_cols)
-    if not col:
-        return "CAST(NULL AS DATE)"
-    return f"SAFE_CAST({alias}.{col} AS DATE)"
+    ts = _gestao_timestamp_expr(*candidate_cols, alias=alias)
+    return f"DATE({ts})"
 
 
 def _gestao_text_expr(*candidate_cols: str, alias: str = "v", default: str = "Não informado") -> str:
@@ -1353,17 +1364,20 @@ def _gestao_number(value: Any) -> float:
 
 
 def _gestao_status_empty_expr(alias: str = "v") -> str:
-    """Regra oficial: lead nunca trabalhado é somente status IS NULL."""
+    """Status vazio normalizado: NULL, string vazia e marcadores textuais de ausência."""
     if _has_view_col("status"):
-        return f"({alias}.status IS NULL)"
+        return (
+            f"(NULLIF(TRIM(CAST({alias}.status AS STRING)), '') IS NULL OR "
+            f"UPPER(TRIM(CAST({alias}.status AS STRING))) IN ('NULL','N/A','NA','SEM INFORMACAO','SEM INFORMAÇÃO','-'))"
+        )
     return "FALSE"
 
 
 def _gestao_matriculado_expr(alias: str = "v") -> str:
-    """Regra oficial de matrícula: status = MAT ou flag_matriculado = TRUE."""
+    """Regra oficial de matrícula: status textual ou flag_matriculado = TRUE."""
     checks = []
     if _has_view_col("status"):
-        checks.append(f"UPPER(TRIM(CAST({alias}.status AS STRING))) = 'MAT'")
+        checks.append(f"UPPER(TRIM(CAST({alias}.status AS STRING))) IN ('MAT','MATRICULADO')")
     if _has_view_col("flag_matriculado"):
         checks.append(f"COALESCE(SAFE_CAST({alias}.flag_matriculado AS BOOL), FALSE)")
     if _has_view_col("matriculado"):

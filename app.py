@@ -12,11 +12,10 @@ import logging
 import csv
 import threading
 from time import perf_counter
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, Any, Tuple
  
-import pandas as pd
 from flask import Flask, render_template, request, jsonify, send_file, redirect, url_for, make_response, g, session, Response, stream_with_context
 from werkzeug.security import check_password_hash
 from startup_diagnostics import build_error_payload, env_bool, env_int
@@ -45,6 +44,11 @@ from services.gestao import (
     get_fila as gestao_get_fila,
     get_funil as gestao_get_funil,
     get_importacoes as gestao_get_importacoes,
+    get_qualidade_detalhes as gestao_get_qualidade_detalhes,
+    export_qualidade as gestao_export_qualidade,
+    export_importacoes as gestao_export_importacoes,
+    export_fila as gestao_export_fila,
+    registrar_importacao_upload as gestao_registrar_importacao_upload,
     get_opcoes as gestao_get_opcoes,
     get_produtividade as gestao_get_produtividade,
     get_qualidade as gestao_get_qualidade,
@@ -250,7 +254,7 @@ def _error_payload(e: Exception, public_msg: str):
         e,
         public_message=public_msg,
         phase="request",
-        include_trace=True,
+        include_trace=False,
     )
  
 def _stamp() -> str:
@@ -306,7 +310,8 @@ def _detect_encoding(raw_bytes: bytes) -> str:
         return "utf-8"
 
 
-def _read_upload_to_df(file_storage) -> pd.DataFrame:
+def _read_upload_to_df(file_storage):
+    import pandas as pd
     filename = (file_storage.filename or "").lower().strip()
     raw = file_storage.read()
  
@@ -533,6 +538,48 @@ def create_app() -> Flask:
     @app.get("/api/gestao/importacoes")
     def api_gestao_importacoes():
         return _gestao_endpoint(gestao_get_importacoes)
+
+    def _gestao_csv_response(exporter, *args):
+        try:
+            filters, meta = gestao_parse_filters(request.args)
+            filename, content, rows_count = exporter(filters, meta, *args)
+            logger.info(
+                "gestao_export operation=%s route=%s result_count=%s page=%s page_size=%s filter_names=%s",
+                getattr(exporter, "__name__", "export"),
+                request.path,
+                rows_count,
+                1,
+                meta.get("limit"),
+                sorted(filters.keys()),
+            )
+            response = make_response(content)
+            response.headers["Content-Type"] = "text/csv; charset=utf-8-sig"
+            response.headers["Content-Disposition"] = f"attachment; filename={filename}"
+            return response
+        except GestaoValidationError as exc:
+            return jsonify({"ok": False, "error": {"code": "GESTAO_INVALID_FILTER", "message": str(exc)}}), 400
+        except Exception as exc:
+            return _gestao_error_response(exc)
+
+    @app.get("/api/gestao/qualidade/detalhes")
+    def api_gestao_qualidade_detalhes():
+        tipo = (request.args.get("tipo") or "").strip()
+        def _loader(filters, meta):
+            return gestao_get_qualidade_detalhes(filters, meta, tipo)
+        return _gestao_endpoint(_loader)
+
+    @app.get("/api/gestao/qualidade/exportar")
+    def api_gestao_qualidade_exportar():
+        tipo = (request.args.get("tipo") or "").strip()
+        return _gestao_csv_response(gestao_export_qualidade, tipo)
+
+    @app.get("/api/gestao/importacoes/exportar")
+    def api_gestao_importacoes_exportar():
+        return _gestao_csv_response(gestao_export_importacoes)
+
+    @app.get("/api/gestao/fila/exportar")
+    def api_gestao_fila_exportar():
+        return _gestao_csv_response(gestao_export_fila)
 
     @app.get("/api/gestao/opcoes")
     def api_gestao_opcoes():
@@ -880,21 +927,51 @@ def create_app() -> Flask:
         if not _validate_upload_filename(filename):
             return jsonify({"ok": False, "error": "Formato inválido. Envie CSV, XLSX ou XLS."}), 400
 
+        importacao_id = uuid.uuid4().hex
+        started_dt = datetime.now(timezone.utc)
+        started_perf = perf_counter()
+        rows_received = 0
         try:
             df = _read_upload_to_df(file_storage)
+            rows_received = len(df)
             if df.empty:
                 return jsonify({"ok": False, "error": "Arquivo vazio ou sem registros válidos."}), 400
             logger.info(
-                "Upload recebido: arquivo=%s linhas_recebidas=%d total_colunas=%d etapa=leitura_arquivo",
+                "Upload recebido: arquivo=%s linhas_recebidas=%d total_colunas=%d etapa=leitura_arquivo operation=upload",
                 filename,
                 len(df),
                 len(df.columns),
             )
             result = process_upload_dataframe(df, filename=filename)
+            report = result.get("report") or {}
+            status = "CONCLUIDO_COM_REJEICOES" if int(report.get("linhas_rejeitadas") or 0) > 0 else "CONCLUIDO"
+            dt_upload_raw = report.get("dt_upload")
+            try:
+                dt_upload = datetime.fromisoformat(str(dt_upload_raw).replace("Z", "+00:00")) if dt_upload_raw else started_dt
+            except Exception:
+                dt_upload = started_dt
+            gestao_registrar_importacao_upload(
+                id_importacao=importacao_id, nome_arquivo=filename, usuario=getattr(g, "current_user", None) or "desconhecido",
+                dt_upload=dt_upload, dt_inicio=started_dt, dt_fim=datetime.now(timezone.utc),
+                total_recebido=int(report.get("linhas_recebidas") or rows_received),
+                total_valido=int(report.get("linhas_processadas") or 0),
+                total_rejeitado=int(report.get("linhas_rejeitadas") or 0),
+                total_inserido=None, total_atualizado=None, total_ignorado_antigo=None,
+                total_sem_celular=int((df.get("celular").isna() | (df.get("celular").astype(str).str.strip() == "")).sum()) if "celular" in df.columns else 0,
+                status=status, etapa="PROCEDURE_ASSINCRONA", mensagem_erro=None, job_id=result.get("job_id"),
+                duracao_segundos=round(perf_counter() - started_perf, 3),
+            )
             invalidate_gestao_cache()
-            return jsonify({"ok": True, **result}), 202
+            return jsonify({"ok": True, "id_importacao": importacao_id, **result}), 202
         except Exception as e:
-            logger.exception("Erro no processamento de upload: arquivo=%s etapa=rota_upload exception_type=%s", filename, e.__class__.__name__)
+            logger.exception("Erro no processamento de upload: arquivo=%s etapa=rota_upload exception_type=%s operation=upload", filename, e.__class__.__name__)
+            gestao_registrar_importacao_upload(
+                id_importacao=importacao_id, nome_arquivo=filename, usuario=getattr(g, "current_user", None) or "desconhecido",
+                dt_upload=started_dt, dt_inicio=started_dt, dt_fim=datetime.now(timezone.utc),
+                total_recebido=rows_received, total_valido=0, total_rejeitado=0, total_inserido=None, total_atualizado=None,
+                total_ignorado_antigo=None, total_sem_celular=0, status="ERRO", etapa="ROTA_UPLOAD",
+                mensagem_erro=str(e.__class__.__name__), job_id=None, duracao_segundos=round(perf_counter() - started_perf, 3),
+            )
             return jsonify(_error_payload(e, "Falha ao processar upload.")), 500
 
     @app.get("/api/upload/status")

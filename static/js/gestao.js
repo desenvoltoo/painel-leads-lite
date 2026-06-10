@@ -6,6 +6,7 @@
     controllers: new Map(),
     charts: {},
     tables: {},
+    qualityType: null,
     loadingCount: 0,
   };
 
@@ -83,6 +84,40 @@
       if (value !== undefined && value !== null && value !== '') params.set(key, value);
     });
     return params;
+  }
+
+
+
+  async function downloadGestao(endpoint, extra, button, fallbackName) {
+    const original = button ? button.textContent : '';
+    if (button) { button.disabled = true; button.textContent = 'Gerando...'; }
+    setLoading(true);
+    try {
+      const res = await fetch(`/api/gestao/${endpoint}?${buildParams(extra)}`, { headers: { Accept: 'text/csv,application/json' } });
+      const type = res.headers.get('content-type') || '';
+      if (!res.ok) {
+        const payload = type.includes('application/json') ? await res.json().catch(() => null) : null;
+        throw new Error(payload?.error?.message || 'Não foi possível gerar o arquivo.');
+      }
+      const blob = await res.blob();
+      const cd = res.headers.get('content-disposition') || '';
+      const match = cd.match(/filename="?([^";]+)"?/i);
+      const filename = match?.[1] || fallbackName;
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+      toast('Arquivo gerado com sucesso.', 'success');
+    } catch (err) {
+      toast(err.message || 'Erro ao exportar arquivo.');
+    } finally {
+      setLoading(false);
+      if (button) { button.disabled = false; button.textContent = original; }
+    }
   }
 
   async function apiGet(endpoint, extra = {}) {
@@ -270,20 +305,37 @@
   async function loadFila() {
     try {
       const { data } = await apiGet('fila', { limit: 500 });
-      replaceTable(state.tables.fila, (data.rows || []).map(r => [escapeHtml(r.nome), escapeHtml(formatPhone(r.celular)), escapeHtml(r.curso), escapeHtml(r.polo), escapeHtml(r.origem), escapeHtml(r.campanha), escapeHtml(r.consultor_comercial), escapeHtml(r.status), formatDate(r.data_inscricao), formatDate(r.data_ultima_acao), formatValue(r.dias_sem_acao), formatValue(r.score_prioridade), `<span class="priority-badge ${escapeHtml(String(r.prioridade || '').toLowerCase())}">${escapeHtml(r.prioridade)}</span>`, escapeHtml(r.motivo_prioridade)]));
+      const rows = data.items || data.rows || [];
+      replaceTable(state.tables.fila, rows.map(r => [escapeHtml(r.nome), escapeHtml(formatPhone(r.celular)), escapeHtml(r.curso), escapeHtml(r.polo), escapeHtml(r.origem), escapeHtml(r.campanha), escapeHtml(r.consultor_comercial), escapeHtml(r.status), formatDate(r.data_inscricao), formatDate(r.data_ultima_acao), formatValue(r.dias_sem_acao), formatValue(r.grupo_prioridade), `<span class="priority-badge ${escapeHtml(String(r.grupo_prioridade || '').toLowerCase())}">${escapeHtml(r.prioridade)}</span>`, escapeHtml(r.motivo_prioridade)]));
     } catch (_) { replaceTable(state.tables.fila, []); }
   }
 
   async function loadQualidade() {
     const box = $('#qualityGrid');
+    const details = $('#qualityDetails');
     box.innerHTML = '<div class="empty-state">Carregando qualidade...</div>';
     try {
       const { data } = await apiGet('qualidade');
+      const indicadores = data.indicadores || data || {};
       const labels = {
-        leads_sem_telefone: 'Sem telefone', leads_sem_email: 'Sem e-mail', leads_sem_cpf: 'Sem CPF', leads_sem_origem: 'Sem origem', leads_sem_curso: 'Sem curso', leads_sem_consultor: 'Sem consultor', cpf_invalido_ou_incompleto: 'CPF inválido/incompleto', telefone_invalido: 'Telefone inválido', duplicados_por_cpf_excedentes: 'Duplicados CPF excedentes', duplicados_por_telefone_excedentes: 'Duplicados telefone excedentes', registros_rejeitados_upload: 'Rejeitados upload', registros_sem_dt_upload: 'Sem dt_upload', datas_nao_interpretadas: 'Datas não interpretadas'
+        sem_celular: 'Sem celular', sem_email: 'Sem e-mail', sem_cpf: 'Sem CPF', sem_origem: 'Sem origem', sem_curso: 'Sem curso', sem_consultor: 'Sem consultor', sem_status: 'Sem status', telefone_invalido: 'Telefone inválido', cpf_invalido: 'CPF inválido/incompleto', duplicado_celular: 'Duplicados celular', duplicado_cpf: 'Duplicados CPF', rejeitado: 'Rejeitados upload', sem_dt_upload: 'Sem dt_upload', data_invalida: 'Datas inválidas'
       };
-      box.innerHTML = Object.entries(labels).map(([k, l]) => `<div><span>${escapeHtml(l)}</span><strong>${formatValue(data[k])}</strong><button class="btn btn-link btn-sm" type="button" disabled>Detalhe/export em evolução</button></div>`).join('');
-    } catch (_) { box.innerHTML = '<div class="empty-state error">Erro ao carregar qualidade.</div>'; }
+      box.innerHTML = Object.entries(labels).map(([k, l]) => `<div class="quality-card"><span>${escapeHtml(l)}</span><strong>${formatValue(indicadores[k])}</strong><div class="d-flex gap-2 flex-wrap"><button class="btn btn-link btn-sm quality-detail" data-quality="${escapeHtml(k)}" type="button">Ver registros</button><button class="btn btn-link btn-sm quality-export" data-quality="${escapeHtml(k)}" type="button">Exportar</button></div></div>`).join('');
+      details.classList.add('d-none');
+    } catch (_) { box.innerHTML = '<div class="empty-state error">Erro ao carregar qualidade. <button class="btn btn-sm btn-outline-primary" id="retryQualidade">Tentar novamente</button></div>'; $('#retryQualidade')?.addEventListener('click', loadQualidade); }
+  }
+
+  async function loadQualidadeDetalhes(tipo) {
+    const box = $('#qualityDetails');
+    state.qualityType = tipo;
+    box.classList.remove('d-none');
+    box.innerHTML = '<div class="empty-state">Carregando registros...</div>';
+    try {
+      const { data } = await apiGet('qualidade/detalhes', { tipo, limit: 25 });
+      const rows = data.items || [];
+      if (!rows.length) { box.innerHTML = '<div class="empty-state">Nenhum registro encontrado para este indicador.</div>'; return; }
+      box.innerHTML = `<table><thead><tr><th>Motivo</th><th>Identificador</th><th>Nome</th><th>Curso</th><th>Consultor</th><th>Inscrição</th><th>Upload</th><th>Origem</th><th>Status</th></tr></thead><tbody>${rows.map(r => `<tr><td>${escapeHtml(r.motivo)}</td><td>${escapeHtml(r.identificador || r.cpf || r.celular || '')}</td><td>${escapeHtml(r.nome)}</td><td>${escapeHtml(r.curso)}</td><td>${escapeHtml(r.consultor || r.consultor_comercial)}</td><td>${formatDate(r.data_inscricao)}</td><td>${formatDate(r.data_upload)}</td><td>${escapeHtml(r.origem)}</td><td>${escapeHtml(r.status)}</td></tr>`).join('')}</tbody></table>`;
+    } catch (_) { box.innerHTML = '<div class="empty-state error">Erro ao carregar registros. <button class="btn btn-sm btn-outline-primary" id="retryQualityDetails">Tentar novamente</button></div>'; $('#retryQualityDetails')?.addEventListener('click', () => loadQualidadeDetalhes(tipo)); }
   }
 
   async function loadImportacoes() {
@@ -291,11 +343,11 @@
     box.innerHTML = '<div class="empty-state">Carregando histórico...</div>';
     try {
       const { data } = await apiGet('importacoes', { limit: 20 });
-      const hist = data.historico || [];
-      const rej = data.rejeicoes || [];
-      if (!hist.length && !rej.length) { box.innerHTML = '<div class="empty-state">Sem logs disponíveis. Aplique a migração SQL para habilitar o histórico.</div>'; return; }
-      box.innerHTML = `<h3>Últimas importações</h3>${hist.length ? `<div class="mini-table"><table><thead><tr><th>Arquivo</th><th>Upload</th><th>Status</th><th>Recebido</th><th>Válido</th><th>Rejeitado</th><th>Job</th></tr></thead><tbody>${hist.map(r => `<tr><td>${escapeHtml(r.nome_arquivo)}</td><td>${formatDate(r.dt_upload)}</td><td>${escapeHtml(r.status)}</td><td>${formatValue(r.total_recebido)}</td><td>${formatValue(r.total_valido)}</td><td>${formatValue(r.total_rejeitado)}</td><td>${escapeHtml(r.job_id_bigquery)}</td></tr>`).join('')}</tbody></table></div>` : '<div class="empty-state">Histórico não disponível.</div>'}<h3>Últimas rejeições</h3>${rej.length ? `<div class="mini-table"><table><tbody>${rej.map(r => `<tr><td>${formatDate(r.dt_rejeicao)}</td><td>${escapeHtml(r.nome_arquivo)}</td><td>${escapeHtml(r.motivo)}</td><td>${escapeHtml(r.cpf || '')}</td><td>${escapeHtml(r.celular || '')}</td><td>${escapeHtml(r.email || '')}</td></tr>`).join('')}</tbody></table></div>` : '<div class="empty-state">Sem rejeições recentes.</div>'}`;
-    } catch (_) { box.innerHTML = '<div class="empty-state error">Erro ao carregar importações.</div>'; }
+      const hist = data.items || [];
+      if (!hist.length) { box.innerHTML = `<div class="empty-state">${escapeHtml(data.message || 'Sem histórico de importações para os filtros ativos.')}</div>`; return; }
+      box.classList.remove('empty-state');
+      box.innerHTML = `<div class="mini-table"><table><thead><tr><th>ID</th><th>Arquivo</th><th>Usuário</th><th>Upload</th><th>Status</th><th>Recebidos</th><th>Válidos</th><th>Rejeitados</th><th>Job</th></tr></thead><tbody>${hist.map(r => `<tr><td>${escapeHtml(r.id_importacao)}</td><td>${escapeHtml(r.nome_arquivo)}</td><td>${escapeHtml(r.usuario)}</td><td>${formatDate(r.dt_upload)}</td><td>${escapeHtml(r.status)}</td><td>${formatValue(r.total_recebido)}</td><td>${formatValue(r.total_valido)}</td><td>${formatValue(r.total_rejeitado)}</td><td>${escapeHtml(r.job_id)}</td></tr>`).join('')}</tbody></table></div>`;
+    } catch (_) { box.innerHTML = '<div class="empty-state error">Erro ao carregar importações. <button class="btn btn-sm btn-outline-primary" id="retryImportacoes">Tentar novamente</button></div>'; $('#retryImportacoes')?.addEventListener('click', loadImportacoes); }
   }
 
   function loadAll(force = false) {
@@ -322,6 +374,9 @@
     $('#filtersForm').addEventListener('submit', ev => { ev.preventDefault(); const values = readFilters(); if (!values) return; state.filters = values; syncUrlAndStorage(); loadAll(); });
     $('#btnClearFilters').addEventListener('click', () => { $('#filtersForm').reset(); state.filters = {}; syncUrlAndStorage(); loadAll(); });
     $('#btnRefresh').addEventListener('click', () => loadAll(true));
+    $('#qualityGrid').addEventListener('click', ev => { const detail = ev.target.closest('.quality-detail'); const exp = ev.target.closest('.quality-export'); if (detail) loadQualidadeDetalhes(detail.dataset.quality); if (exp) downloadGestao('qualidade/exportar', { tipo: exp.dataset.quality }, exp, `qualidade_${exp.dataset.quality}.csv`); });
+    $('#btnExportImportacoes')?.addEventListener('click', ev => downloadGestao('importacoes/exportar', {}, ev.currentTarget, 'historico_importacoes.csv'));
+    $('#btnExportFila')?.addEventListener('click', ev => downloadGestao('fila/exportar', {}, ev.currentTarget, 'fila_operacional.csv'));
     $('#granularity').addEventListener('change', loadEvolucao);
     $('[name="busca"]').addEventListener('input', debounce(() => { const values = readFilters(); if (!values) return; state.filters = values; syncUrlAndStorage(); loadAll(); }, 700));
     loadAll();
