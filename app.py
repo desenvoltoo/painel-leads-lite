@@ -39,6 +39,21 @@ from services.bigquery import (
     update_export_job,
     get_export_job,
 )
+from services.gestao import (
+    GestaoValidationError,
+    get_evolucao as gestao_get_evolucao,
+    get_fila as gestao_get_fila,
+    get_funil as gestao_get_funil,
+    get_importacoes as gestao_get_importacoes,
+    get_opcoes as gestao_get_opcoes,
+    get_produtividade as gestao_get_produtividade,
+    get_qualidade as gestao_get_qualidade,
+    get_rankings as gestao_get_rankings,
+    get_resumo as gestao_get_resumo,
+    invalidate_gestao_cache,
+    parse_filters as gestao_parse_filters,
+    utc_now_iso as gestao_utc_now_iso,
+)
 
 logger = logging.getLogger(__name__)
  
@@ -445,36 +460,83 @@ def create_app() -> Flask:
 
     @app.get("/gestao")
     def gestao():
+        # A página é carregada rapidamente; os dados vêm dos endpoints JSON protegidos.
+        return render_template(
+            "gestao.html",
+            asset_version=asset_version,
+            ui_version=ui_version,
+            current_user=getattr(g, "current_user", None),
+            gestao_data=None,
+            gestao_error=None,
+        )
+
+    def _gestao_success(data, filters, *, cached=False, status=200):
+        return jsonify({
+            "ok": True,
+            "data": data,
+            "meta": {
+                "generated_at": gestao_utc_now_iso(),
+                "filters": filters,
+                "cached": bool(cached),
+            },
+        }), status
+
+    def _gestao_error_response(exc, *, status=500, code="GESTAO_QUERY_ERROR", message="Não foi possível carregar os dados."):
+        logger.exception(
+            "gestao_api_error route=%s operation=%s exception_type=%s",
+            request.path,
+            request.endpoint,
+            exc.__class__.__name__,
+        )
+        return jsonify({"ok": False, "error": {"code": code, "message": message}}), status
+
+    def _gestao_endpoint(loader):
         try:
-            force_refresh = str(request.args.get("refresh") or "").lower() in ("1", "true", "yes", "sim")
-            gestao_data = query_gestao_dashboard(force_refresh=force_refresh)
-            return render_template(
-                "gestao.html",
-                asset_version=asset_version,
-                ui_version=ui_version,
-                current_user=getattr(g, "current_user", None),
-                gestao_data=gestao_data,
-            )
-        except TimeoutError as e:
-            logger.exception("Timeout ao carregar Gestão Operacional: %s", e)
-            return render_template(
-                "gestao.html",
-                asset_version=asset_version,
-                ui_version=ui_version,
-                current_user=getattr(g, "current_user", None),
-                gestao_data=None,
-                gestao_error="Timeout ao carregar Gestão Operacional. Tente novamente em alguns instantes.",
-            ), 504
-        except Exception as e:
-            logger.exception("Erro ao carregar Gestão Operacional: %s", e)
-            return render_template(
-                "gestao.html",
-                asset_version=asset_version,
-                ui_version=ui_version,
-                current_user=getattr(g, "current_user", None),
-                gestao_data=None,
-                gestao_error="Erro ao carregar dados da Gestão Operacional.",
-            ), 500
+            filters, meta = gestao_parse_filters(request.args)
+            data, cached = loader(filters, meta)
+            return _gestao_success(data, filters, cached=cached)
+        except GestaoValidationError as exc:
+            return jsonify({"ok": False, "error": {"code": "GESTAO_INVALID_FILTER", "message": str(exc)}}), 400
+        except TimeoutError as exc:
+            return _gestao_error_response(exc, status=504, code="GESTAO_TIMEOUT", message="Tempo esgotado ao consultar os dados.")
+        except Exception as exc:
+            return _gestao_error_response(exc)
+
+    @app.get("/api/gestao/resumo")
+    def api_gestao_resumo():
+        return _gestao_endpoint(gestao_get_resumo)
+
+    @app.get("/api/gestao/funil")
+    def api_gestao_funil():
+        return _gestao_endpoint(gestao_get_funil)
+
+    @app.get("/api/gestao/evolucao")
+    def api_gestao_evolucao():
+        return _gestao_endpoint(gestao_get_evolucao)
+
+    @app.get("/api/gestao/rankings")
+    def api_gestao_rankings():
+        return _gestao_endpoint(gestao_get_rankings)
+
+    @app.get("/api/gestao/produtividade")
+    def api_gestao_produtividade():
+        return _gestao_endpoint(gestao_get_produtividade)
+
+    @app.get("/api/gestao/fila")
+    def api_gestao_fila():
+        return _gestao_endpoint(gestao_get_fila)
+
+    @app.get("/api/gestao/qualidade")
+    def api_gestao_qualidade():
+        return _gestao_endpoint(gestao_get_qualidade)
+
+    @app.get("/api/gestao/importacoes")
+    def api_gestao_importacoes():
+        return _gestao_endpoint(gestao_get_importacoes)
+
+    @app.get("/api/gestao/opcoes")
+    def api_gestao_opcoes():
+        return _gestao_endpoint(gestao_get_opcoes)
 
     @app.get("/login")
     def login():
@@ -816,20 +878,23 @@ def create_app() -> Flask:
         if not filename:
             return jsonify({"ok": False, "error": "Nome do arquivo é obrigatório."}), 400
         if not _validate_upload_filename(filename):
-            return jsonify({"ok": False, "error": "Formato inválido. Envie CSV ou XLSX."}), 400
+            return jsonify({"ok": False, "error": "Formato inválido. Envie CSV, XLSX ou XLS."}), 400
 
         try:
             df = _read_upload_to_df(file_storage)
+            if df.empty:
+                return jsonify({"ok": False, "error": "Arquivo vazio ou sem registros válidos."}), 400
             logger.info(
-                "Upload recebido: arquivo=%s linhas_recebidas=%d colunas_recebidas=%s",
+                "Upload recebido: arquivo=%s linhas_recebidas=%d total_colunas=%d etapa=leitura_arquivo",
                 filename,
                 len(df),
-                list(df.columns),
+                len(df.columns),
             )
             result = process_upload_dataframe(df, filename=filename)
+            invalidate_gestao_cache()
             return jsonify({"ok": True, **result}), 202
         except Exception as e:
-            logger.exception("Erro no processamento de upload: arquivo=%s etapa=rota_upload", filename)
+            logger.exception("Erro no processamento de upload: arquivo=%s etapa=rota_upload exception_type=%s", filename, e.__class__.__name__)
             return jsonify(_error_payload(e, "Falha ao processar upload.")), 500
 
     @app.get("/api/upload/status")
