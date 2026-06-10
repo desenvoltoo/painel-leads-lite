@@ -4,7 +4,6 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Gestão Operacional | Painel Leads Lite</title>
-
   <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
   <link href="https://cdn.datatables.net/1.13.8/css/dataTables.bootstrap5.min.css" rel="stylesheet">
   <link href="https://cdn.datatables.net/responsive/2.5.0/css/responsive.bootstrap5.min.css" rel="stylesheet">
@@ -12,152 +11,86 @@
   <link href="{{ url_for('static', filename='css/gestao.css') }}?v={{ asset_version }}" rel="stylesheet">
 </head>
 <body>
-  <nav class="navbar navbar-expand-lg gestao-navbar sticky-top">
-    <div class="container-fluid px-3 px-lg-4">
-      <a class="navbar-brand d-flex align-items-center gap-2" href="/gestao" aria-label="Gestão Operacional">
-        <span class="brand-icon">GO</span>
-        <span>
-          <strong>Gestão Operacional</strong>
-          <small class="d-block">Painel executivo de priorização</small>
-        </span>
-      </a>
-      <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#gestaoNavbar" aria-controls="gestaoNavbar" aria-expanded="false" aria-label="Alternar navegação">
-        <span class="navbar-toggler-icon"></span>
-      </button>
-      <div id="gestaoNavbar" class="collapse navbar-collapse justify-content-end">
-        <div class="navbar-nav align-items-lg-center gap-lg-2">
-          <a class="nav-link" href="/">Painel atual</a>
-          <a class="nav-link active" href="/gestao">Gestão</a>
-          <a class="nav-link" href="/gestao?refresh=1">Atualizar dados</a>
-          {% if current_user %}
-          <span class="nav-user">{{ current_user }}</span>
-          <form method="post" action="/logout" class="m-0">
-            <button class="btn btn-sm btn-outline-secondary" type="submit">Sair</button>
-          </form>
-          {% endif %}
+  <header class="executive-header sticky-top">
+    <div class="container-fluid px-3 px-lg-4 py-3">
+      <div class="d-flex flex-column flex-xl-row gap-3 justify-content-between align-items-xl-center">
+        <div class="title-block">
+          <span class="eyebrow">Painel gerencial</span>
+          <h1>Gestão Operacional</h1>
+          <p>Cards, gráficos e tabelas refletem os filtros aplicados no backend.</p>
+        </div>
+        <div class="header-actions" aria-label="Ações do cabeçalho">
+          <span id="refreshStatus" class="refresh-status" aria-live="polite"><span class="status-dot"></span>Pronto</span>
+          <span class="last-update">Atualizado em <strong id="lastUpdated">--</strong></span>
+          <button id="btnRefresh" class="btn btn-primary" type="button" aria-label="Atualizar dados">Atualizar dados</button>
+          <a class="btn btn-outline-secondary" href="/">Voltar ao painel de leads</a>
+          {% if current_user %}<span class="user-chip" aria-label="Usuário autenticado">{{ current_user }}</span>{% endif %}
+          <form method="post" action="/logout" class="m-0"><button class="btn btn-outline-danger" type="submit">Logout</button></form>
         </div>
       </div>
     </div>
-  </nav>
+  </header>
 
   <main class="container-fluid gestao-shell px-3 px-lg-4 py-4">
-    <section class="hero-panel mb-4">
-      <div>
-        <p class="eyebrow mb-2">Operação Comercial</p>
-        <h1 class="h2 mb-2">Visão executiva da fila e produtividade</h1>
-        <p class="mb-0 text-secondary">Indicadores consolidados, ranking de consultores e fila operacional priorizada para tomada de decisão.</p>
-      </div>
-      <div class="hero-meta">
+    <div id="toastRegion" class="toast-region" aria-live="assertive" aria-atomic="true"></div>
+
+    <section class="filter-panel" aria-labelledby="filtersTitle">
+      <div class="panel-heading">
+        <div><h2 id="filtersTitle">Filtros globais</h2><p>Use os filtros para recalcular KPIs, gráficos e tabelas no BigQuery.</p></div>
         <span class="badge text-bg-light">{{ ui_version }}</span>
-        {% if gestao_data %}
-        <span class="text-secondary">Atualizado em <strong id="generatedAt">{{ gestao_data.generated_at }}</strong></span>
-        <span class="text-secondary">Cache: {{ gestao_data.cache_ttl_seconds }}s</span>
-        {% endif %}
       </div>
+      <form id="filtersForm" class="filters-grid" autocomplete="off">
+        <label>Período inicial<input class="form-control" type="date" name="data_ini"></label>
+        <label>Período final<input class="form-control" type="date" name="data_fim"></label>
+        <label>Consultor comercial<select class="form-select" name="consultor_comercial" data-option="consultor_comercial"><option value="">Todos</option></select></label>
+        <label>Consultor disparo<select class="form-select" name="consultor_disparo" data-option="consultor_disparo"><option value="">Todos</option></select></label>
+        <label>Curso<select class="form-select" name="curso" data-option="curso"><option value="">Todos</option></select></label>
+        <label>Polo/unidade<select class="form-select" name="polo" data-option="polo"><option value="">Todos</option></select></label>
+        <label>Modalidade<select class="form-select" name="modalidade" data-option="modalidade"><option value="">Todas</option></select></label>
+        <label>Turno<select class="form-select" name="turno" data-option="turno"><option value="">Todos</option></select></label>
+        <label>Origem<select class="form-select" name="origem" data-option="origem"><option value="">Todas</option></select></label>
+        <label>Campanha<select class="form-select" name="campanha" data-option="campanha"><option value="">Todas</option></select></label>
+        <label>Canal<select class="form-select" name="canal" data-option="canal"><option value="">Todos</option></select></label>
+        <label>Tipo de negócio<select class="form-select" name="tipo_negocio" data-option="tipo_negocio"><option value="">Todos</option></select></label>
+        <label>Status<select class="form-select" name="status" data-option="status"><option value="">Todos</option><option value="__EMPTY__">Sem status</option></select></label>
+        <label>Matriculado<select class="form-select" name="matriculado"><option value="">Todos</option><option value="sim">Sim</option><option value="nao">Não</option></select></label>
+        <label class="filter-search">Busca<input class="form-control" type="search" name="busca" placeholder="Nome, CPF, celular ou e-mail" aria-label="Buscar por nome CPF celular ou e-mail"></label>
+        <div class="filter-actions">
+          <button class="btn btn-primary" type="submit">Aplicar filtros</button>
+          <button id="btnClearFilters" class="btn btn-outline-secondary" type="button">Limpar filtros</button>
+        </div>
+      </form>
+      <div id="activeChips" class="chips" aria-label="Filtros ativos"></div>
     </section>
 
-    {% if gestao_error %}
-    <div class="alert alert-danger shadow-sm" role="alert">
-      <strong>Não foi possível carregar o módulo.</strong> {{ gestao_error }}
-    </div>
-    {% endif %}
+    <section class="kpi-grid" aria-label="Indicadores principais" id="kpiGrid"></section>
 
-    {% if gestao_data %}
-    <section class="kpi-grid mb-4" aria-label="KPIs operacionais">
-      <article class="kpi-card kpi-primary"><span>Total Leads</span><strong data-kpi="total_leads">0</strong><small>Carteira operacional</small></article>
-      <article class="kpi-card"><span>Nunca Trabalhados</span><strong data-kpi="nunca_trabalhados">0</strong><small>Leads sem status definido</small></article>
-      <article class="kpi-card"><span>Leads em Carteira</span><strong data-kpi="leads_em_carteira">0</strong><small>Status preenchido sem matrícula</small></article>
-      <article class="kpi-card kpi-danger"><span>Leads Críticos</span><strong data-kpi="leads_criticos">0</strong><small>Status sem definição</small></article>
-      <article class="kpi-card kpi-success"><span>Matriculados</span><strong data-kpi="matriculados">0</strong><small>Conversões confirmadas</small></article>
-      <article class="kpi-card kpi-info"><span>Taxa Geral de Conversão</span><strong data-kpi="taxa_geral_conversao" data-format="pct">0%</strong><small>MAT / Total Leads</small></article>
-      <article class="kpi-card"><span>Tempo Médio Primeiro Contato</span><strong data-kpi="media_horas_primeiro_contato" data-format="hours">0h</strong><small>Horas até primeira ação</small></article>
-      <article class="kpi-card"><span>Tempo Médio Matrícula</span><strong data-kpi="media_horas_ate_matricula" data-format="hours">0h</strong><small>Horas até matrícula</small></article>
-    </section>
-
-    <section class="data-panel mb-4" aria-label="Exportação prioritária">
-      <div class="panel-header flex-wrap gap-2">
-        <div><h2>Exportação da Fila Prioritária</h2><span>Somente leads com status IS NULL, ordenados por score e inscrição</span></div>
-        <form class="export-form" method="get" action="/gestao/exportar-prioritarios">
-          <a class="btn btn-primary" href="/gestao/exportar-prioritarios?limit=500">Baixar Próximos 500 Leads</a>
-          <select class="form-select" name="limit" aria-label="Quantidade para exportar">
-            <option value="100">100 Leads</option>
-            <option value="500" selected>500 Leads</option>
-            <option value="1000">1000 Leads</option>
-            <option value="5000">5000 Leads</option>
-          </select>
-          <button class="btn btn-outline-primary" type="submit">Exportar</button>
-        </form>
-      </div>
-    </section>
-
-    <section class="data-panel mb-4" aria-label="Centro de comando">
-      <div class="panel-header"><h2>Centro de Comando</h2><span>Indicadores executivos da operação comercial</span></div>
-      <div class="command-grid">
-        <div><span>Total Leads</span><strong data-command="total_leads">0</strong></div>
-        <div><span>Nunca Trabalhados</span><strong data-command="nunca_trabalhados">0</strong></div>
-        <div><span>Leads em Carteira</span><strong data-command="leads_em_carteira">0</strong></div>
-        <div><span>Matriculados</span><strong data-command="matriculados">0</strong></div>
-        <div><span>Taxa Geral de Conversão</span><strong data-command="taxa_geral_conversao" data-format="pct">0%</strong></div>
-        <div><span>Tempo Médio Primeiro Contato</span><strong data-command="media_horas_primeiro_contato" data-format="hours">0h</strong></div>
-        <div><span>Tempo Médio Matrícula</span><strong data-command="media_horas_ate_matricula" data-format="hours">0h</strong></div>
-        <div><span>Consultor Campeão do Dia</span><strong data-command="consultor_campeao_dia">-</strong></div>
-        <div><span>Origem com Melhor Conversão</span><strong data-command="origem_melhor_conversao">-</strong></div>
-        <div><span>Curso com Melhor Conversão</span><strong data-command="curso_melhor_conversao">-</strong></div>
-      </div>
-    </section>
-
-    <section class="row g-3 mb-4" aria-label="Alertas operacionais">
-      <div class="col-12"><h2 class="section-title">Alertas Operacionais</h2></div>
-      <div class="col-12 col-md-6 col-xl"><div class="alert-card danger"><span>Leads sem status</span><strong data-alert="leads_sem_status">0</strong></div></div>
-      <div class="col-12 col-md-6 col-xl"><div class="alert-card warning"><span>Leads parados há mais de 7 dias</span><strong data-alert="leads_sem_acao_7_dias">0</strong></div></div>
-      <div class="col-12 col-md-6 col-xl"><div class="alert-card dark"><span>Consultores sem atividade</span><strong data-alert="consultores_sem_atividade_recente">0</strong></div></div>
-      <div class="col-12 col-md-6 col-xl"><div class="alert-card"><span>Carteira acima da média</span><strong data-alert="consultores_carteira_acima_media">0</strong></div></div>
-      <div class="col-12 col-md-6 col-xl"><div class="alert-card"><span>Melhor conversão</span><strong data-alert="consultores_melhor_conversao">0</strong></div></div>
-    </section>
-
-    <section class="row g-4 mb-4" aria-label="Rankings de consultores">
-      <div class="col-12 col-xl-6"><div class="data-panel h-100"><div class="panel-header"><h2>Top Consultores por Matrículas</h2><span>Ranking horizontal</span></div><div class="chart-box"><canvas id="chartMatriculas"></canvas></div></div></div>
-      <div class="col-12 col-xl-6"><div class="data-panel h-100"><div class="panel-header"><h2>Top Consultores por Taxa de Conversão</h2><span>MAT / Total Leads</span></div><div class="chart-box"><canvas id="chartConversao"></canvas></div></div></div>
-    </section>
-
-    <section class="row g-4 mb-4" aria-label="Top origens e cursos">
-      <div class="col-12 col-xl-6"><div class="data-panel h-100"><div class="panel-header"><h2>Top Origens por Volume</h2><span>Total de leads</span></div><div class="chart-box"><canvas id="chartOrigensVolume"></canvas></div></div></div>
-      <div class="col-12 col-xl-6"><div class="data-panel h-100"><div class="panel-header"><h2>Top Origens por Conversão</h2><span>MAT / Total Leads</span></div><div class="chart-box"><canvas id="chartOrigensConversao"></canvas></div></div></div>
-      <div class="col-12 col-xl-6"><div class="data-panel h-100"><div class="panel-header"><h2>Top Cursos por Volume</h2><span>Total de leads</span></div><div class="chart-box"><canvas id="chartCursosVolume"></canvas></div></div></div>
-      <div class="col-12 col-xl-6"><div class="data-panel h-100"><div class="panel-header"><h2>Top Cursos por Conversão</h2><span>MAT / Total Leads</span></div><div class="chart-box"><canvas id="chartCursosConversao"></canvas></div></div></div>
+    <section class="row g-4 mb-4">
+      <div class="col-12 col-xl-5"><div class="data-panel h-100"><div class="panel-heading"><div><h2>Funil comercial</h2><p>Etapas classificadas no backend.</p></div></div><div id="funilList" class="funnel-list empty-state">Carregando funil...</div></div></div>
+      <div class="col-12 col-xl-7"><div class="data-panel h-100"><div class="panel-heading"><div><h2>Evolução temporal</h2><p>Datas agrupadas no BigQuery.</p></div><select id="granularity" class="form-select form-select-sm w-auto" aria-label="Granularidade"><option value="dia">Dia</option><option value="semana">Semana</option><option value="mes">Mês</option></select></div><div class="chart-box"><canvas id="chartEvolucao"></canvas></div></div></div>
     </section>
 
     <section class="data-panel mb-4">
-      <div class="panel-header flex-wrap gap-2"><div><h2>Produtividade dos Consultores</h2><span>Conversão calculada por Matriculados / Total Leads</span></div></div>
-      <div class="table-responsive"><table id="produtividadeTable" class="table table-hover table-striped align-middle nowrap w-100"><thead><tr>
-        <th>Consultor</th><th>Total Leads</th><th>Tempo médio até matrícula</th><th>Tempo médio até primeiro contato</th><th>Leads sem status</th><th>Leads em carteira</th><th>MAT</th><th>Taxa de conversão</th><th>Última atividade</th><th>Score médio</th>
-      </tr></thead><tbody></tbody></table></div>
+      <div class="panel-heading"><div><h2>Rankings</h2><p id="rankingHint">Conversão exige volume mínimo configurado.</p></div></div>
+      <div id="rankingsGrid" class="rankings-grid"></div>
     </section>
 
     <section class="data-panel mb-4">
-      <div class="panel-header flex-wrap gap-2"><div><h2>Fila Operacional Inteligente</h2><span>Top registros ordenados por Score Prioridade DESC</span></div></div>
-      <div class="table-responsive"><table id="filaTable" class="table table-hover table-striped align-middle nowrap w-100"><thead><tr>
-        <th>Nome</th><th>Telefone</th><th>Curso</th><th>Polo</th><th>Origem</th><th>Status</th><th>Consultor</th><th>Score</th><th>Prioridade</th><th>Dias sem ação</th>
-      </tr></thead><tbody></tbody></table></div>
+      <div class="panel-heading"><div><h2>Produtividade dos consultores</h2><p>Ativo: até 7 dias sem atividade; atenção: 8 a 14; inativo: acima de 14 ou sem atividade.</p></div></div>
+      <div class="table-responsive"><table id="produtividadeTable" class="table table-hover align-middle w-100"><thead><tr><th>Consultor</th><th>Total</th><th>Novos</th><th>Sem status</th><th>Carteira</th><th>Matriculados</th><th>Conversão</th><th>Acionamentos</th><th>1º contato</th><th>Até matrícula</th><th>Última atividade</th><th>Dias sem atividade</th><th>Score médio</th><th>Situação</th></tr></thead><tbody></tbody></table></div>
     </section>
 
-    <section class="data-panel mb-4" aria-label="Qualidade dos dados">
-      <div class="panel-header"><h2>Qualidade dos Dados</h2><span>Inconsistências para saneamento operacional</span></div>
-      <div class="quality-grid">
-        <div><span>Leads sem telefone</span><strong data-quality="leads_sem_telefone">0</strong></div>
-        <div><span>Leads sem email</span><strong data-quality="leads_sem_email">0</strong></div>
-        <div><span>Duplicados por CPF</span><strong data-quality="leads_duplicados_cpf">0</strong></div>
-        <div><span>Duplicados por telefone</span><strong data-quality="leads_duplicados_telefone">0</strong></div>
-        <div><span>Leads sem origem</span><strong data-quality="leads_sem_origem">0</strong></div>
-        <div><span>Leads sem curso</span><strong data-quality="leads_sem_curso">0</strong></div>
-      </div>
+    <section class="data-panel mb-4">
+      <div class="panel-heading flex-wrap gap-2"><div><h2>Fila operacional inteligente</h2><p>Matriculados não entram como prioridade alta; score calculado no backend/BigQuery.</p></div><a class="btn btn-outline-primary" href="/gestao/exportar-prioritarios?limit=500">Exportar prioritários</a></div>
+      <div class="table-responsive"><table id="filaTable" class="table table-hover align-middle w-100"><thead><tr><th>Nome</th><th>Celular</th><th>Curso</th><th>Polo</th><th>Origem</th><th>Campanha</th><th>Consultor</th><th>Status</th><th>Inscrição</th><th>Última ação</th><th>Dias sem ação</th><th>Score</th><th>Prioridade</th><th>Motivo</th></tr></thead><tbody></tbody></table></div>
     </section>
-    {% endif %}
+
+    <section class="row g-4 mb-4">
+      <div class="col-12 col-xl-6"><div class="data-panel h-100"><div class="panel-heading"><div><h2>Qualidade dos dados</h2><p>Duplicidades calculadas como excedente por chave.</p></div></div><div id="qualityGrid" class="quality-grid"></div></div></div>
+      <div class="col-12 col-xl-6"><div class="data-panel h-100"><div class="panel-heading"><div><h2>Histórico de Importações</h2><p>Exibe logs quando as tabelas estiverem criadas.</p></div></div><div id="importsPanel" class="imports-panel empty-state">Carregando histórico...</div></div></div>
+    </section>
   </main>
 
-  {% if gestao_data %}
-  <script id="gestao-data" type="application/json">{{ gestao_data | tojson }}</script>
-  {% endif %}
   <script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
   <script src="https://cdn.datatables.net/1.13.8/js/jquery.dataTables.min.js"></script>
