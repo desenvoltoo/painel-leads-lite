@@ -45,6 +45,30 @@
     return String(value);
   }
 
+  function clampPct(value) {
+    const n = Number(value || 0);
+    if (!Number.isFinite(n)) return 0;
+    return Math.max(0, Math.min(100, n));
+  }
+
+  function safeInit(name, callback) {
+    try {
+      return callback();
+    } catch (error) {
+      console.error(`[gestao:${name}]`, error);
+      showComponentError(name);
+      return null;
+    }
+  }
+
+  function showComponentError(name) {
+    if (name === 'fila') showFilaError();
+    if (name === 'funil') {
+      const box = $('#funilList');
+      if (box) box.innerHTML = '<div class="empty-state error">Erro ao carregar funil.</div>';
+    }
+  }
+
   function formatDate(value) {
     if (!value) return '--';
     const d = new Date(value);
@@ -249,13 +273,22 @@
 
   async function loadFunil() {
     const box = $('#funilList');
+    box.className = 'funnel-scroll empty-state';
     box.innerHTML = '<div class="empty-state">Carregando funil...</div>';
     try {
       const { data } = await apiGet('funil');
-      const etapas = data.etapas || [];
+      const etapas = Array.isArray(data.etapas) ? data.etapas : [];
       if (!etapas.length) { box.innerHTML = '<div class="empty-state">Sem dados para o filtro.</div>'; return; }
-      box.innerHTML = etapas.map(row => `<div class="funnel-row"><div><strong>${escapeHtml(row.etapa)}</strong><span>${formatValue(row.volume)} leads • ${formatValue(row.pct_total, 'pct')} do total</span></div><div class="funnel-bar" aria-hidden="true"><span style="width:${Math.min(100, Number(row.pct_total || 0))}%"></span></div><small>Conv. etapa: ${row.conversao_etapa_anterior === null ? '--' : formatValue(row.conversao_etapa_anterior, 'pct')} • Perda: ${row.perda_etapa_anterior === null ? '--' : formatValue(row.perda_etapa_anterior)}</small></div>`).join('');
-    } catch (_) { box.innerHTML = '<div class="empty-state error">Erro ao carregar funil.</div>'; }
+      box.className = 'funnel-scroll';
+      const nunca = data.paralelos?.nunca_trabalhados;
+      box.innerHTML = `<div class="funnel-grid">${etapas.map(row => {
+        const pct = clampPct(row.participacao_total ?? row.pct_total);
+        const conv = row.conversao_etapa_anterior === null || row.conversao_etapa_anterior === undefined ? '--' : formatValue(clampPct(row.conversao_etapa_anterior), 'pct');
+        const perda = row.perda_etapa_anterior === null || row.perda_etapa_anterior === undefined ? '--' : formatValue(Math.max(0, Number(row.perda_etapa_anterior || 0)));
+        const aria = `${row.etapa}: ${formatValue(row.volume)} leads, ${formatValue(pct, 'pct')} do total`;
+        return `<article class="funnel-card"><h3>${escapeHtml(row.etapa)}</h3><div class="funnel-metric"><strong>${escapeHtml(formatValue(row.volume))}</strong><span>leads</span><small>${escapeHtml(formatValue(pct, 'pct'))} do total</small></div><div class="funnel-bar" role="img" aria-label="${escapeHtml(aria)}"><span class="${pct <= 0 ? 'is-zero' : ''}" style="--funnel-width:${pct}%"></span></div><div class="funnel-details"><small>Conversão da etapa: ${escapeHtml(conv)}</small><small>Perda: ${escapeHtml(perda)}</small></div></article>`;
+      }).join('')}</div>${nunca !== undefined ? `<div class="funnel-side-note">Nunca trabalhados: <strong>${escapeHtml(formatValue(nunca))}</strong> leads fora do avanço comercial.</div>` : ''}`;
+    } catch (_) { box.className = 'funnel-scroll empty-state'; box.innerHTML = '<div class="empty-state error">Erro ao carregar funil.</div>'; }
   }
 
   function chart(id, config) {
@@ -304,15 +337,45 @@
     } catch (_) { box.innerHTML = '<div class="empty-state error">Erro ao carregar rankings.</div>'; }
   }
 
+  function initDataTable(selector, options) {
+    const element = $(selector);
+    if (!element || typeof DataTable === 'undefined') return null;
+    if (window.jQuery?.fn?.DataTable?.isDataTable(selector)) {
+      window.jQuery(selector).DataTable().destroy();
+    }
+    return new DataTable(selector, options);
+  }
+
   function initTables() {
-    state.tables.prod = $('#produtividadeTable') && new DataTable('#produtividadeTable', { responsive: true, pageLength: 10, dom: 'Bfrtip', buttons: ['csvHtml5'], language: { url: '//cdn.datatables.net/plug-ins/1.13.8/i18n/pt-BR.json' } });
-    state.tables.fila = $('#filaTable') && new DataTable('#filaTable', { responsive: true, pageLength: 10, dom: 'Bfrtip', buttons: ['csvHtml5'], order: [[11, 'desc']], language: { url: '//cdn.datatables.net/plug-ins/1.13.8/i18n/pt-BR.json' } });
+    state.tables.prod = initDataTable('#produtividadeTable', { responsive: true, pageLength: 10, dom: 'Bfrtip', buttons: ['csvHtml5'], columns: Array.from({ length: 14 }, () => ({ defaultContent: '' })), language: { url: '//cdn.datatables.net/plug-ins/1.13.8/i18n/pt-BR.json' } });
+    state.tables.fila = initDataTable('#filaTable', { responsive: true, pageLength: 10, dom: 'Bfrtip', buttons: ['csvHtml5'], order: [], columns: Array.from({ length: 11 }, () => ({ defaultContent: '' })), language: { url: '//cdn.datatables.net/plug-ins/1.13.8/i18n/pt-BR.json', emptyTable: 'Nenhum lead elegível para a fila com os critérios atuais.' } });
   }
 
   function replaceTable(dt, rows) {
+    if (!dt) return;
     dt.clear();
-    rows.forEach(r => dt.row.add(r));
+    (Array.isArray(rows) ? rows : []).forEach(r => dt.row.add(r));
     dt.draw();
+  }
+
+  function showFilaEmpty() {
+    const box = $('#filaState');
+    if (!box) return;
+    box.className = 'empty-state mb-3';
+    box.textContent = 'Nenhum lead elegível para a fila com os critérios atuais.';
+  }
+
+  function hideFilaState() {
+    const box = $('#filaState');
+    if (box) { box.className = 'd-none'; box.textContent = ''; }
+  }
+
+  function showFilaError(message = 'Não foi possível carregar a fila operacional.') {
+    const box = $('#filaState');
+    if (!box) return;
+    box.className = 'empty-state error mb-3';
+    box.innerHTML = `${escapeHtml(message)} <button class="btn btn-sm btn-outline-primary" id="retryFila" type="button">Tentar novamente</button>`;
+    $('#retryFila')?.addEventListener('click', loadFila);
   }
 
   async function loadProdutividade() {
@@ -323,11 +386,16 @@
   }
 
   async function loadFila() {
+    hideFilaState();
     try {
       const { data } = await apiGet('fila', { limit: 500 });
-      const rows = data.items || data.rows || [];
-      replaceTable(state.tables.fila, rows.map(r => [escapeHtml(r.nome), escapeHtml(formatPhone(r.celular)), escapeHtml(r.curso), escapeHtml(r.polo), escapeHtml(r.origem), escapeHtml(r.campanha), escapeHtml(r.consultor_comercial), escapeHtml(r.status), formatDate(r.data_inscricao), formatDate(r.data_ultima_acao), formatValue(r.dias_sem_acao), formatValue(r.grupo_prioridade), `<span class="priority-badge ${escapeHtml(String(r.grupo_prioridade || '').toLowerCase())}">${escapeHtml(r.prioridade)}</span>`, escapeHtml(r.motivo_prioridade)]));
-    } catch (_) { replaceTable(state.tables.fila, []); }
+      const rows = Array.isArray(data.items) ? data.items : [];
+      replaceTable(state.tables.fila, rows.map(r => {
+        const prioridade = r.nivel_prioridade || r.prioridade || '--';
+        return [escapeHtml(r.nome), escapeHtml(formatPhone(r.celular)), escapeHtml(r.curso), escapeHtml(r.polo || r.unidade), escapeHtml(r.origem), escapeHtml(r.status), escapeHtml(r.consultor_comercial), formatDate(r.data_inscricao), formatValue(r.grupo_prioridade), `<span class="priority-badge ${escapeHtml(String(prioridade || '').toLowerCase())}">${escapeHtml(prioridade)}</span>`, escapeHtml(r.motivo_prioridade)];
+      }));
+      if (!rows.length) showFilaEmpty();
+    } catch (err) { replaceTable(state.tables.fila, []); showFilaError(err.message); }
   }
 
   async function loadQualidade() {
@@ -410,7 +478,7 @@
     restoreFilters();
     renderChips();
     renderKpiSkeleton();
-    initTables();
+    safeInit('tabelas', initTables);
     await loadOptions();
     $('#filtersForm').addEventListener('submit', ev => { ev.preventDefault(); const values = readFilters(); if (!values) return; state.filters = values; syncUrlAndStorage(); loadAll(); });
     $('#btnClearFilters').addEventListener('click', () => { $('#filtersForm').reset(); state.filters = {}; syncUrlAndStorage(); loadAll(); });

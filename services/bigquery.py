@@ -1196,6 +1196,7 @@ def _run_gestao_query(sql: str, params: Optional[List[Any]] = None, operation_na
     client = get_bq_client()
     job_config = bigquery.QueryJobConfig(query_parameters=params or [])
     job = None
+    started = perf_counter()
     try:
         logger.info(
             "BQ operation=%s location=%s params=%s",
@@ -1219,7 +1220,7 @@ def _run_gestao_query(sql: str, params: Optional[List[Any]] = None, operation_na
             _format_bq_params_for_log(params),
         )
         raise
-    logger.info("BQ %s concluído job_id=%s", operation_name, getattr(job, "job_id", None))
+    logger.info("BQ %s concluído job_id=%s duration_ms=%s", operation_name, getattr(job, "job_id", None), int((perf_counter() - started) * 1000))
     return result
 
 
@@ -1257,13 +1258,17 @@ def _gestao_timestamp_expr(*candidate_cols: str, alias: str = "v") -> str:
     col = _first_existing_col(*candidate_cols)
     if not col:
         return "CAST(NULL AS TIMESTAMP)"
-    raw = f"CAST({alias}.{col} AS STRING)"
+    raw = f"TRIM(CAST({alias}.{col} AS STRING))"
     return (
-        f"COALESCE(SAFE_CAST({alias}.{col} AS TIMESTAMP), "
+        f"COALESCE("
+        f"SAFE_CAST({alias}.{col} AS TIMESTAMP), "
         f"TIMESTAMP(SAFE_CAST({alias}.{col} AS DATE)), "
-        f"SAFE.PARSE_TIMESTAMP('%d/%m/%Y', {raw}), "
-        f"SAFE.PARSE_TIMESTAMP('%Y-%m-%d', {raw}), "
-        f"IF(SAFE_CAST({raw} AS INT64) IS NULL, NULL, TIMESTAMP(DATE_ADD(DATE '1899-12-30', INTERVAL SAFE_CAST({raw} AS INT64) DAY))))"
+        f"TIMESTAMP(SAFE.PARSE_DATE('%Y-%m-%d', SUBSTR({raw}, 1, 10))), "
+        f"TIMESTAMP(SAFE.PARSE_DATE('%d/%m/%Y', SUBSTR({raw}, 1, 10))), "
+        f"SAFE.PARSE_TIMESTAMP('%Y-%m-%d %H:%M:%S', SUBSTR({raw}, 1, 19)), "
+        f"SAFE.PARSE_TIMESTAMP('%d/%m/%Y %H:%M:%S', SUBSTR({raw}, 1, 19)), "
+        f"IF(SAFE_CAST({raw} AS INT64) IS NULL, NULL, TIMESTAMP(DATE_ADD(DATE '1899-12-30', INTERVAL SAFE_CAST({raw} AS INT64) DAY)))"
+        f")"
     )
 
 
@@ -1393,7 +1398,7 @@ def _gestao_status_empty_expr(alias: str = "v") -> str:
     if _has_view_col("status"):
         return (
             f"(NULLIF(TRIM(CAST({alias}.status AS STRING)), '') IS NULL OR "
-            f"UPPER(TRIM(CAST({alias}.status AS STRING))) IN ('NULL','N/A','NA','SEM INFORMACAO','SEM INFORMAÇÃO','-'))"
+            f"UPPER(TRIM(CAST({alias}.status AS STRING))) IN ('NULL','N/A','NA','SEM STATUS','SEM INFORMACAO','SEM INFORMAÇÃO','-'))"
         )
     return "FALSE"
 

@@ -86,7 +86,7 @@ ORDERABLE_IMPORTACOES = {
     "total_linhas": "total_linhas",
 }
 
-EMPTY_TEXTS = {"", "NULL", "N/A", "NA", "SEM INFORMACAO", "SEM INFORMAÇÃO", "-"}
+EMPTY_TEXTS = {"", "NULL", "N/A", "NA", "SEM STATUS", "SEM INFORMACAO", "SEM INFORMAÇÃO", "-"}
 QUALITY_TYPES = OrderedDict([
     ("sem_celular", "Sem celular"),
     ("sem_email", "Sem e-mail"),
@@ -568,7 +568,7 @@ def _date_from_ts(expr: str) -> str:
 
 
 def _empty_text_sql(expr: str) -> str:
-    return f"(NULLIF(TRIM(CAST({expr} AS STRING)), '') IS NULL OR UPPER(TRIM(CAST({expr} AS STRING))) IN ('NULL','N/A','NA','SEM INFORMACAO','SEM INFORMAÇÃO','-'))"
+    return f"(NULLIF(TRIM(CAST({expr} AS STRING)), '') IS NULL OR UPPER(TRIM(CAST({expr} AS STRING))) IN ('NULL','N/A','NA','SEM STATUS','SEM INFORMACAO','SEM INFORMAÇÃO','-'))"
 
 
 def _filled_text_sql(expr: str) -> str:
@@ -634,6 +634,10 @@ def _email_mask_sql(expr: str) -> str:
 
 
 def _data_inscricao_ts(alias: str = "v") -> str:
+    """Expressão reutilizável para data_inscricao heterogênea.
+
+    Aceita DATE, DATETIME, TIMESTAMP, ISO, brasileiro, strings com horário e serial Excel.
+    """
     return _timestamp_col("data_inscricao", alias=alias)
 
 
@@ -784,40 +788,78 @@ def get_resumo(filters: Mapping[str, Any], meta: Mapping[str, Any]) -> Tuple[Dic
     return _with_cache("resumo", filters, {}, meta.get("force_refresh", False), load)
 
 
+def build_funil_etapas(total: Any, trabalhados: Any, inscritos: Any, matriculados: Any) -> List[Dict[str, Any]]:
+    """Monta funil cumulativo e impede conversões >100% ou perdas negativas."""
+    values = [max(0, int(_to_number(v))) for v in (total, trabalhados, inscritos, matriculados)]
+    cumulative: List[int] = []
+    previous: Optional[int] = None
+    for value in values:
+        if previous is not None:
+            value = min(value, previous)
+        cumulative.append(value)
+        previous = value
+
+    labels = ["Total elegível", "Trabalhados", "Inscritos", "Matriculados"]
+    etapas: List[Dict[str, Any]] = []
+    base_total = cumulative[0] if cumulative else 0
+    prev: Optional[int] = None
+    for ordem, (label, volume) in enumerate(zip(labels, cumulative), 1):
+        pct_total = (volume / base_total * 100) if base_total else 0
+        conversao = None if prev is None else ((volume / prev * 100) if prev else 0)
+        perda = None if prev is None else max(prev - volume, 0)
+        etapas.append({
+            "etapa": label,
+            "volume": volume,
+            "ordem": ordem,
+            "pct_total": max(0, min(100, pct_total)),
+            "participacao_total": max(0, min(100, pct_total)),
+            "conversao_etapa_anterior": None if conversao is None else max(0, min(100, conversao)),
+            "perda_etapa_anterior": perda,
+        })
+        prev = volume
+    return etapas
+
+
 def get_funil(filters: Mapping[str, Any], meta: Mapping[str, Any]) -> Tuple[Dict[str, Any], bool]:
     def load():
         params: List[Any] = []
         where = _where_sql(filters, params)
         status_empty = bq._gestao_status_empty_expr("v")
+        status_filled = f"NOT {status_empty}"
         matriculado = bq._gestao_matriculado_expr("v")
-        inscrito_expr = "TRUE" if not _has("status_inscricao") else "UPPER(TRIM(CAST(v.status_inscricao AS STRING))) IN ('INSCRITO','INSCRIÇÃO','INSCRICAO','INS')"
+        excluido = _status_blocked_expr("v")
+        telefone_valido = _valid_phone_sql("v")
+        inscrito_parts = []
+        if _has("status_inscricao"):
+            inscrito_parts.append("UPPER(TRIM(CAST(v.status_inscricao AS STRING))) IN ('INSCRITO','INSCRIÇÃO','INSCRICAO','INS','MATRICULADO','MAT')")
+        if _has("status"):
+            inscrito_parts.append("UPPER(TRIM(CAST(v.status AS STRING))) IN ('INSCRITO','INSCRIÇÃO','INSCRICAO','INS','MATRICULADO','MAT')")
+        inscrito_raw = "(" + " OR ".join(inscrito_parts) + ")" if inscrito_parts else status_filled
         sql = f"""
-        WITH agg AS (
+        WITH base AS (
           SELECT
-            COUNT(*) AS total,
-            COUNTIF({status_empty}) AS nunca,
-            COUNTIF(NOT {status_empty} AND NOT {matriculado}) AS carteira,
-            COUNTIF({inscrito_expr}) AS inscritos,
-            COUNTIF({matriculado}) AS matriculados
+            ({telefone_valido} AND NOT {excluido}) AS total_elegivel_flag,
+            ({telefone_valido} AND NOT {excluido} AND {status_filled}) AS trabalhado_flag,
+            ({telefone_valido} AND NOT {excluido} AND {status_filled} AND {inscrito_raw}) AS inscrito_flag,
+            ({telefone_valido} AND NOT {excluido} AND {status_filled} AND {inscrito_raw} AND {matriculado}) AS matriculado_flag,
+            ({telefone_valido} AND NOT {excluido} AND {status_empty}) AS nunca_trabalhado_flag
           FROM {bq._tbl(bq.BQ_VIEW_LEADS)} v WHERE {where}
         )
-        SELECT 'Total de leads' AS etapa, total AS volume, 1 AS ordem FROM agg
-        UNION ALL SELECT 'Nunca trabalhados', nunca, 2 FROM agg
-        UNION ALL SELECT 'Em atendimento ou carteira', carteira, 3 FROM agg
-        UNION ALL SELECT 'Inscritos', inscritos, 4 FROM agg
-        UNION ALL SELECT 'Matriculados', matriculados, 5 FROM agg
-        ORDER BY ordem
+        SELECT
+          COUNTIF(total_elegivel_flag) AS total_elegivel,
+          COUNTIF(trabalhado_flag) AS trabalhados,
+          COUNTIF(inscrito_flag) AS inscritos,
+          COUNTIF(matriculado_flag) AS matriculados,
+          COUNTIF(nunca_trabalhado_flag) AS nunca_trabalhados
+        FROM base
         """
-        rows = _run(sql, params, "gestao_funil")
-        total = float(rows[0]["volume"] or 0) if rows else 0
-        prev = None
-        for row in rows:
-            volume = float(row.get("volume") or 0)
-            row["pct_total"] = (volume / total * 100) if total else 0
-            row["conversao_etapa_anterior"] = (volume / prev * 100) if prev else None
-            row["perda_etapa_anterior"] = (prev - volume) if prev is not None else None
-            prev = volume
-        return {"etapas": rows, "regra": "Matriculados usam flag_matriculado quando disponível e status normalizado como alternativa; nunca trabalhados usam status vazio."}
+        agg = _single(sql, params, "gestao_funil")
+        etapas = build_funil_etapas(agg.get("total_elegivel"), agg.get("trabalhados"), agg.get("inscritos"), agg.get("matriculados"))
+        return {
+            "etapas": etapas,
+            "paralelos": {"nunca_trabalhados": int(_to_number(agg.get("nunca_trabalhados")))},
+            "regra": "Funil cumulativo: Total elegível >= Trabalhados >= Inscritos >= Matriculados. Nunca trabalhados é ramificação paralela, não etapa intermediária.",
+        }
     return _with_cache("funil", filters, {}, meta.get("force_refresh", False), load)
 
 
@@ -955,6 +997,11 @@ def _status_excluded_expr(alias: str = "v") -> str:
     return "(" + " OR ".join(parts) + ")" if parts else "FALSE"
 
 
+def _status_blocked_expr(alias: str = "v") -> str:
+    parts = [f"UPPER(TRIM(CAST({alias}.{c} AS STRING))) IN ('CANCELADO','CANCELADA','CANC','DESCARTADO','DESCARTADA','ENCERRADO','ENCERRADA','PERDIDO','PERDIDA')" for c in ("status", "status_inscricao", "tipo_negocio") if _has(c)]
+    return "(" + " OR ".join(parts) + ")" if parts else "FALSE"
+
+
 def _valid_phone_sql(alias: str = "v") -> str:
     tel_col = bq._first_existing_col("celular", "telefone")
     if not tel_col:
@@ -963,67 +1010,123 @@ def _valid_phone_sql(alias: str = "v") -> str:
     return f"({digits} != '' AND LENGTH({digits}) IN (10, 11) AND NOT REGEXP_CONTAINS({digits}, r'^(\\d)\\1+$'))"
 
 
-def _fila_sql(filters: Mapping[str, Any], meta: Mapping[str, Any], *, export: bool = False) -> Tuple[str, List[Any]]:
-    limit = min(int(meta.get("limit", DEFAULT_PAGE_SIZE)), 5000 if export else MAX_PAGE_SIZE)
-    offset = max(0, int(meta.get("offset", 0)))
-    params: List[Any] = [] if export else [bigquery.ScalarQueryParameter("limit", "INT64", limit), bigquery.ScalarQueryParameter("offset", "INT64", offset)]
-    where = ["1=1"]
-    _apply_filters(where, params, filters, alias="v")
-    data_inscricao = _data_inscricao_ts("v")
-    ultima = _timestamp_col("data_ultima_acao", "ultima_atividade", "data_disparo", alias="v")
-    dt_upload = _timestamp_col("dt_upload", "data_atualizacao", alias="v")
-    sem_status = bq._gestao_status_empty_expr("v")
-    matriculado = bq._gestao_matriculado_expr("v")
-    status_ec = _status_ec_expr("v")
-    excluido = _status_excluded_expr("v")
-    telefone_valido = _valid_phone_sql("v")
-    status_norm = _status_norm_expr("v")
-    polo_expr = "v.polo" if _has("polo") else "v.unidade" if _has("unidade") else "CAST(NULL AS STRING)"
-    status_expr = "v.status" if _has("status") else "v.status_inscricao" if _has("status_inscricao") else "CAST(NULL AS STRING)"
-    data_disparo = _timestamp_col("data_disparo", alias="v")
-    data_ultima_acao_only = _timestamp_col("data_ultima_acao", "ultima_atividade", alias="v")
-    nunca_trabalhado = f"({sem_status} AND {data_disparo} IS NULL AND {data_ultima_acao_only} IS NULL)"
-    sem_status_trabalhado = f"({sem_status} AND ({data_disparo} IS NOT NULL OR {data_ultima_acao_only} IS NOT NULL))"
+def _fila_priority_sql_parts(alias: str = "v") -> Dict[str, str]:
+    """Centraliza a regra da fila para tela e exportação."""
+    data_inscricao = _data_inscricao_ts(alias)
+    ultima = _timestamp_col("data_ultima_acao", "ultima_atividade", "data_disparo", alias=alias)
+    dt_upload = _timestamp_col("dt_upload", "data_atualizacao", alias=alias)
+    sem_status = bq._gestao_status_empty_expr(alias)
+    matriculado = bq._gestao_matriculado_expr(alias)
+    status_ec = _status_ec_expr(alias)
+    excluido = _status_excluded_expr(alias)
+    telefone_valido = _valid_phone_sql(alias)
+    status_norm = _status_norm_expr(alias)
+    polo_expr = f"{alias}.polo" if _has("polo") else f"{alias}.unidade" if _has("unidade") else "CAST(NULL AS STRING)"
+    unidade_expr = f"{alias}.unidade" if _has("unidade") else f"{alias}.polo" if _has("polo") else "CAST(NULL AS STRING)"
+    status_expr = f"{alias}.status" if _has("status") else f"{alias}.status_inscricao" if _has("status_inscricao") else "CAST(NULL AS STRING)"
+    status_inscricao_expr = f"{alias}.status_inscricao" if _has("status_inscricao") else "CAST(NULL AS STRING)"
     grupo = f"""
       CASE
         WHEN {matriculado} THEN 99
-        WHEN {nunca_trabalhado} THEN 1
-        WHEN {sem_status_trabalhado} THEN 2
-        WHEN {status_ec} THEN 3
-        WHEN NOT {excluido} THEN 4
+        WHEN {sem_status} THEN 1
+        WHEN {status_ec} THEN 2
+        WHEN NOT {excluido} THEN 3
         ELSE 99
       END
     """
-    prioridade = f"CASE WHEN ({grupo}) = 1 THEN 100 WHEN ({grupo}) = 2 THEN 85 WHEN ({grupo}) = 3 THEN 70 WHEN ({grupo}) = 4 THEN 40 ELSE 0 END"
-    motivo = f"CASE WHEN ({grupo}) = 1 THEN 'Nunca trabalhado, sem status e sem ação registrada' WHEN ({grupo}) = 2 THEN 'Sem status, já teve disparo ou contato' WHEN ({grupo}) = 3 THEN 'Lead classificado como EC' WHEN ({grupo}) = 4 THEN 'Lead elegível para acompanhamento' ELSE 'Lead não elegível' END"
+    nivel = f"CASE WHEN ({grupo}) = 1 THEN 'ALTA' WHEN ({grupo}) = 2 THEN 'MÉDIA' WHEN ({grupo}) = 3 THEN 'NORMAL' ELSE 'FORA DA FILA' END"
+    prioridade = nivel
+    motivo = f"CASE WHEN ({grupo}) = 1 THEN 'Lead recente sem status' WHEN ({grupo}) = 2 THEN 'Lead classificado como EC' WHEN ({grupo}) = 3 THEN 'Lead elegível para acompanhamento' ELSE 'Não elegível' END"
+    score = f"CASE WHEN ({grupo}) = 1 THEN 100 WHEN ({grupo}) = 2 THEN 70 WHEN ({grupo}) = 3 THEN 40 ELSE 0 END"
+    return {
+        "data_inscricao": data_inscricao,
+        "ultima": ultima,
+        "dt_upload": dt_upload,
+        "sem_status": sem_status,
+        "matriculado": matriculado,
+        "status_ec": status_ec,
+        "excluido": excluido,
+        "telefone_valido": telefone_valido,
+        "status_norm": status_norm,
+        "polo": polo_expr,
+        "unidade": unidade_expr,
+        "status": status_expr,
+        "status_inscricao": status_inscricao_expr,
+        "grupo": grupo,
+        "nivel": nivel,
+        "prioridade": prioridade,
+        "motivo": motivo,
+        "score": score,
+    }
+
+
+def _fila_sql(filters: Mapping[str, Any], meta: Mapping[str, Any], *, export: bool = False) -> Tuple[str, List[Any]]:
+    limit = min(int(meta.get("limit", DEFAULT_PAGE_SIZE)), 5000 if export else MAX_PAGE_SIZE)
+    offset = max(0, int(meta.get("offset", 0)))
+    params: List[Any] = [bigquery.ScalarQueryParameter("limit", "INT64", limit)]
+    if not export:
+        params.append(bigquery.ScalarQueryParameter("offset", "INT64", offset))
+    where = ["1=1"]
+    _apply_filters(where, params, filters, alias="v")
+    p = _fila_priority_sql_parts("v")
+    columns_detected = ",".join(sorted(bq._view_columns()))
+    select_email = _safe_select('email') if _has('email') else "CAST(NULL AS STRING) AS email"
     sql = f"""
-    WITH base AS (
-      SELECT
-        {_safe_select('nome')}, {_safe_select('celular')}, {_safe_select('curso')}, {polo_expr} AS polo,
-        {_safe_select('origem')}, {_safe_select('campanha')}, {_safe_select('consultor_comercial')},
-        {status_expr} AS status, {data_inscricao} AS data_inscricao, {ultima} AS data_ultima_acao, {dt_upload} AS dt_upload,
-        IF({ultima} IS NULL, NULL, GREATEST(DATE_DIFF(CURRENT_DATE(), DATE({ultima}), DAY), 0)) AS dias_sem_acao,
-        IF({data_inscricao} IS NULL, NULL, GREATEST(DATE_DIFF(CURRENT_DATE(), DATE({data_inscricao}), DAY), 0)) AS dias_desde_inscricao,
-        {status_norm} AS status_normalizado,
-        {grupo} AS grupo_prioridade,
-        {prioridade} AS prioridade,
-        {motivo} AS motivo_prioridade
+    WITH source AS (
+      SELECT v.*, COUNT(*) OVER() AS total_antes_filtros
       FROM {bq._tbl(bq.BQ_VIEW_LEADS)} v
-      WHERE {' AND '.join(where)} AND NOT {matriculado} AND NOT {excluido} AND {telefone_valido}
-    ), numbered AS (SELECT base.*, COUNT(*) OVER() AS total_registros FROM base WHERE grupo_prioridade < 99)
-    SELECT * FROM numbered
-    ORDER BY grupo_prioridade ASC, data_inscricao DESC NULLS LAST, dt_upload DESC NULLS LAST, prioridade DESC
+    ), filtered AS (
+      SELECT v.*, COUNT(*) OVER() AS total_depois_filtros
+      FROM source v
+      WHERE {' AND '.join(where)}
+    ), base AS (
+      SELECT
+        {_safe_select('nome')}, {_safe_select('celular')}, {select_email}, {_safe_select('curso')}, {p['polo']} AS polo, {p['unidade']} AS unidade,
+        {_safe_select('origem')}, {_safe_select('campanha')}, {_safe_select('consultor_comercial')},
+        {p['status']} AS status, {p['status_inscricao']} AS status_inscricao,
+        {p['data_inscricao']} AS data_inscricao, {p['ultima']} AS data_ultima_acao, {p['dt_upload']} AS dt_upload,
+        IF({p['ultima']} IS NULL, NULL, GREATEST(DATE_DIFF(CURRENT_DATE(), DATE({p['ultima']}), DAY), 0)) AS dias_sem_acao,
+        IF({p['data_inscricao']} IS NULL, NULL, GREATEST(DATE_DIFF(CURRENT_DATE(), DATE({p['data_inscricao']}), DAY), 0)) AS dias_desde_inscricao,
+        {p['status_norm']} AS status_normalizado,
+        {p['grupo']} AS grupo_prioridade,
+        {p['nivel']} AS nivel_prioridade,
+        {p['prioridade']} AS prioridade,
+        {p['motivo']} AS motivo_prioridade,
+        {p['score']} AS score_prioridade,
+        total_antes_filtros,
+        total_depois_filtros
+      FROM filtered v
+      WHERE NOT {p['matriculado']} AND NOT {p['excluido']} AND {p['telefone_valido']}
+    ), numbered AS (
+      SELECT base.*, COUNT(*) OVER() AS total_registros
+      FROM base
+      WHERE grupo_prioridade IN (1, 2, 3)
+    )
+    SELECT *, '{bq.BQ_VIEW_LEADS}' AS view_utilizada, '{columns_detected}' AS colunas_detectadas
+    FROM numbered
+    ORDER BY grupo_prioridade ASC, data_inscricao DESC NULLS LAST, dt_upload DESC NULLS LAST
+    LIMIT @limit
     """
     if not export:
-        sql += "\nLIMIT @limit OFFSET @offset"
+        sql += " OFFSET @offset"
     return sql, params
 
 
 def get_fila(filters: Mapping[str, Any], meta: Mapping[str, Any]) -> Tuple[Dict[str, Any], bool]:
+    started = perf_counter()
     sql, params = _fila_sql(filters, meta)
-    rows = _run(sql, params, "gestao_fila")
+    rows = _run(sql, params, "query_gestao_fila_operacional")
     total = rows[0].get("total_registros", 0) if rows else 0
-    return {"items": rows, "rows": rows, "pagination": _pagination(meta, total), "total": total, "limit": meta["limit"], "offset": meta["offset"], "score_regra": score_rule_documentation()}, False
+    logger.info(
+        "gestao_fila_diagnostics operation=query_gestao_fila_operacional view=%s colunas_detectadas=%s quantidade_antes_filtros=%s quantidade_depois_filtros=%s quantidade_retornada=%s duration_ms=%s",
+        rows[0].get("view_utilizada") if rows else bq.BQ_VIEW_LEADS,
+        rows[0].get("colunas_detectadas") if rows else ",".join(sorted(bq._view_columns())),
+        rows[0].get("total_antes_filtros") if rows else 0,
+        rows[0].get("total_depois_filtros") if rows else 0,
+        len(rows),
+        int((perf_counter() - started) * 1000),
+    )
+    return {"items": rows, "pagination": _pagination(meta, total)}, False
 
 
 def _pagination(meta: Mapping[str, Any], total: int) -> Dict[str, Any]:
@@ -1233,11 +1336,10 @@ def get_opcoes(filters: Mapping[str, Any], meta: Mapping[str, Any]) -> Tuple[Dic
 
 def score_rule_documentation() -> List[Dict[str, Any]]:
     return [
-        {"componente": "Grupo 1", "regra": "Nunca trabalhados: leads não matriculados, com status vazio, sem data_disparo e sem data_ultima_acao; ordenados por data_inscricao desc e dt_upload desc."},
-        {"componente": "Grupo 2", "regra": "Depois vêm leads não matriculados com status vazio que já tiveram disparo ou contato, também por data_inscricao desc."},
-        {"componente": "Grupo 3", "regra": "Depois vêm leads não matriculados classificados exatamente como EC em status, status_inscricao ou tipo_negocio."},
-        {"componente": "Grupo 4", "regra": "Por fim vêm demais leads elegíveis, excluindo matriculados, cancelados, descartados, encerrados e sem telefone válido."},
-        {"componente": "Score", "regra": "A prioridade 100/85/70/40 é explicativa; grupo_prioridade vem primeiro e data_inscricao desc decide a ordem dentro do grupo."},
+        {"componente": "Grupo 1", "regra": "Leads não matriculados, com celular válido e status vazio; ordenados por data_inscricao desc e dt_upload desc."},
+        {"componente": "Grupo 2", "regra": "Depois vêm leads não matriculados classificados exatamente como EC em status, status_inscricao ou tipo_negocio."},
+        {"componente": "Grupo 3", "regra": "Por fim vêm demais leads elegíveis, excluindo matriculados, cancelados, descartados, encerrados e sem telefone válido."},
+        {"componente": "Score", "regra": "O score é apenas informativo; grupo_prioridade vem primeiro e impede EC de passar à frente de sem status."},
     ]
 
 
@@ -1327,17 +1429,13 @@ def prioritize_fila_rows(rows: List[Mapping[str, Any]]) -> List[Dict[str, Any]]:
         if status_norm in {"CANCELADO", "CANCELADA", "CANC", "DESCARTADO", "DESCARTADA", "ENCERRADO", "ENCERRADA", "PERDIDO", "PERDIDA", "MAT", "MATRICULADO"}:
             continue
         dt = parse_lead_date(row.get("data_inscricao"))
-        data_disparo = parse_lead_date(row.get("data_disparo"))
-        data_ultima_acao = parse_lead_date(row.get("data_ultima_acao") or row.get("ultima_atividade"))
-        if is_status_empty(status) and data_disparo is None and data_ultima_acao is None:
-            grupo, prioridade, motivo = 1, 100, "Nunca trabalhado, sem status e sem ação registrada"
-        elif is_status_empty(status):
-            grupo, prioridade, motivo = 2, 85, "Sem status, já teve disparo ou contato"
+        if is_status_empty(status):
+            grupo, prioridade, motivo = 1, "ALTA", "Lead recente sem status"
         elif is_status_ec(row.get("status"), row.get("status_inscricao"), row.get("tipo_negocio")):
-            grupo, prioridade, motivo = 3, 70, "Lead classificado como EC"
+            grupo, prioridade, motivo = 2, "MÉDIA", "Lead classificado como EC"
         else:
-            grupo, prioridade, motivo = 4, 40, "Lead elegível para acompanhamento"
-        row.update({"grupo_prioridade": grupo, "prioridade": prioridade, "motivo_prioridade": motivo, "data_inscricao_normalizada": dt, "status_normalizado": status_norm, "dias_desde_inscricao": (date.today() - dt).days if dt else None})
+            grupo, prioridade, motivo = 3, "NORMAL", "Lead elegível para acompanhamento"
+        row.update({"grupo_prioridade": grupo, "nivel_prioridade": prioridade, "prioridade": prioridade, "motivo_prioridade": motivo, "data_inscricao_normalizada": dt, "status_normalizado": status_norm, "dias_desde_inscricao": (date.today() - dt).days if dt else None})
         out.append(row)
     out.sort(key=lambda r: (r["grupo_prioridade"], -(r["data_inscricao_normalizada"].toordinal() if r.get("data_inscricao_normalizada") else 0)))
     return out
