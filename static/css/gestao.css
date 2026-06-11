@@ -126,3 +126,21 @@ button, a, input, select { min-height: 40px; }
 .quality-card .d-flex { margin-top: .4rem; }
 .quality-card .btn[disabled], .panel-heading .btn[disabled] { opacity: .65; cursor: wait; }
 .mini-table .empty-state { border: 0; min-height: 72px; }
+
+/* Gestão 2026 responsive fixes */
+.gestao-shell, .data-panel, .filter-panel, .module, .table-wrap, .chart-box { min-width: 0; }
+.module-loading { align-items:center; background:#f8fafc; border:1px dashed var(--go-border,#dbe3ef); border-radius:16px; color:#64748b; display:flex; justify-content:center; min-height:86px; padding:1rem; }
+.funnel-scroll { width: 100%; overflow-x: auto; overflow-y: hidden; padding-bottom: .75rem; }
+.funnel-grid { display: grid; grid-template-columns: repeat(4, minmax(220px, 1fr)); gap: 1rem; min-width: 940px; }
+.funnel-card { min-width: 0; overflow: hidden; }
+.funnel-card__value, .funnel-card__label, .funnel-card__meta { display: block; overflow-wrap: anywhere; }
+.table-wrap { overflow-x:auto; width:100%; }
+.table-wrap table { min-width: 760px; }
+.quality-card { background:#f8fafc; border:1px solid var(--go-border,#dbe3ef); border-radius:16px; padding:.85rem; text-align:left; width:100%; }
+.quality-card span { color:#64748b; display:block; font-size:.75rem; font-weight:850; text-transform:uppercase; }
+.quality-card strong { display:block; font-size:1.45rem; margin-top:.3rem; }
+.header-actions { display:flex; flex-wrap:wrap; gap:.5rem; align-items:center; }
+.filters-grid > label, .filter-actions { min-width:0; }
+.btn[disabled] { cursor: wait; opacity:.65; }
+@media (min-width: 1280px) { .funnel-grid { min-width: 0; } }
+@media (max-width: 360px) { .gestao-shell { padding-left:.5rem!important; padding-right:.5rem!important; } .data-panel, .filter-panel { padding:.75rem; } .table-wrap table { min-width:680px; } }

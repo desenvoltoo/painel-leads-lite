@@ -53,6 +53,10 @@ from services.gestao import (
     get_opcoes as gestao_get_opcoes,
     get_produtividade as gestao_get_produtividade,
     get_qualidade_dados as gestao_get_qualidade_dados,
+    get_qualidade as gestao_get_qualidade,
+    get_rejeicoes as gestao_get_rejeicoes,
+    export_rejeicoes as gestao_export_rejeicoes,
+    export_produtividade as gestao_export_produtividade,
     get_rankings as gestao_get_rankings,
     get_resumo as gestao_get_resumo,
     invalidate_gestao_cache,
@@ -568,7 +572,7 @@ def create_app() -> Flask:
 
     @app.get("/api/gestao/qualidade")
     def api_gestao_qualidade():
-        return redirect(url_for("api_gestao_qualidade_dados"), code=308)
+        return _gestao_endpoint(gestao_get_qualidade)
 
     @app.get("/api/importacoes/historico")
     def api_importacoes_historico():
@@ -589,7 +593,14 @@ def create_app() -> Flask:
 
     @app.get("/api/gestao/importacoes")
     def api_gestao_importacoes():
-        return redirect(url_for("api_importacoes_historico"), code=308)
+        try:
+            filters, meta = gestao_parse_import_history_request(request.args)
+            data, cached = gestao_get_importacoes(filters, meta)
+            return _gestao_success(data, filters, cached=cached)
+        except GestaoValidationError as exc:
+            return jsonify({"ok": False, "error": {"code": "GESTAO_INVALID_FILTER", "message": str(exc)}}), 400
+        except Exception as exc:
+            return _gestao_error_response(exc, code="IMPORTACOES_HISTORICO_ERROR", message="Não foi possível carregar o histórico de importações.")
 
     def _gestao_csv_response(exporter, *args):
         try:
@@ -646,11 +657,34 @@ def create_app() -> Flask:
 
     @app.get("/api/gestao/importacoes/exportar")
     def api_gestao_importacoes_exportar():
-        return redirect(url_for("api_importacoes_historico_exportar"), code=308)
+        try:
+            filters, meta = gestao_parse_import_history_request(request.args)
+            filename, content, rows_count = gestao_export_importacoes(filters, meta)
+            logger.info("gestao_export operation=export_importacoes route=%s result_count=%s", request.path, rows_count)
+            response = make_response(content)
+            response.headers["Content-Type"] = "text/csv; charset=utf-8-sig"
+            response.headers["Content-Disposition"] = f"attachment; filename={filename}"
+            return response
+        except GestaoValidationError as exc:
+            return jsonify({"ok": False, "error": {"code": "GESTAO_INVALID_FILTER", "message": str(exc)}}), 400
+        except Exception as exc:
+            return _gestao_error_response(exc, code="IMPORTACOES_EXPORT_ERROR", message="Não foi possível exportar o histórico de importações.")
 
     @app.get("/api/gestao/fila/exportar")
     def api_gestao_fila_exportar():
         return _gestao_csv_response(gestao_export_fila)
+
+    @app.get("/api/gestao/produtividade/exportar")
+    def api_gestao_produtividade_exportar():
+        return _gestao_csv_response(gestao_export_produtividade)
+
+    @app.get("/api/gestao/rejeicoes")
+    def api_gestao_rejeicoes():
+        return _gestao_endpoint(gestao_get_rejeicoes)
+
+    @app.get("/api/gestao/rejeicoes/exportar")
+    def api_gestao_rejeicoes_exportar():
+        return _gestao_csv_response(gestao_export_rejeicoes)
 
     @app.get("/api/gestao/opcoes")
     def api_gestao_opcoes():

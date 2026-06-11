@@ -6,101 +6,49 @@
   <title>Gestão Operacional | Painel Leads Lite</title>
   <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
   <link href="https://cdn.datatables.net/1.13.8/css/dataTables.bootstrap5.min.css" rel="stylesheet">
-  <link href="https://cdn.datatables.net/responsive/2.5.0/css/responsive.bootstrap5.min.css" rel="stylesheet">
-  <link href="https://cdn.datatables.net/buttons/2.4.2/css/buttons.bootstrap5.min.css" rel="stylesheet">
   <link href="{{ url_for('static', filename='css/gestao.css') }}?v={{ asset_version }}" rel="stylesheet">
 </head>
 <body>
-  <header class="executive-header sticky-top">
-    <div class="container-fluid px-3 px-lg-4 py-3">
-      <div class="d-flex flex-column flex-xl-row gap-3 justify-content-between align-items-xl-center">
-        <div class="title-block">
-          <span class="eyebrow">Painel gerencial</span>
-          <h1>Gestão Operacional</h1>
-          <p>Cards, gráficos e tabelas refletem os filtros aplicados no backend.</p>
-        </div>
-        <div class="header-actions" aria-label="Ações do cabeçalho">
-          <span id="refreshStatus" class="refresh-status" aria-live="polite"><span class="status-dot"></span>Pronto</span>
-          <span class="last-update">Atualizado em <strong id="lastUpdated">--</strong></span>
-          <button id="btnRefresh" class="btn btn-primary" type="button" aria-label="Atualizar dados">Atualizar dados</button>
-          <a class="btn btn-outline-secondary" href="/">Voltar ao painel de leads</a>
-          {% if current_user %}<span class="user-chip" aria-label="Usuário autenticado">{{ current_user }}</span>{% endif %}
-          <form method="post" action="/logout" class="m-0"><button class="btn btn-outline-danger" type="submit">Logout</button></form>
-        </div>
-      </div>
-    </div>
-  </header>
+<header class="executive-header sticky-top">
+  <div class="container-fluid px-3 px-lg-4 py-3 d-flex flex-column flex-xl-row gap-3 justify-content-between align-items-xl-center">
+    <div class="title-block"><span class="eyebrow">Painel gerencial</span><h1>Gestão Operacional</h1><p>Dados consultados no BigQuery com filtros globais e APIs assíncronas.</p></div>
+    <div class="header-actions"><span id="refreshStatus" class="refresh-status"><span class="status-dot"></span>Pronto</span><span class="last-update">Atualizado em <strong id="lastUpdated">--</strong></span><button id="btnRefresh" class="btn btn-primary" type="button">Atualizar dados</button><a class="btn btn-outline-secondary" href="/">Voltar</a>{% if current_user %}<span class="user-chip">{{ current_user }}</span>{% endif %}<form method="post" action="/logout" class="m-0"><button class="btn btn-outline-danger" type="submit">Logout</button></form></div>
+  </div>
+</header>
+<main class="container-fluid gestao-shell px-3 px-lg-4 py-4">
+  <div id="toastRegion" class="toast-region"></div>
+  <section class="filter-panel" data-module="filtros">
+    <div class="panel-heading"><div><h2>Filtros globais</h2><p>Os filtros aplicam período por data de inscrição e usam parâmetros BigQuery.</p></div><span class="badge text-bg-light">{{ ui_version }}</span></div>
+    <form id="filtersForm" class="filters-grid" autocomplete="off">
+      <label>Período inicial<input class="form-control" type="date" name="data_inicio"></label><label>Período final<input class="form-control" type="date" name="data_fim"></label>
+      <label>Curso<select class="form-select" name="curso" data-option="curso"><option value="">Todos</option></select></label><label>Modalidade<select class="form-select" name="modalidade" data-option="modalidade"><option value="">Todas</option></select></label><label>Turno<select class="form-select" name="turno" data-option="turno"><option value="">Todos</option></select></label><label>Polo<select class="form-select" name="polo" data-option="polo"><option value="">Todos</option></select></label>
+      <label>Origem<select class="form-select" name="origem" data-option="origem"><option value="">Todas</option></select></label><label>Tipo de negócio<select class="form-select" name="tipo_negocio" data-option="tipo_negocio"><option value="">Todos</option></select></label><label>Consultor comercial<select class="form-select" name="consultor_comercial" data-option="consultor_comercial"><option value="">Todos</option></select></label><label>Consultor disparo<select class="form-select" name="consultor_disparo" data-option="consultor_disparo"><option value="">Todos</option></select></label>
+      <label>Campanha<select class="form-select" name="campanha" data-option="campanha"><option value="">Todas</option></select></label><label>Canal<select class="form-select" name="canal" data-option="canal"><option value="">Todos</option></select></label><label>Ação comercial<select class="form-select" name="acao_comercial" data-option="acao_comercial"><option value="">Todas</option></select></label><label>Status<select class="form-select" name="status" data-option="status"><option value="">Todos</option></select></label>
+      <label>Status inscrição<select class="form-select" name="status_inscricao" data-option="status_inscricao"><option value="">Todos</option></select></label><label>Matriculado<select class="form-select" name="matriculado"><option value="">Todos</option><option value="sim">Sim</option><option value="nao">Não</option></select></label><label class="filter-search">Busca<input class="form-control" type="search" name="busca" placeholder="Nome, CPF, celular ou e-mail"></label>
+      <div class="filter-actions"><button class="btn btn-primary" type="submit">Aplicar filtros</button><button id="btnClearFilters" class="btn btn-outline-secondary" type="button">Limpar filtros</button></div>
+    </form><div id="activeChips" class="chips"></div>
+  </section>
 
-  <main class="container-fluid gestao-shell px-3 px-lg-4 py-4">
-    <div id="toastRegion" class="toast-region" aria-live="assertive" aria-atomic="true"></div>
+  <section class="module" data-module="resumo"><div id="resumo-loading" class="module-loading">Carregando resumo...</div><div id="kpiGrid" class="kpi-grid module-content"></div><div id="resumo-empty" class="empty-state d-none">Nenhum indicador para os filtros atuais.</div><div id="resumo-error" class="empty-state error d-none">Não foi possível carregar o resumo. <button class="btn btn-sm btn-outline-danger" data-retry="resumo">Tentar novamente</button></div></section>
 
-    <section class="filter-panel" aria-labelledby="filtersTitle">
-      <div class="panel-heading">
-        <div><h2 id="filtersTitle">Filtros globais</h2><p>Use os filtros para recalcular KPIs, gráficos e tabelas no BigQuery.</p></div>
-        <span class="badge text-bg-light">{{ ui_version }}</span>
-      </div>
-      <form id="filtersForm" class="filters-grid" autocomplete="off">
-        <label>Período inicial<input class="form-control" type="date" name="data_ini"></label>
-        <label>Período final<input class="form-control" type="date" name="data_fim"></label>
-        <label>Consultor comercial<select class="form-select" name="consultor_comercial" data-option="consultor_comercial"><option value="">Todos</option></select></label>
-        <label>Consultor disparo<select class="form-select" name="consultor_disparo" data-option="consultor_disparo"><option value="">Todos</option></select></label>
-        <label>Curso<select class="form-select" name="curso" data-option="curso"><option value="">Todos</option></select></label>
-        <label>Polo/unidade<select class="form-select" name="polo" data-option="polo"><option value="">Todos</option></select></label>
-        <label>Modalidade<select class="form-select" name="modalidade" data-option="modalidade"><option value="">Todas</option></select></label>
-        <label>Turno<select class="form-select" name="turno" data-option="turno"><option value="">Todos</option></select></label>
-        <label>Origem<select class="form-select" name="origem" data-option="origem"><option value="">Todas</option></select></label>
-        <label>Campanha<select class="form-select" name="campanha" data-option="campanha"><option value="">Todas</option></select></label>
-        <label>Canal<select class="form-select" name="canal" data-option="canal"><option value="">Todos</option></select></label>
-        <label>Tipo de negócio<select class="form-select" name="tipo_negocio" data-option="tipo_negocio"><option value="">Todos</option></select></label>
-        <label>Status<select class="form-select" name="status" data-option="status"><option value="">Todos</option><option value="__EMPTY__">Sem status</option></select></label>
-        <label>Matriculado<select class="form-select" name="matriculado"><option value="">Todos</option><option value="sim">Sim</option><option value="nao">Não</option></select></label>
-        <label class="filter-search">Busca<input class="form-control" type="search" name="busca" placeholder="Nome, CPF, celular ou e-mail" aria-label="Buscar por nome CPF celular ou e-mail"></label>
-        <div class="filter-actions">
-          <button class="btn btn-primary" type="submit">Aplicar filtros</button>
-          <button id="btnClearFilters" class="btn btn-outline-secondary" type="button">Limpar filtros</button>
-        </div>
-      </form>
-      <div id="activeChips" class="chips" aria-label="Filtros ativos"></div>
-    </section>
+  <section class="row g-4 mb-4">
+    <div class="col-12 col-xl-5"><div class="data-panel h-100 module" data-module="funil"><div class="panel-heading"><div><h2>Funil comercial</h2><p>Total válido → Trabalhados → Inscritos → Matriculados.</p></div></div><div id="funil-loading" class="module-loading">Carregando funil...</div><div id="funilList" class="funnel-scroll module-content"></div><div id="funil-empty" class="empty-state d-none">Nenhum dado de funil para os filtros atuais.</div><div id="funil-error" class="empty-state error d-none">Não foi possível carregar o funil. <button class="btn btn-sm btn-outline-danger" data-retry="funil">Tentar novamente</button></div></div></div>
+    <div class="col-12 col-xl-7"><div class="data-panel h-100 module" data-module="evolucao"><div class="panel-heading"><div><h2>Evolução temporal</h2><p>Agrupamento executado no BigQuery.</p></div><select id="granularity" class="form-select form-select-sm w-auto"><option value="dia">Dia</option><option value="semana">Semana</option><option value="mes">Mês</option></select></div><div id="evolucao-loading" class="module-loading">Carregando evolução...</div><div class="chart-box module-content"><canvas id="chartEvolucao"></canvas></div><div id="evolucao-empty" class="empty-state d-none">Nenhuma série para os filtros atuais.</div><div id="evolucao-error" class="empty-state error d-none">Não foi possível carregar a evolução. <button class="btn btn-sm btn-outline-danger" data-retry="evolucao">Tentar novamente</button></div></div></div>
+  </section>
 
-    <section class="kpi-grid" aria-label="Indicadores principais" id="kpiGrid"></section>
+  <section class="data-panel mb-4 module" data-module="rankings"><div class="panel-heading"><div><h2>Rankings</h2><p>Conversão respeita volume mínimo configurado.</p></div></div><div id="rankings-loading" class="module-loading">Carregando rankings...</div><div id="rankingsGrid" class="rankings-grid module-content"></div><div id="rankings-empty" class="empty-state d-none">Nenhum ranking para os filtros atuais.</div><div id="rankings-error" class="empty-state error d-none">Não foi possível carregar rankings. <button class="btn btn-sm btn-outline-danger" data-retry="rankings">Tentar novamente</button></div></section>
 
-    <section class="row g-4 mb-4">
-      <div class="col-12 col-xl-5"><div class="data-panel h-100"><div class="panel-heading"><div><h2>Funil comercial</h2><p>Etapas cumulativas: Total elegível → Trabalhados → Inscritos → Matriculados.</p></div></div><div id="funilList" class="funnel-scroll empty-state">Carregando funil...</div></div></div>
-      <div class="col-12 col-xl-7"><div class="data-panel h-100"><div class="panel-heading"><div><h2>Evolução temporal</h2><p>Datas agrupadas no BigQuery.</p></div><select id="granularity" class="form-select form-select-sm w-auto" aria-label="Granularidade"><option value="dia">Dia</option><option value="semana">Semana</option><option value="mes">Mês</option></select></div><div class="chart-box"><canvas id="chartEvolucao"></canvas></div></div></div>
-    </section>
+  <section class="data-panel mb-4 module" data-module="produtividade"><div class="panel-heading"><div><h2>Produtividade dos consultores</h2><p>Agrupado por consultor comercial.</p></div><button id="btnExportProdutividade" class="btn btn-outline-primary btn-sm" type="button">Exportar produtividade</button></div><div id="produtividade-loading" class="module-loading">Carregando produtividade...</div><div class="table-wrap module-content"><table id="produtividadeTable" class="table table-hover w-100"><thead><tr><th>Consultor</th><th>Total</th><th>Sem status</th><th>EC</th><th>Inscritos</th><th>Matriculados</th><th>Conversão</th><th>Acionamentos</th><th>Última atividade</th><th>Dias sem atividade</th></tr></thead><tbody></tbody></table></div><div id="produtividade-empty" class="empty-state d-none">Nenhum consultor para os filtros atuais.</div><div id="produtividade-error" class="empty-state error d-none">Não foi possível carregar produtividade. <button class="btn btn-sm btn-outline-danger" data-retry="produtividade">Tentar novamente</button></div></section>
 
-    <section class="data-panel mb-4">
-      <div class="panel-heading"><div><h2>Rankings</h2><p id="rankingHint">Conversão exige volume mínimo configurado.</p></div></div>
-      <div id="rankingsGrid" class="rankings-grid"></div>
-    </section>
+  <section class="data-panel mb-4 module" data-module="fila"><div class="panel-heading"><div><h2>Fila operacional</h2><p>Prioridade: sem status, EC e demais elegíveis.</p></div><button id="btnExportFila" class="btn btn-outline-primary" type="button">Exportar fila</button></div><div id="fila-loading" class="module-loading">Carregando fila...</div><div class="table-wrap module-content"><table id="filaTable" class="table table-hover w-100"><thead><tr><th>Nome</th><th>Celular</th><th>Curso</th><th>Modalidade</th><th>Polo</th><th>Origem</th><th>Consultor</th><th>Status</th><th>Status inscrição</th><th>Data inscrição</th><th>Prioridade</th><th>Motivo</th></tr></thead><tbody></tbody></table></div><div id="fila-empty" class="empty-state d-none">Nenhum lead elegível para os filtros atuais.</div><div id="fila-error" class="empty-state error d-none">Não foi possível carregar a fila operacional. <button class="btn btn-sm btn-outline-danger" data-retry="fila">Tentar novamente</button></div></section>
 
-    <section class="data-panel mb-4">
-      <div class="panel-heading"><div><h2>Produtividade dos consultores</h2><p>Ativo: até 7 dias sem atividade; atenção: 8 a 14; inativo: acima de 14 ou sem atividade.</p></div></div>
-      <div class="table-responsive"><table id="produtividadeTable" class="table table-hover align-middle w-100"><thead><tr><th>Consultor</th><th>Total</th><th>Novos</th><th>Sem status</th><th>Carteira</th><th>Matriculados</th><th>Conversão</th><th>Acionamentos</th><th>1º contato</th><th>Até matrícula</th><th>Última atividade</th><th>Dias sem atividade</th><th>Score médio</th><th>Situação</th></tr></thead><tbody></tbody></table></div>
-    </section>
+  <section class="row g-4 mb-4">
+    <div class="col-12 col-xl-6"><div class="data-panel h-100 module" data-module="qualidade"><div class="panel-heading"><div><h2>Qualidade dos dados</h2><p>Máscaras aplicadas em CPF, celular e e-mail.</p></div><button id="btnExportQualidade" class="btn btn-outline-primary btn-sm" type="button">Exportar qualidade</button></div><div id="qualidade-loading" class="module-loading">Carregando qualidade...</div><div id="qualityGrid" class="quality-grid module-content"></div><div id="qualityDetails" class="mini-table mt-3"></div><div id="qualidade-empty" class="empty-state d-none">Nenhum problema encontrado para os filtros atuais.</div><div id="qualidade-error" class="empty-state error d-none">Não foi possível carregar qualidade. <button class="btn btn-sm btn-outline-danger" data-retry="qualidade">Tentar novamente</button></div></div></div>
+    <div class="col-12 col-xl-6"><div class="data-panel h-100 module" data-module="importacoes"><div class="panel-heading"><div><h2>Histórico de importações</h2><p>Fonte: logs_importacoes.</p></div><button id="btnExportImportacoes" class="btn btn-outline-primary btn-sm" type="button">Exportar histórico</button></div><div id="importacoes-loading" class="module-loading">Carregando histórico...</div><div id="importsPanel" class="imports-panel module-content"></div><div id="importacoes-empty" class="empty-state d-none">Nenhuma importação para os filtros atuais.</div><div id="importacoes-error" class="empty-state error d-none">Não foi possível carregar histórico. <button class="btn btn-sm btn-outline-danger" data-retry="importacoes">Tentar novamente</button></div></div></div>
+  </section>
 
-    <section class="data-panel mb-4">
-      <div class="panel-heading flex-wrap gap-2"><div><h2>Fila operacional inteligente</h2><p>Ordenação: grupo 1 sem status recente, grupo 2 EC, grupo 3 demais elegíveis.</p></div><button id="btnExportFila" class="btn btn-outline-primary" type="button">Exportar fila</button></div>
-      <div id="filaState" class="d-none"></div><div class="table-responsive"><table id="filaTable" class="table table-hover align-middle w-100"><thead><tr><th>Nome</th><th>Telefone</th><th>Curso</th><th>Polo/Unidade</th><th>Origem</th><th>Status</th><th>Consultor</th><th>Data de inscrição</th><th>Grupo</th><th>Prioridade</th><th>Motivo</th></tr></thead><tbody></tbody></table></div>
-    </section>
-
-    <section class="row g-4 mb-4">
-      <div class="col-12 col-xl-6"><div class="data-panel h-100"><div class="panel-heading"><div><h2>Qualidade dos dados</h2><p>Duplicidades calculadas como registros excedentes por chave normalizada.</p></div></div><div id="qualityGrid" class="quality-grid"></div><div id="qualityDetails" class="mini-table mt-3 d-none"></div></div></div>
-      <div class="col-12 col-xl-6"><div class="data-panel h-100"><div class="panel-heading"><div><h2>Histórico de Importações</h2><p>Ordenado por upload mais recente e protegido contra payloads.</p></div><button id="btnExportImportacoes" class="btn btn-outline-primary btn-sm" type="button">Exportar histórico</button></div><div id="importsPanel" class="imports-panel empty-state">Carregando histórico...</div></div></div>
-    </section>
-  </main>
-
-  <script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
-  <script src="https://cdn.datatables.net/1.13.8/js/jquery.dataTables.min.js"></script>
-  <script src="https://cdn.datatables.net/1.13.8/js/dataTables.bootstrap5.min.js"></script>
-  <script src="https://cdn.datatables.net/responsive/2.5.0/js/dataTables.responsive.min.js"></script>
-  <script src="https://cdn.datatables.net/responsive/2.5.0/js/responsive.bootstrap5.min.js"></script>
-  <script src="https://cdn.datatables.net/buttons/2.4.2/js/dataTables.buttons.min.js"></script>
-  <script src="https://cdn.datatables.net/buttons/2.4.2/js/buttons.bootstrap5.min.js"></script>
-  <script src="https://cdn.datatables.net/buttons/2.4.2/js/buttons.html5.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
-  <script src="{{ url_for('static', filename='js/gestao.js') }}?v={{ asset_version }}"></script>
+  <section class="data-panel mb-4 module" data-module="rejeicoes"><div class="panel-heading"><div><h2>Rejeições de importação</h2><p>Sem payload e com dados pessoais mascarados.</p></div><button id="btnExportRejeicoes" class="btn btn-outline-primary btn-sm" type="button">Exportar rejeições</button></div><div id="rejeicoes-loading" class="module-loading">Carregando rejeições...</div><div class="table-wrap module-content"><table id="rejeicoesTable" class="table table-hover w-100"><thead><tr><th>Data</th><th>Motivo</th><th>CPF</th><th>Celular</th><th>Nome</th><th>E-mail</th></tr></thead><tbody></tbody></table></div><div id="rejeicoes-empty" class="empty-state d-none">Nenhuma rejeição para os filtros atuais.</div><div id="rejeicoes-error" class="empty-state error d-none">Não foi possível carregar rejeições. <button class="btn btn-sm btn-outline-danger" data-retry="rejeicoes">Tentar novamente</button></div></section>
+</main>
+<script src="https://code.jquery.com/jquery-3.7.1.min.js"></script><script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script><script src="https://cdn.datatables.net/1.13.8/js/jquery.dataTables.min.js"></script><script src="https://cdn.datatables.net/1.13.8/js/dataTables.bootstrap5.min.js"></script><script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script><script src="{{ url_for('static', filename='js/gestao.js') }}?v={{ asset_version }}"></script>
 </body>
 </html>
