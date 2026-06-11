@@ -1174,13 +1174,20 @@ def _apply_filters(sql: str, filters: Dict[str, Any], params: List[Any]) -> str:
 # ============================================================
 # GESTÃO OPERACIONAL (/gestao)
 # ============================================================
+_SENSITIVE_PARAM_NAME_PARTS = ("cpf", "celular", "telefone", "email", "nome", "busca", "token", "senha", "password", "credential", "payload")
+
+
 def _format_bq_params_for_log(params: Optional[List[Any]]) -> List[Dict[str, Any]]:
+    """Return parameter metadata safe for logs, never raw frontend values."""
     formatted = []
     for param in params or []:
+        name = str(getattr(param, "name", "") or "")
+        value = getattr(param, "value", None)
+        is_sensitive = any(part in name.lower() for part in _SENSITIVE_PARAM_NAME_PARTS)
         formatted.append({
-            "name": getattr(param, "name", None),
+            "name": name or None,
             "type": getattr(param, "type_", None),
-            "value": getattr(param, "value", None),
+            "value": "[REDACTED]" if is_sensitive else ("[SET]" if value not in (None, "") else value),
         })
     return formatted
 

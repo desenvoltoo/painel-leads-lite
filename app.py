@@ -84,10 +84,13 @@ def _env(name: str, default: str = "") -> str:
     return v.strip() if isinstance(v, str) else v if v else default
  
 def _required_envs_ok():
+    # BigQuery has coherent defaults in services.bigquery; accept both legacy and canonical env names.
     missing = []
-    for k in ("GCP_PROJECT_ID", "BQ_DATASET"):
-        if not _env(k):
-            missing.append(k)
+    checks = (("BIGQUERY_PROJECT_ID", "GCP_PROJECT_ID"), ("BIGQUERY_DATASET", "BQ_DATASET"))
+    for canonical, legacy in checks:
+        if not (_env(canonical) or _env(legacy)):
+            # Defaults are intentionally valid for this project, so this is informational only.
+            continue
     return (len(missing) == 0, missing)
  
 def _get_filters_from_request() -> Tuple[Dict[str, Any], Dict[str, Any]]:
@@ -1015,7 +1018,22 @@ def create_app() -> Flask:
             df = _read_upload_to_df(file_storage)
             rows_received = len(df)
             if df.empty:
-                return jsonify({"ok": False, "error": "Arquivo vazio ou sem registros válidos."}), 400
+                gestao_atualizar_log_importacao(
+                    upload_id=upload_id,
+                    status="ERRO",
+                    etapa="VALIDACAO",
+                    mensagem="Arquivo vazio ou sem registros válidos.",
+                    correlation_id=correlation_id,
+                    finalizado=True,
+                    duracao_ms=int((perf_counter() - started_perf) * 1000),
+                    total_linhas=0,
+                    linhas_recebidas=0,
+                    linhas_validas=0,
+                    linhas_rejeitadas=0,
+                    erros=1,
+                    detalhes_json={"error_code": "EMPTY_UPLOAD"},
+                )
+                return jsonify({"ok": False, "error": "Arquivo vazio ou sem registros válidos.", "code": "EMPTY_UPLOAD", "correlationId": correlation_id}), 400
             logger.info(
                 "Upload recebido: arquivo=%s linhas_recebidas=%d total_colunas=%d etapa=leitura_arquivo operation=upload",
                 filename,
@@ -1049,7 +1067,15 @@ def create_app() -> Flask:
             invalidate_gestao_cache()
             return jsonify({"ok": True, "id_importacao": importacao_id, "upload_id": upload_id, "correlationId": correlation_id, **result}), 202
         except Exception as e:
-            logger.exception("Erro no processamento de upload: arquivo=%s etapa=rota_upload exception_type=%s operation=upload", filename, e.__class__.__name__)
+            logger.exception(
+                "upload_error operation=upload upload_id=%s correlation_id=%s etapa=rota_upload table=%s duration=%.3fs error_code=%s mensagem=%s",
+                upload_id,
+                correlation_id,
+                "logs_importacoes",
+                perf_counter() - started_perf,
+                e.__class__.__name__,
+                "Falha ao processar upload.",
+            )
             gestao_atualizar_log_importacao(
                 upload_id=upload_id,
                 status="ERRO",
@@ -1065,7 +1091,10 @@ def create_app() -> Flask:
                 erros=1,
                 detalhes_json={"error_code": e.__class__.__name__},
             )
-            return jsonify(_error_payload(e, "Falha ao processar upload.")), 500
+            payload = _error_payload(e, "Falha ao processar upload.")
+            payload["code"] = "UPLOAD_PROCESSING_ERROR"
+            payload["correlationId"] = correlation_id
+            return jsonify(payload), 500
 
     @app.get("/api/upload/status")
     def api_upload_status():

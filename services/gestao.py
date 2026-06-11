@@ -7,6 +7,7 @@ import json
 import math
 import logging
 import os
+import re
 import threading
 from collections import OrderedDict
 from datetime import date, datetime, timezone, timedelta
@@ -305,16 +306,28 @@ def _sanitize_message(message: Optional[str]) -> Optional[str]:
     if not message:
         return None
     text = str(message).replace("\n", " ").replace("\r", " ")
+    text = re.sub(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+", "[email-mascarado]", text)
+    text = re.sub(r"\b\d{3}\.?\d{3}\.?\d{3}-?\d{2}\b", "[cpf-mascarado]", text)
+    text = re.sub(r"(?<!\d)(?:\+?55\s*)?(?:\(?\d{2}\)?\s*)?9?\d{4}[-\s]?\d{4}(?!\d)", "[celular-mascarado]", text)
+    for secret_word in ("token", "authorization", "credential", "password", "senha"):
+        text = re.sub(rf"({secret_word}\s*[:=]\s*)\S+", rf"\1[redigido]", text, flags=re.IGNORECASE)
     return text[:500]
 
 
 def _run_import_log_dml(sql: str, params: List[Any], operation: str, upload_id: str, etapa: str) -> None:
     started = perf_counter()
+    correlation_id = next((getattr(p, "value", None) for p in params if getattr(p, "name", None) == "correlation_id"), None)
     try:
         bq._run_gestao_query(sql, params=params, operation_name=operation)
-        logger.info("import_log operation=%s upload_id=%s etapa=%s table=%s duration=%.3fs", operation, upload_id, etapa, IMPORT_LOG_TABLE, perf_counter() - started)
+        logger.info(
+            "import_log operation=%s upload_id=%s correlation_id=%s etapa=%s table=%s duration=%.3fs error_code=%s mensagem=%s",
+            operation, upload_id, correlation_id, etapa, IMPORT_LOG_TABLE, perf_counter() - started, None, "ok",
+        )
     except Exception as exc:
-        logger.warning("import_log_failed operation=%s upload_id=%s etapa=%s table=%s duration=%.3fs error_code=%s mensagem=%s", operation, upload_id, etapa, IMPORT_LOG_TABLE, perf_counter() - started, exc.__class__.__name__, _sanitize_message(str(exc)))
+        logger.warning(
+            "import_log_failed operation=%s upload_id=%s correlation_id=%s etapa=%s table=%s duration=%.3fs error_code=%s mensagem=%s",
+            operation, upload_id, correlation_id, etapa, IMPORT_LOG_TABLE, perf_counter() - started, exc.__class__.__name__, _sanitize_message(str(exc)),
+        )
 
 
 def criar_log_importacao(*, upload_id: str, id_importacao: str, nome_arquivo: str, tipo_arquivo: str, tamanho_arquivo_bytes: int, usuario: str, correlation_id: str, mensagem: str = "Upload recebido.") -> None:
@@ -1220,10 +1233,11 @@ def get_opcoes(filters: Mapping[str, Any], meta: Mapping[str, Any]) -> Tuple[Dic
 
 def score_rule_documentation() -> List[Dict[str, Any]]:
     return [
-        {"componente": "Grupo 1", "regra": "Leads não matriculados, com data_inscricao válida e sem status vêm primeiro, ordenados por data_inscricao desc e dt_upload desc."},
-        {"componente": "Grupo 2", "regra": "Depois vêm leads não matriculados classificados exatamente como EC em status, status_inscricao ou tipo_negocio."},
-        {"componente": "Grupo 3", "regra": "Por fim vêm demais leads elegíveis, excluindo matriculados, cancelados, descartados, encerrados e sem telefone válido."},
-        {"componente": "Score", "regra": "A prioridade 100/70/40 é explicativa e não altera a ordem entre grupos; dt_upload é usado somente como desempate após data_inscricao."},
+        {"componente": "Grupo 1", "regra": "Nunca trabalhados: leads não matriculados, com status vazio, sem data_disparo e sem data_ultima_acao; ordenados por data_inscricao desc e dt_upload desc."},
+        {"componente": "Grupo 2", "regra": "Depois vêm leads não matriculados com status vazio que já tiveram disparo ou contato, também por data_inscricao desc."},
+        {"componente": "Grupo 3", "regra": "Depois vêm leads não matriculados classificados exatamente como EC em status, status_inscricao ou tipo_negocio."},
+        {"componente": "Grupo 4", "regra": "Por fim vêm demais leads elegíveis, excluindo matriculados, cancelados, descartados, encerrados e sem telefone válido."},
+        {"componente": "Score", "regra": "A prioridade 100/85/70/40 é explicativa; grupo_prioridade vem primeiro e data_inscricao desc decide a ordem dentro do grupo."},
     ]
 
 
