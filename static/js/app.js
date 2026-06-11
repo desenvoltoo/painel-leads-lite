@@ -773,6 +773,22 @@ function renderKpis(k) {
   }
 }
 
+
+function notifyGestaoUploadConcluido() {
+  const payload = { type: "upload-concluido", at: new Date().toISOString() };
+  try {
+    window.dispatchEvent(new CustomEvent("gestao:upload-concluido", { detail: payload }));
+  } catch (_) {}
+  try {
+    localStorage.setItem("gestaoUploadConcluido", JSON.stringify(payload));
+  } catch (_) {}
+  try {
+    const channel = new BroadcastChannel("gestao-cache");
+    channel.postMessage(payload);
+    channel.close();
+  } catch (_) {}
+}
+
 /* =========================
    Upload
 ========================= */
@@ -797,6 +813,7 @@ async function pollUploadStatus(jobId) {
       }
 
       setUploadStatus("Processamento concluído com sucesso. Atualizando painel...", "ok");
+      notifyGestaoUploadConcluido();
       await loadOptions();
       await loadLeadsAndKpis();
       return;
@@ -834,6 +851,7 @@ async function doUpload() {
     const jobText = jobId ? ` Job BigQuery: ${jobId}.` : "";
     setUploadStatus(reportText ? `${reportText}${jobText}` : (resp?.message || `Arquivo enviado com sucesso. Processamento iniciado.${jobText}`), "success");
     await pollUploadStatus(jobId);
+    if (!jobId) notifyGestaoUploadConcluido();
     if (reportText) setUploadStatus(`Processamento concluído com sucesso. ${jobText} ${reportText}`, "success");
   } catch (e) {
     console.error(e);

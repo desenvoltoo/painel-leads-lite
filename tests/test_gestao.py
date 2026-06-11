@@ -359,3 +359,44 @@ def test_fila_priority_never_worked_before_worked_no_status():
     ]
     ordered = gestao.prioritize_fila_rows(rows)
     assert [r["nome"] for r in ordered] == ["nunca trabalhado antigo", "sem status trabalhado recente", "ec recente"]
+
+
+def test_bq_param_logging_redacts_personal_values():
+    params = [
+        bq.bigquery.ScalarQueryParameter("email", "STRING", "ana@example.com"),
+        bq.bigquery.ScalarQueryParameter("status", "STRING", "CONCLUIDO"),
+    ]
+    formatted = bq._format_bq_params_for_log(params)
+    assert formatted[0]["value"] == "[REDACTED]"
+    assert formatted[1]["value"] == "[SET]"
+    assert "ana@example.com" not in str(formatted)
+
+
+def test_sanitize_message_masks_personal_and_secret_values():
+    msg = gestao._sanitize_message("Erro CPF 123.456.789-09 email ana@example.com celular 11999998888 token=abc")
+    assert msg is not None
+    assert "123.456.789-09" not in msg
+    assert "ana@example.com" not in msg
+    assert "11999998888" not in msg
+    assert "abc" not in msg
+    assert "[cpf-mascarado]" in msg
+
+
+def test_qualidade_dados_route_success_shape(client, monkeypatch):
+    login(client)
+    monkeypatch.setattr("app.gestao_get_qualidade_dados", lambda filters, meta: ({"totalRegistros": 1, "ultimaAtualizacao": None}, False))
+    resp = client.get("/api/gestao/qualidade-dados")
+    body = resp.get_json()
+    assert resp.status_code == 200
+    assert body == {"success": True, "data": {"totalRegistros": 1, "ultimaAtualizacao": None}}
+
+
+def test_importacoes_historico_route_empty_is_success(client, monkeypatch):
+    login(client)
+    monkeypatch.setattr("app.gestao_get_importacoes", lambda filters, meta: ({"items": [], "pagination": {"page": 1, "pageSize": 20, "total": 0, "totalPages": 0}}, False))
+    resp = client.get("/api/importacoes/historico")
+    body = resp.get_json()
+    assert resp.status_code == 200
+    assert body["success"] is True
+    assert body["data"] == []
+    assert body["pagination"]["total"] == 0

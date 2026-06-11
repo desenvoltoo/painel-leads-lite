@@ -386,6 +386,11 @@
   }
 
 
+  function refreshUploadDependentPanels() {
+    loadQualidade();
+    loadImportacoes();
+  }
+
   function loadAll(force = false) {
     const extra = force ? { force_refresh: '1' } : {};
     if (force) state.filters.force_refresh = '1'; else delete state.filters.force_refresh;
@@ -413,6 +418,13 @@
     $('#qualityGrid').addEventListener('click', ev => { const detail = ev.target.closest('.quality-detail'); const exp = ev.target.closest('.quality-export'); if (detail) loadQualidadeDetalhes(detail.dataset.quality); if (exp) downloadGestao('qualidade/exportar', { tipo: exp.dataset.quality }, exp, `qualidade_${exp.dataset.quality}.csv`); });
     $('#btnExportImportacoes')?.addEventListener('click', ev => downloadGestao('/api/importacoes/historico/exportar', {}, ev.currentTarget, 'historico_importacoes.csv'));
     $('#btnExportFila')?.addEventListener('click', ev => downloadGestao('fila/exportar', {}, ev.currentTarget, 'fila_operacional.csv'));
+    window.refreshGestaoDashboard = () => loadAll(true);
+    window.addEventListener('gestao:upload-concluido', refreshUploadDependentPanels);
+    window.addEventListener('storage', ev => { if (ev.key === 'gestaoUploadConcluido') refreshUploadDependentPanels(); });
+    try {
+      const channel = new BroadcastChannel('gestao-cache');
+      channel.onmessage = ev => { if (ev.data?.type === 'upload-concluido') refreshUploadDependentPanels(); };
+    } catch (_) {}
     $('#granularity').addEventListener('change', loadEvolucao);
     $('[name="busca"]').addEventListener('input', debounce(() => { const values = readFilters(); if (!values) return; state.filters = values; syncUrlAndStorage(); loadAll(); }, 700));
     loadAll();
