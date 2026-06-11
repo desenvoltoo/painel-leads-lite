@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from io import BytesIO
 
 import pytest
@@ -221,26 +221,25 @@ def test_status_empty_and_ec_rules():
 
 def test_fila_priority_order_with_dates_and_exclusions():
     rows = [
-        {"nome": "lead EC antigo", "status": "ec", "celular": "11999999996", "data_inscricao": "01/06/2026"},
-        {"nome": "lead comum recente", "status": "ABERTO", "celular": "11999999995", "data_inscricao": "2026-06-10"},
-        {"nome": "lead matriculado", "status": "MAT", "celular": "11999999994", "data_inscricao": "2026-06-11"},
-        {"nome": "lead antigo sem status", "status": "   ", "celular": "11999999998", "data_inscricao": "01/06/2026"},
-        {"nome": "lead EC recente", "status": "EC", "celular": "11999999997", "data_inscricao": "2026-06-09"},
-        {"nome": "lead novo sem status", "status": None, "celular": "11999999999", "data_inscricao": "10/06/2026"},
+        {"nome": "lead A", "status": None, "celular": "11999999999", "data_inscricao": "2026-06-11"},
+        {"nome": "lead B", "status": "   ", "celular": "11999999998", "data_inscricao": "10/06/2026"},
+        {"nome": "lead C", "status": "EC", "celular": "11999999997", "data_inscricao": "2026-06-11"},
+        {"nome": "lead D", "status": "ec", "celular": "11999999996", "data_inscricao": "01/06/2026"},
+        {"nome": "lead E", "status": "ABERTO", "celular": "11999999995", "data_inscricao": "2026-06-11"},
+        {"nome": "lead F", "status": "MAT", "celular": "11999999994", "data_inscricao": "2026-06-11"},
+        {"nome": "lead G", "status": None, "celular": "", "data_inscricao": "2026-06-11"},
+        {"nome": "lead H", "status": "CANCELADO", "celular": "11999999993", "data_inscricao": "2026-06-11"},
     ]
     ordered = gestao.prioritize_fila_rows(rows)
-    assert [r["nome"] for r in ordered] == [
-        "lead novo sem status",
-        "lead antigo sem status",
-        "lead EC recente",
-        "lead EC antigo",
-        "lead comum recente",
-    ]
-    assert all(r["nome"] != "lead matriculado" for r in ordered)
+    assert [r["nome"] for r in ordered] == ["lead A", "lead B", "lead C", "lead D", "lead E"]
+    assert {"lead F", "lead G", "lead H"}.isdisjoint({r["nome"] for r in ordered})
+    assert [r["grupo_prioridade"] for r in ordered] == [1, 1, 2, 2, 3]
 
 
 def test_quality_sql_uses_duplicate_excedent_and_closed_type(monkeypatch):
     monkeypatch.setattr(gestao.bq, "_first_existing_col", lambda *cols: cols[0])
+    monkeypatch.setattr(gestao.bq, "_view_columns", lambda: set(gestao.OPTION_FIELDS) | {"nome", "cpf", "celular", "email", "data_inscricao", "dt_upload", "flag_matriculado"})
+    monkeypatch.setattr(gestao.bq, "_has_view_col", lambda col: True)
     monkeypatch.setattr(gestao, "_has", lambda col: True)
     sql, params = gestao._quality_details_sql("duplicado_cpf", {}, {"limit": 10, "offset": 0})
     assert "SUM(qtd - 1)" not in sql  # detail lists rows; summary uses excedent aggregation
@@ -251,6 +250,8 @@ def test_quality_sql_uses_duplicate_excedent_and_closed_type(monkeypatch):
 
 def test_exports_generate_csv_with_masked_data(monkeypatch):
     monkeypatch.setattr(gestao.bq, "_first_existing_col", lambda *cols: cols[0])
+    monkeypatch.setattr(gestao.bq, "_view_columns", lambda: set(gestao.OPTION_FIELDS) | {"nome", "cpf", "celular", "email", "data_inscricao", "dt_upload", "flag_matriculado"})
+    monkeypatch.setattr(gestao.bq, "_has_view_col", lambda col: True)
     monkeypatch.setattr(gestao, "_has", lambda col: True)
     monkeypatch.setattr(gestao, "_run", lambda sql, params, op: [{"motivo": "Sem status", "identificador": "***.***.***-4725", "nome": "Ana", "curso": "Direito", "consultor": "João", "data_inscricao": "2026-06-10", "data_upload": "2026-06-10", "origem": "Site", "status": ""}])
     filename, content, count = gestao.export_qualidade({}, {"limit": 10, "offset": 0}, "sem_status")
@@ -308,12 +309,16 @@ def test_fila_export_uses_same_order_function(monkeypatch):
     captured = {}
     def fake_run(sql, params, op):
         captured["sql"] = sql
-        return [{"nome": "A", "celular": "11987654321", "grupo_prioridade": 1, "prioridade": 100, "motivo_prioridade": "Lead recente sem status"}]
+        captured["op"] = op
+        return [{"nome": "A", "celular": "11987654321", "grupo_prioridade": 1, "prioridade": "ALTA", "motivo_prioridade": "Lead recente sem status"}]
     monkeypatch.setattr(gestao.bq, "_first_existing_col", lambda *cols: cols[0])
+    monkeypatch.setattr(gestao.bq, "_view_columns", lambda: set(gestao.OPTION_FIELDS) | {"nome", "cpf", "celular", "email", "data_inscricao", "data_ultima_acao", "dt_upload", "flag_matriculado"})
+    monkeypatch.setattr(gestao.bq, "_has_view_col", lambda col: True)
     monkeypatch.setattr(gestao, "_has", lambda col: True)
     monkeypatch.setattr(gestao, "_run", fake_run)
     filename, content, count = gestao.export_fila({}, {"limit": 10, "offset": 0})
     assert "ORDER BY grupo_prioridade ASC, data_inscricao DESC NULLS LAST" in captured["sql"]
+    assert captured["op"] == "gestao_fila_exportar"
     assert "*******4321" in content.decode("utf-8-sig")
     assert count == 1
 
@@ -351,14 +356,14 @@ def test_upload_log_uses_insert_then_update_same_upload(monkeypatch):
     assert [p.value for p in calls[1][1] if p.name == "upload_id"] == ["u1"]
 
 
-def test_fila_priority_never_worked_before_worked_no_status():
+def test_fila_sem_status_recency_before_ec_regardless_previous_action():
     rows = [
         {"nome": "sem status trabalhado recente", "status": "", "celular": "11999999996", "data_inscricao": "2026-06-10", "data_disparo": "2026-06-10"},
-        {"nome": "nunca trabalhado antigo", "status": None, "celular": "11999999999", "data_inscricao": "2026-06-01", "data_disparo": None, "data_ultima_acao": None},
+        {"nome": "sem status antigo", "status": None, "celular": "11999999999", "data_inscricao": "2026-06-01", "data_disparo": None, "data_ultima_acao": None},
         {"nome": "ec recente", "status": "EC", "celular": "11999999998", "data_inscricao": "2026-06-11"},
     ]
     ordered = gestao.prioritize_fila_rows(rows)
-    assert [r["nome"] for r in ordered] == ["nunca trabalhado antigo", "sem status trabalhado recente", "ec recente"]
+    assert [r["nome"] for r in ordered] == ["sem status trabalhado recente", "sem status antigo", "ec recente"]
 
 
 def test_bq_param_logging_redacts_personal_values():
@@ -400,3 +405,62 @@ def test_importacoes_historico_route_empty_is_success(client, monkeypatch):
     assert body["success"] is True
     assert body["data"] == []
     assert body["pagination"]["total"] == 0
+
+
+def test_parse_lead_date_accepts_required_formats():
+    assert gestao.parse_lead_date("2026-06-11") == date(2026, 6, 11)
+    assert gestao.parse_lead_date("11/06/2026") == date(2026, 6, 11)
+    assert gestao.parse_lead_date("2026-06-11 13:45:00") == date(2026, 6, 11)
+    assert gestao.parse_lead_date("46284") == date(2026, 9, 19)
+    assert gestao.parse_lead_date(None) is None
+
+
+def test_build_funil_etapas_cumulative_conversions_and_losses():
+    etapas = gestao.build_funil_etapas(200, 120, 80, 20)
+    assert [e["volume"] for e in etapas] == [200, 120, 80, 20]
+    assert [e["perda_etapa_anterior"] for e in etapas] == [None, 80, 40, 60]
+    assert etapas[1]["conversao_etapa_anterior"] == 60
+    assert round(etapas[2]["conversao_etapa_anterior"], 1) == 66.7
+    assert etapas[3]["conversao_etapa_anterior"] == 25
+
+
+def test_build_funil_etapas_handles_zero_nulls_and_inconsistent_values():
+    etapas = gestao.build_funil_etapas(None, 10, 30, -1)
+    assert [e["volume"] for e in etapas] == [0, 0, 0, 0]
+    assert all((e["conversao_etapa_anterior"] or 0) <= 100 for e in etapas)
+    assert all((e["perda_etapa_anterior"] or 0) >= 0 for e in etapas)
+
+
+def test_fila_api_contract_empty_and_error(client, monkeypatch):
+    login(client)
+    monkeypatch.setattr("app.gestao_get_fila", lambda filters, meta: ({"items": [], "pagination": {"page": 1, "page_size": 25, "total": 0, "total_pages": 0}}, False))
+    resp = client.get("/api/gestao/fila?limit=25")
+    body = resp.get_json()
+    assert resp.status_code == 200
+    assert body["ok"] is True
+    assert body["data"]["items"] == []
+    assert body["data"]["pagination"]["page"] == 1
+    def boom(filters, meta):
+        raise RuntimeError("invalidQuery secret")
+    monkeypatch.setattr("app.gestao_get_fila", boom)
+    resp = client.get("/api/gestao/fila?limit=25")
+    body = resp.get_json()
+    assert resp.status_code == 500
+    assert body["ok"] is False
+    assert body["error"]["code"] == "GESTAO_FILA_QUERY_ERROR"
+    assert body["error"]["message"] == "Não foi possível carregar a fila operacional."
+
+
+def test_get_fila_contract_and_pagination(monkeypatch):
+    def fake_run(sql, params, op):
+        assert op == "query_gestao_fila_operacional"
+        return [{"nome": "A", "total_registros": 1, "total_antes_filtros": 8, "total_depois_filtros": 5, "view_utilizada": "vw_leads_painel_lite", "colunas_detectadas": "status,status_inscricao,tipo_negocio"}]
+    monkeypatch.setattr(gestao.bq, "_view_columns", lambda: {"nome", "celular", "status", "status_inscricao", "tipo_negocio", "data_inscricao", "dt_upload"})
+    monkeypatch.setattr(gestao.bq, "_has_view_col", lambda col: col in {"nome", "celular", "status", "status_inscricao", "tipo_negocio", "data_inscricao", "dt_upload"})
+    monkeypatch.setattr(gestao.bq, "_first_existing_col", lambda *cols: next((c for c in cols if c in {"celular", "status", "status_inscricao", "tipo_negocio", "data_inscricao", "dt_upload"}), None))
+    monkeypatch.setattr(gestao, "_has", lambda col: col in {"nome", "celular", "status", "status_inscricao", "tipo_negocio", "data_inscricao", "dt_upload"})
+    monkeypatch.setattr(gestao, "_run", fake_run)
+    data, cached = gestao.get_fila({}, {"limit": 25, "offset": 0})
+    assert cached is False
+    assert list(data.keys()) == ["items", "pagination"]
+    assert data["pagination"] == {"page": 1, "page_size": 25, "total": 1, "total_pages": 1}

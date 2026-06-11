@@ -27,7 +27,6 @@ from services.bigquery import (
     query_leads_iter,
     query_leads_count,
     query_options,
-    query_gestao_exportar_prioritarios,
     process_upload_dataframe,
     get_bq_job_status,          # novo
     export_leads_rows,
@@ -463,7 +462,7 @@ def create_app() -> Flask:
             limit = int(request.args.get("limit", "500"))
         except (TypeError, ValueError):
             limit = 500
-        filename, content, rows_count = query_gestao_exportar_prioritarios(limit=limit)
+        filename, content, rows_count = gestao_export_fila({}, {"limit": limit, "offset": 0})
         logger.info(
             "Gestão exportação prioritários solicitada user=%s limit=%s rows=%s filename=%s",
             getattr(g, "current_user", None),
@@ -542,7 +541,16 @@ def create_app() -> Flask:
 
     @app.get("/api/gestao/fila")
     def api_gestao_fila():
-        return _gestao_endpoint(gestao_get_fila)
+        try:
+            filters, meta = gestao_parse_filters(request.args)
+            data, cached = gestao_get_fila(filters, meta)
+            return _gestao_success(data, filters, cached=cached)
+        except GestaoValidationError as exc:
+            return jsonify({"ok": False, "error": {"code": "GESTAO_INVALID_FILTER", "message": str(exc)}}), 400
+        except TimeoutError as exc:
+            return _gestao_error_response(exc, status=504, code="GESTAO_FILA_QUERY_ERROR", message="Não foi possível carregar a fila operacional.")
+        except Exception as exc:
+            return _gestao_error_response(exc, code="GESTAO_FILA_QUERY_ERROR", message="Não foi possível carregar a fila operacional.")
 
     @app.get("/api/gestao/qualidade-dados")
     def api_gestao_qualidade_dados():

@@ -66,7 +66,7 @@
     <section class="kpi-grid" aria-label="Indicadores principais" id="kpiGrid"></section>
 
     <section class="row g-4 mb-4">
-      <div class="col-12 col-xl-5"><div class="data-panel h-100"><div class="panel-heading"><div><h2>Funil comercial</h2><p>Etapas classificadas no backend.</p></div></div><div id="funilList" class="funnel-list empty-state">Carregando funil...</div></div></div>
+      <div class="col-12 col-xl-5"><div class="data-panel h-100"><div class="panel-heading"><div><h2>Funil comercial</h2><p>Etapas cumulativas: Total elegível → Trabalhados → Inscritos → Matriculados.</p></div></div><div id="funilList" class="funnel-scroll empty-state">Carregando funil...</div></div></div>
       <div class="col-12 col-xl-7"><div class="data-panel h-100"><div class="panel-heading"><div><h2>Evolução temporal</h2><p>Datas agrupadas no BigQuery.</p></div><select id="granularity" class="form-select form-select-sm w-auto" aria-label="Granularidade"><option value="dia">Dia</option><option value="semana">Semana</option><option value="mes">Mês</option></select></div><div class="chart-box"><canvas id="chartEvolucao"></canvas></div></div></div>
     </section>
 
@@ -82,7 +82,7 @@
 
     <section class="data-panel mb-4">
       <div class="panel-heading flex-wrap gap-2"><div><h2>Fila operacional inteligente</h2><p>Ordenação: grupo 1 sem status recente, grupo 2 EC, grupo 3 demais elegíveis.</p></div><button id="btnExportFila" class="btn btn-outline-primary" type="button">Exportar fila</button></div>
-      <div class="table-responsive"><table id="filaTable" class="table table-hover align-middle w-100"><thead><tr><th>Nome</th><th>Celular</th><th>Curso</th><th>Polo</th><th>Origem</th><th>Campanha</th><th>Consultor</th><th>Status</th><th>Inscrição</th><th>Última ação</th><th>Dias sem ação</th><th>Grupo</th><th>Prioridade</th><th>Motivo</th></tr></thead><tbody></tbody></table></div>
+      <div id="filaState" class="d-none"></div><div class="table-responsive"><table id="filaTable" class="table table-hover align-middle w-100"><thead><tr><th>Nome</th><th>Telefone</th><th>Curso</th><th>Polo/Unidade</th><th>Origem</th><th>Status</th><th>Consultor</th><th>Data de inscrição</th><th>Grupo</th><th>Prioridade</th><th>Motivo</th></tr></thead><tbody></tbody></table></div>
     </section>
 
     <section class="row g-4 mb-4">
