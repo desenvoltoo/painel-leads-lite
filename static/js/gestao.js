@@ -93,11 +93,12 @@
     if (button) { button.disabled = true; button.textContent = 'Gerando...'; }
     setLoading(true);
     try {
-      const res = await fetch(`/api/gestao/${endpoint}?${buildParams(extra)}`, { headers: { Accept: 'text/csv,application/json' } });
+      const base = endpoint.startsWith('/') ? endpoint : `/api/gestao/${endpoint}`;
+      const res = await fetch(`${base}?${buildParams(extra)}`, { headers: { Accept: 'text/csv,application/json' } });
       const type = res.headers.get('content-type') || '';
-      if (!res.ok) {
+      if (!res.ok || !type.includes('text/csv')) {
         const payload = type.includes('application/json') ? await res.json().catch(() => null) : null;
-        throw new Error(payload?.error?.message || 'Não foi possível gerar o arquivo.');
+        throw new Error(payload?.error?.message || 'Não foi possível gerar um CSV válido.');
       }
       const blob = await res.blob();
       const cd = res.headers.get('content-disposition') || '';
@@ -140,6 +141,25 @@
       clearTimeout(timeout);
       setLoading(false);
       if (state.controllers.get(endpoint) === controller) state.controllers.delete(endpoint);
+    }
+  }
+
+  async function apiGetRaw(path, extra = {}) {
+    setLoading(true);
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 45000);
+    try {
+      const res = await fetch(`${path}?${buildParams(extra)}`, { signal: controller.signal, headers: { Accept: 'application/json' } });
+      const payload = await res.json().catch(() => null);
+      if (!res.ok || !payload?.success) throw new Error(payload?.error?.message || 'Não foi possível carregar os dados.');
+      $('#lastUpdated').textContent = formatDate(new Date().toISOString());
+      return payload;
+    } catch (err) {
+      if (err.name !== 'AbortError') toast(err.message || 'Erro de comunicação com o servidor.');
+      throw err;
+    } finally {
+      clearTimeout(timeout);
+      setLoading(false);
     }
   }
 
@@ -313,17 +333,30 @@
   async function loadQualidade() {
     const box = $('#qualityGrid');
     const details = $('#qualityDetails');
-    box.innerHTML = '<div class="empty-state">Carregando qualidade...</div>';
+    box.innerHTML = '<div class="empty-state"><div class="spinner" aria-hidden="true"></div><strong>Carregando qualidade...</strong></div>';
     try {
-      const { data } = await apiGet('qualidade');
-      const indicadores = data.indicadores || data || {};
-      const labels = {
-        sem_celular: 'Sem celular', sem_email: 'Sem e-mail', sem_cpf: 'Sem CPF', sem_origem: 'Sem origem', sem_curso: 'Sem curso', sem_consultor: 'Sem consultor', sem_status: 'Sem status', telefone_invalido: 'Telefone inválido', cpf_invalido: 'CPF inválido/incompleto', duplicado_celular: 'Duplicados celular', duplicado_cpf: 'Duplicados CPF', rejeitado: 'Rejeitados upload', sem_dt_upload: 'Sem dt_upload', data_invalida: 'Datas inválidas'
-      };
-      box.innerHTML = Object.entries(labels).map(([k, l]) => `<div class="quality-card"><span>${escapeHtml(l)}</span><strong>${formatValue(indicadores[k])}</strong><div class="d-flex gap-2 flex-wrap"><button class="btn btn-link btn-sm quality-detail" data-quality="${escapeHtml(k)}" type="button">Ver registros</button><button class="btn btn-link btn-sm quality-export" data-quality="${escapeHtml(k)}" type="button">Exportar</button></div></div>`).join('');
+      const { data } = await apiGetRaw('/api/gestao/qualidade-dados');
+      const labels = [
+        ['totalRegistros', 'Total registros'], ['totalLeads', 'Total leads'], ['registrosComCpfValido', 'CPF válido'], ['registrosSemCpfValido', 'CPF inválido/ausente'],
+        ['registrosComCelularValido', 'Celular válido'], ['registrosSemCelularValido', 'Celular inválido/ausente'], ['registrosComEmailValido', 'E-mail válido'], ['registrosSemEmailValido', 'E-mail inválido/ausente'],
+        ['registrosSemChaveValida', 'Sem chave válida'], ['duplicidadesCpf', 'Duplicidades CPF'], ['duplicidadesCelular', 'Duplicidades celular'], ['duplicidadesEmail', 'Duplicidades e-mail'],
+        ['duplicidadesTotais', 'Duplicidades totais'], ['percentualDuplicidade', '% duplicidade', 'pct'], ['leadsSemPessoa', 'Leads sem pessoa'], ['leadsSemDataInscricao', 'Sem data inscrição'],
+        ['leadsSemStatus', 'Sem status'], ['leadsSemDisparo', 'Sem disparo'], ['nuncaTrabalhados', 'Nunca trabalhados'], ['ultimaAtualizacao', 'Última atualização', 'date']
+      ];
+      const hasAny = Object.entries(data || {}).some(([k, v]) => k !== 'ultimaAtualizacao' && Number(v || 0) > 0);
+      if (!hasAny) {
+        box.innerHTML = '<div class="empty-state">Nenhum dado de qualidade encontrado.</div>';
+        details.classList.add('d-none');
+        return;
+      }
+      box.innerHTML = labels.map(([k, l, type]) => `<div class="quality-card"><span>${escapeHtml(l)}</span><strong>${formatValue(data[k], type)}</strong></div>`).join('');
       details.classList.add('d-none');
-    } catch (_) { box.innerHTML = '<div class="empty-state error">Erro ao carregar qualidade. <button class="btn btn-sm btn-outline-primary" id="retryQualidade">Tentar novamente</button></div>'; $('#retryQualidade')?.addEventListener('click', loadQualidade); }
+    } catch (err) {
+      box.innerHTML = `<div class="empty-state error">${escapeHtml(err.message || 'Erro ao carregar qualidade.')} <button class="btn btn-sm btn-outline-primary" id="retryQualidade">Tentar novamente</button></div>`;
+      $('#retryQualidade')?.addEventListener('click', loadQualidade);
+    }
   }
+
 
   async function loadQualidadeDetalhes(tipo) {
     const box = $('#qualityDetails');
@@ -340,15 +373,18 @@
 
   async function loadImportacoes() {
     const box = $('#importsPanel');
-    box.innerHTML = '<div class="empty-state">Carregando histórico...</div>';
+    box.innerHTML = '<div class="empty-state"><div class="spinner" aria-hidden="true"></div><strong>Carregando histórico...</strong></div>';
     try {
-      const { data } = await apiGet('importacoes', { limit: 20 });
-      const hist = data.items || [];
-      if (!hist.length) { box.innerHTML = `<div class="empty-state">${escapeHtml(data.message || 'Sem histórico de importações para os filtros ativos.')}</div>`; return; }
-      box.classList.remove('empty-state');
-      box.innerHTML = `<div class="mini-table"><table><thead><tr><th>ID</th><th>Arquivo</th><th>Usuário</th><th>Upload</th><th>Status</th><th>Recebidos</th><th>Válidos</th><th>Rejeitados</th><th>Job</th></tr></thead><tbody>${hist.map(r => `<tr><td>${escapeHtml(r.id_importacao)}</td><td>${escapeHtml(r.nome_arquivo)}</td><td>${escapeHtml(r.usuario)}</td><td>${formatDate(r.dt_upload)}</td><td>${escapeHtml(r.status)}</td><td>${formatValue(r.total_recebido)}</td><td>${formatValue(r.total_valido)}</td><td>${formatValue(r.total_rejeitado)}</td><td>${escapeHtml(r.job_id)}</td></tr>`).join('')}</tbody></table></div>`;
-    } catch (_) { box.innerHTML = '<div class="empty-state error">Erro ao carregar importações. <button class="btn btn-sm btn-outline-primary" id="retryImportacoes">Tentar novamente</button></div>'; $('#retryImportacoes')?.addEventListener('click', loadImportacoes); }
+      const payload = await apiGetRaw('/api/importacoes/historico', { page: 1, pageSize: 20 });
+      const hist = payload.data || [];
+      if (!hist.length) { box.innerHTML = '<div class="empty-state">Nenhuma importação encontrada</div>'; return; }
+      box.innerHTML = `<div class="mini-table"><table><thead><tr><th>ID</th><th>Arquivo</th><th>Usuário</th><th>Criado em</th><th>Status</th><th>Recebidas</th><th>Válidas</th><th>Rejeitadas</th><th>Duração</th></tr></thead><tbody>${hist.map(r => `<tr><td>${escapeHtml(r.id_importacao || r.upload_id || '')}</td><td>${escapeHtml(r.nome_arquivo)}</td><td>${escapeHtml(r.usuario)}</td><td>${formatDate(r.criado_em || r.dt_upload)}</td><td>${escapeHtml(r.status)}</td><td>${formatValue(r.linhas_recebidas ?? r.total_linhas ?? r.total_recebido)}</td><td>${formatValue(r.linhas_validas ?? r.total_valido)}</td><td>${formatValue(r.linhas_rejeitadas ?? r.total_rejeitado)}</td><td>${formatValue(r.duracao_ms ? Number(r.duracao_ms) / 1000 : r.duracao_segundos, 'hours')}</td></tr>`).join('')}</tbody></table></div>`;
+    } catch (err) {
+      box.innerHTML = `<div class="empty-state error">${escapeHtml(err.message || 'Erro ao carregar histórico.')} <button class="btn btn-sm btn-outline-primary" id="retryImportacoes">Tentar novamente</button></div>`;
+      $('#retryImportacoes')?.addEventListener('click', loadImportacoes);
+    }
   }
+
 
   function loadAll(force = false) {
     const extra = force ? { force_refresh: '1' } : {};
@@ -375,7 +411,7 @@
     $('#btnClearFilters').addEventListener('click', () => { $('#filtersForm').reset(); state.filters = {}; syncUrlAndStorage(); loadAll(); });
     $('#btnRefresh').addEventListener('click', () => loadAll(true));
     $('#qualityGrid').addEventListener('click', ev => { const detail = ev.target.closest('.quality-detail'); const exp = ev.target.closest('.quality-export'); if (detail) loadQualidadeDetalhes(detail.dataset.quality); if (exp) downloadGestao('qualidade/exportar', { tipo: exp.dataset.quality }, exp, `qualidade_${exp.dataset.quality}.csv`); });
-    $('#btnExportImportacoes')?.addEventListener('click', ev => downloadGestao('importacoes/exportar', {}, ev.currentTarget, 'historico_importacoes.csv'));
+    $('#btnExportImportacoes')?.addEventListener('click', ev => downloadGestao('/api/importacoes/historico/exportar', {}, ev.currentTarget, 'historico_importacoes.csv'));
     $('#btnExportFila')?.addEventListener('click', ev => downloadGestao('fila/exportar', {}, ev.currentTarget, 'fila_operacional.csv'));
     $('#granularity').addEventListener('change', loadEvolucao);
     $('[name="busca"]').addEventListener('input', debounce(() => { const values = readFilters(); if (!values) return; state.filters = values; syncUrlAndStorage(); loadAll(); }, 700));

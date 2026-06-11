@@ -12,7 +12,7 @@ import unicodedata
 from concurrent.futures import TimeoutError as FuturesTimeoutError
 from decimal import Decimal, InvalidOperation
 from datetime import timedelta, datetime, timezone
-from io import BytesIO, StringIO
+from io import StringIO
 from pathlib import Path
 from time import perf_counter
 from typing import Any, Dict, Iterator, List, Optional, Tuple
@@ -38,8 +38,8 @@ logger = logging.getLogger(__name__)
 # ============================================================
 # CONFIG (ENV + travas)
 # ============================================================
-GCP_PROJECT_ID = os.getenv("GCP_PROJECT_ID", "painel-universidade")
-BQ_DATASET = os.getenv("BQ_DATASET", "modelo_estrela")
+GCP_PROJECT_ID = (os.getenv("BIGQUERY_PROJECT_ID") or os.getenv("GCP_PROJECT_ID") or "painel-universidade").strip()
+BQ_DATASET = (os.getenv("BIGQUERY_DATASET") or os.getenv("BQ_DATASET") or "modelo_estrela").strip()
 BQ_LOCATION = os.getenv("BQ_LOCATION", "").strip()
 
 BQ_STAGING_TABLE = os.getenv("BQ_STAGING_TABLE", "stg_leads_site").strip() or "stg_leads_site"
@@ -238,6 +238,10 @@ def create_export_job(job_id: str, metadata_dict: Dict[str, Any]) -> None:
         raise RuntimeError(f"Falha ao inserir export job no BigQuery: {errors}")
 
 
+def _run_query(query: str, params: Optional[List[Any]] = None) -> Any:
+    return _run_gestao_query(query, params=params, operation_name="export_job")
+
+
 def update_export_job(job_id: str, **kwargs) -> None:
     _ensure_export_jobs_table()
     existing = get_export_job(job_id)
@@ -322,8 +326,24 @@ def _with_retry(fn, *args, operation_name: str = "operação", **kwargs) -> Any:
     raise RuntimeError(f"'{operation_name}' falhou após {RETRY_MAX_ATTEMPTS} tentativas.") from last_exc
 
 
+def _validate_bq_identifier(value: str, label: str) -> str:
+    text = str(value or "").strip()
+    if not text or not text.replace("_", "a").replace("-", "a").isalnum():
+        raise ValueError(f"Identificador BigQuery inválido para {label}.")
+    return text
+
+
+def bq_table_id(name: str) -> str:
+    safe_name = _validate_bq_identifier(name, "table_or_view")
+    return f"{GCP_PROJECT_ID}.{BQ_DATASET}.{safe_name}"
+
+
+def bq_ref(name: str) -> str:
+    return f"`{bq_table_id(name)}`"
+
+
 def _tbl(name: str) -> str:
-    return f"`{GCP_PROJECT_ID}.{BQ_DATASET}.{name}`"
+    return bq_ref(name)
 
 
 def _staging_table_id() -> str:
@@ -352,7 +372,7 @@ def _has_view_col(col: str) -> bool:
 
 
 def _table_id(view_name: str) -> str:
-    return f"{GCP_PROJECT_ID}.{BQ_DATASET}.{view_name}"
+    return bq_table_id(view_name)
 
 
 def _table_columns(view_name: str) -> set[str]:
@@ -1171,27 +1191,25 @@ def _run_gestao_query(sql: str, params: Optional[List[Any]] = None, operation_na
     job = None
     try:
         logger.info(
-            "BQ %s iniciando location=%s params=%s sql=%s",
+            "BQ operation=%s location=%s params=%s",
             operation_name,
             _bq_location(),
             _format_bq_params_for_log(params),
-            sql,
         )
         job = client.query(sql, job_config=job_config, location=_bq_location())
         result = job.result(timeout=QUERY_TIMEOUT_SECONDS)
     except FuturesTimeoutError as exc:
-        logger.exception("BQ %s timeout job_id=%s sql=%s", operation_name, getattr(job, "job_id", None), sql)
+        logger.exception("BQ operation=%s timeout job_id=%s", operation_name, getattr(job, "job_id", None))
         if job is not None:
             job.cancel()
         raise TimeoutError(f"Consulta excedeu timeout de {QUERY_TIMEOUT_SECONDS}s") from exc
     except Exception:
         logger.exception(
-            "BQ %s falhou job_id=%s errors=%s params=%s sql=%s",
+            "BQ operation=%s falhou job_id=%s errors=%s params=%s",
             operation_name,
             getattr(job, "job_id", None),
             getattr(job, "errors", None),
             _format_bq_params_for_log(params),
-            sql,
         )
         raise
     logger.info("BQ %s concluído job_id=%s", operation_name, getattr(job, "job_id", None))

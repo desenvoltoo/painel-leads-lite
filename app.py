@@ -12,12 +12,13 @@ import logging
 import csv
 import threading
 from time import perf_counter
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 from typing import Dict, Any, Tuple
  
 from flask import Flask, render_template, request, jsonify, send_file, redirect, url_for, make_response, g, session, Response, stream_with_context
 from werkzeug.security import check_password_hash
+from google.api_core.exceptions import Forbidden, NotFound
 from startup_diagnostics import build_error_payload, env_bool, env_int
  
 from services.bigquery import (
@@ -26,7 +27,6 @@ from services.bigquery import (
     query_leads_iter,
     query_leads_count,
     query_options,
-    query_gestao_dashboard,
     query_gestao_exportar_prioritarios,
     process_upload_dataframe,
     get_bq_job_status,          # novo
@@ -43,15 +43,17 @@ from services.gestao import (
     get_evolucao as gestao_get_evolucao,
     get_fila as gestao_get_fila,
     get_funil as gestao_get_funil,
-    get_importacoes as gestao_get_importacoes,
+    get_importacoes_historico as gestao_get_importacoes,
+    parse_import_history_request as gestao_parse_import_history_request,
     get_qualidade_detalhes as gestao_get_qualidade_detalhes,
     export_qualidade as gestao_export_qualidade,
     export_importacoes as gestao_export_importacoes,
     export_fila as gestao_export_fila,
-    registrar_importacao_upload as gestao_registrar_importacao_upload,
+    criar_log_importacao as gestao_criar_log_importacao,
+    atualizar_log_importacao as gestao_atualizar_log_importacao,
     get_opcoes as gestao_get_opcoes,
     get_produtividade as gestao_get_produtividade,
-    get_qualidade as gestao_get_qualidade,
+    get_qualidade_dados as gestao_get_qualidade_dados,
     get_rankings as gestao_get_rankings,
     get_resumo as gestao_get_resumo,
     invalidate_gestao_cache,
@@ -64,6 +66,10 @@ logger = logging.getLogger(__name__)
 
 
 ALLOWED_UPLOAD_EXTENSIONS = {".csv", ".xlsx", ".xls"}
+
+
+def _new_correlation_id() -> str:
+    return uuid.uuid4().hex
 
 
 def _validate_upload_filename(filename: str) -> bool:
@@ -357,7 +363,7 @@ def _read_upload_to_df(file_storage):
                     return df
                 if best_df is None:
                     best_df = df
-            except Exception as exc:
+            except Exception:
                 logger.debug("Tentativa de leitura CSV falhou: sep=%s encoding=%s", sep, enc, exc_info=True)
                 continue
 
@@ -420,6 +426,10 @@ def create_app() -> Flask:
 
     def _destroy_session():
         session.clear()
+
+    @app.before_request
+    def attach_correlation_id():
+        g.correlation_id = request.headers.get("X-Correlation-ID") or _new_correlation_id()
 
     @app.before_request
     def _auth_guard():
@@ -493,7 +503,7 @@ def create_app() -> Flask:
             request.endpoint,
             exc.__class__.__name__,
         )
-        return jsonify({"ok": False, "error": {"code": code, "message": message}}), status
+        return jsonify({"ok": False, "success": False, "error": {"code": code, "message": message, "correlationId": getattr(g, "correlation_id", None)}}), status
 
     def _gestao_endpoint(loader):
         try:
@@ -531,13 +541,44 @@ def create_app() -> Flask:
     def api_gestao_fila():
         return _gestao_endpoint(gestao_get_fila)
 
+    @app.get("/api/gestao/qualidade-dados")
+    def api_gestao_qualidade_dados():
+        try:
+            data, _cached = gestao_get_qualidade_dados({}, {})
+            return jsonify({"success": True, "data": data})
+        except NotFound as exc:
+            return _gestao_error_response(exc, status=404, code="BIGQUERY_OBJECT_NOT_FOUND", message="Objeto BigQuery de qualidade dos dados não encontrado.")
+        except Forbidden as exc:
+            return _gestao_error_response(exc, status=403, code="BIGQUERY_PERMISSION_DENIED", message="Sem permissão para consultar a qualidade dos dados.")
+        except TimeoutError as exc:
+            return _gestao_error_response(exc, status=504, code="BIGQUERY_TIMEOUT", message="Tempo esgotado ao consultar a qualidade dos dados.")
+        except Exception as exc:
+            return _gestao_error_response(exc, code="QUALIDADE_DADOS_ERROR", message="Não foi possível carregar a qualidade dos dados.")
+
     @app.get("/api/gestao/qualidade")
     def api_gestao_qualidade():
-        return _gestao_endpoint(gestao_get_qualidade)
+        return redirect(url_for("api_gestao_qualidade_dados"), code=308)
+
+    @app.get("/api/importacoes/historico")
+    def api_importacoes_historico():
+        try:
+            filters, meta = gestao_parse_import_history_request(request.args)
+            data, _cached = gestao_get_importacoes(filters, meta)
+            return jsonify({"success": True, "data": data.get("items", []), "pagination": data.get("pagination", {})})
+        except GestaoValidationError as exc:
+            return jsonify({"success": False, "error": {"code": "IMPORTACOES_INVALID_FILTER", "message": str(exc), "correlationId": getattr(g, "correlation_id", None)}}), 400
+        except NotFound as exc:
+            return _gestao_error_response(exc, status=404, code="BIGQUERY_OBJECT_NOT_FOUND", message="Objeto BigQuery de histórico de importações não encontrado.")
+        except Forbidden as exc:
+            return _gestao_error_response(exc, status=403, code="BIGQUERY_PERMISSION_DENIED", message="Sem permissão para consultar o histórico de importações.")
+        except TimeoutError as exc:
+            return _gestao_error_response(exc, status=504, code="BIGQUERY_TIMEOUT", message="Tempo esgotado ao consultar o histórico de importações.")
+        except Exception as exc:
+            return _gestao_error_response(exc, code="IMPORTACOES_HISTORICO_ERROR", message="Não foi possível carregar o histórico de importações.")
 
     @app.get("/api/gestao/importacoes")
     def api_gestao_importacoes():
-        return _gestao_endpoint(gestao_get_importacoes)
+        return redirect(url_for("api_importacoes_historico"), code=308)
 
     def _gestao_csv_response(exporter, *args):
         try:
@@ -573,9 +614,28 @@ def create_app() -> Flask:
         tipo = (request.args.get("tipo") or "").strip()
         return _gestao_csv_response(gestao_export_qualidade, tipo)
 
+    @app.get("/api/importacoes/historico/exportar")
+    def api_importacoes_historico_exportar():
+        try:
+            filters, meta = gestao_parse_import_history_request(request.args)
+            filename, content, rows_count = gestao_export_importacoes(filters, meta)
+            logger.info("gestao_export operation=export_importacoes route=%s result_count=%s", request.path, rows_count)
+            response = make_response(content)
+            response.headers["Content-Type"] = "text/csv; charset=utf-8"
+            response.headers["Content-Disposition"] = f"attachment; filename={filename}"
+            return response
+        except GestaoValidationError as exc:
+            return jsonify({"success": False, "error": {"code": "IMPORTACOES_INVALID_FILTER", "message": str(exc), "correlationId": getattr(g, "correlation_id", None)}}), 400
+        except NotFound as exc:
+            return _gestao_error_response(exc, status=404, code="BIGQUERY_OBJECT_NOT_FOUND", message="Objeto BigQuery de exportação do histórico não encontrado.")
+        except Forbidden as exc:
+            return _gestao_error_response(exc, status=403, code="BIGQUERY_PERMISSION_DENIED", message="Sem permissão para exportar o histórico de importações.")
+        except Exception as exc:
+            return _gestao_error_response(exc, code="IMPORTACOES_EXPORT_ERROR", message="Não foi possível exportar o histórico de importações.")
+
     @app.get("/api/gestao/importacoes/exportar")
     def api_gestao_importacoes_exportar():
-        return _gestao_csv_response(gestao_export_importacoes)
+        return redirect(url_for("api_importacoes_historico_exportar"), code=308)
 
     @app.get("/api/gestao/fila/exportar")
     def api_gestao_fila_exportar():
@@ -928,10 +988,30 @@ def create_app() -> Flask:
             return jsonify({"ok": False, "error": "Formato inválido. Envie CSV, XLSX ou XLS."}), 400
 
         importacao_id = uuid.uuid4().hex
-        started_dt = datetime.now(timezone.utc)
+        upload_id = importacao_id
+        correlation_id = getattr(g, "correlation_id", None) or _new_correlation_id()
         started_perf = perf_counter()
         rows_received = 0
         try:
+            try:
+                size = file_storage.content_length or 0
+                if not size:
+                    pos = file_storage.stream.tell()
+                    file_storage.stream.seek(0, os.SEEK_END)
+                    size = file_storage.stream.tell()
+                    file_storage.stream.seek(pos)
+            except Exception:
+                size = 0
+            gestao_criar_log_importacao(
+                upload_id=upload_id,
+                id_importacao=importacao_id,
+                nome_arquivo=filename,
+                tipo_arquivo=Path(filename).suffix.lower().lstrip("."),
+                tamanho_arquivo_bytes=int(size or 0),
+                usuario=getattr(g, "current_user", None) or "desconhecido",
+                correlation_id=correlation_id,
+            )
+            gestao_atualizar_log_importacao(upload_id=upload_id, status="VALIDANDO", etapa="LEITURA_ARQUIVO", mensagem="Arquivo recebido para leitura.", correlation_id=correlation_id)
             df = _read_upload_to_df(file_storage)
             rows_received = len(df)
             if df.empty:
@@ -942,35 +1022,48 @@ def create_app() -> Flask:
                 len(df),
                 len(df.columns),
             )
+            gestao_atualizar_log_importacao(upload_id=upload_id, status="PROCESSANDO", etapa="CARGA_STAGING", mensagem="Carregando dados na staging.", correlation_id=correlation_id, total_linhas=rows_received, linhas_recebidas=rows_received)
             result = process_upload_dataframe(df, filename=filename)
             report = result.get("report") or {}
             status = "CONCLUIDO_COM_REJEICOES" if int(report.get("linhas_rejeitadas") or 0) > 0 else "CONCLUIDO"
-            dt_upload_raw = report.get("dt_upload")
-            try:
-                dt_upload = datetime.fromisoformat(str(dt_upload_raw).replace("Z", "+00:00")) if dt_upload_raw else started_dt
-            except Exception:
-                dt_upload = started_dt
-            gestao_registrar_importacao_upload(
-                id_importacao=importacao_id, nome_arquivo=filename, usuario=getattr(g, "current_user", None) or "desconhecido",
-                dt_upload=dt_upload, dt_inicio=started_dt, dt_fim=datetime.now(timezone.utc),
-                total_recebido=int(report.get("linhas_recebidas") or rows_received),
-                total_valido=int(report.get("linhas_processadas") or 0),
-                total_rejeitado=int(report.get("linhas_rejeitadas") or 0),
-                total_inserido=None, total_atualizado=None, total_ignorado_antigo=None,
-                total_sem_celular=int((df.get("celular").isna() | (df.get("celular").astype(str).str.strip() == "")).sum()) if "celular" in df.columns else 0,
-                status=status, etapa="PROCEDURE_ASSINCRONA", mensagem_erro=None, job_id=result.get("job_id"),
-                duracao_segundos=round(perf_counter() - started_perf, 3),
+            gestao_atualizar_log_importacao(
+                upload_id=upload_id,
+                status=status,
+                etapa="FINALIZADO",
+                mensagem="Upload processado e procedure iniciada.",
+                correlation_id=correlation_id,
+                finalizado=True,
+                duracao_ms=int((perf_counter() - started_perf) * 1000),
+                total_linhas=int(report.get("linhas_recebidas") or rows_received),
+                linhas_recebidas=int(report.get("linhas_recebidas") or rows_received),
+                linhas_validas=int(report.get("linhas_processadas") or 0),
+                linhas_rejeitadas=int(report.get("linhas_rejeitadas") or 0),
+                linhas_inseridas=int(report.get("linhas_gravadas_staging") or 0),
+                linhas_atualizadas=0,
+                linhas_ignoradas=0,
+                duplicados_arquivo=int(report.get("duplicados_arquivo") or 0),
+                duplicados_banco=int(report.get("duplicados_banco") or 0),
+                erros=0,
+                detalhes_json={"procedure_job_id": result.get("job_id")},
             )
             invalidate_gestao_cache()
-            return jsonify({"ok": True, "id_importacao": importacao_id, **result}), 202
+            return jsonify({"ok": True, "id_importacao": importacao_id, "upload_id": upload_id, "correlationId": correlation_id, **result}), 202
         except Exception as e:
             logger.exception("Erro no processamento de upload: arquivo=%s etapa=rota_upload exception_type=%s operation=upload", filename, e.__class__.__name__)
-            gestao_registrar_importacao_upload(
-                id_importacao=importacao_id, nome_arquivo=filename, usuario=getattr(g, "current_user", None) or "desconhecido",
-                dt_upload=started_dt, dt_inicio=started_dt, dt_fim=datetime.now(timezone.utc),
-                total_recebido=rows_received, total_valido=0, total_rejeitado=0, total_inserido=None, total_atualizado=None,
-                total_ignorado_antigo=None, total_sem_celular=0, status="ERRO", etapa="ROTA_UPLOAD",
-                mensagem_erro=str(e.__class__.__name__), job_id=None, duracao_segundos=round(perf_counter() - started_perf, 3),
+            gestao_atualizar_log_importacao(
+                upload_id=upload_id,
+                status="ERRO",
+                etapa="FINALIZADO",
+                mensagem="Falha ao processar upload.",
+                correlation_id=correlation_id,
+                finalizado=True,
+                duracao_ms=int((perf_counter() - started_perf) * 1000),
+                total_linhas=rows_received,
+                linhas_recebidas=rows_received,
+                linhas_validas=0,
+                linhas_rejeitadas=0,
+                erros=1,
+                detalhes_json={"error_code": e.__class__.__name__},
             )
             return jsonify(_error_payload(e, "Falha ao processar upload.")), 500
 

@@ -1,4 +1,4 @@
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 from io import BytesIO
 
 import pytest
@@ -261,16 +261,39 @@ def test_exports_generate_csv_with_masked_data(monkeypatch):
     assert "52998224725" not in text
 
 
-def test_importacoes_missing_table_returns_clear_payload(monkeypatch):
-    from google.api_core.exceptions import NotFound
+def test_qualidade_map_explicit_snake_to_camel_and_nulls():
+    mapped = gestao.map_qualidade_row({
+        "total_registros": "10",
+        "total_leads": None,
+        "duplicidades_cpf": 2,
+        "duplicidades_celular": 3,
+        "duplicidades_email": 1,
+        "percentual_duplicidade": None,
+        "ultima_atualizacao": None,
+    })
+    assert mapped["totalRegistros"] == 10
+    assert mapped["totalLeads"] == 0
+    assert mapped["duplicidadesTotais"] == 6
+    assert mapped["percentualDuplicidade"] == 0
+    assert mapped["ultimaAtualizacao"] is None
+
+
+def test_historico_uses_official_view_and_count_query(monkeypatch):
+    calls = []
     def fake_run(sql, params, op):
-        raise NotFound("missing")
+        calls.append((sql, params, op))
+        if "COUNT" in sql:
+            return [{"total": 1}]
+        return [{"upload_id": "u1", "nome_arquivo": "leads.csv", "criado_em": "2026-06-10", "payload": "segredo", "email": "a@b.com"}]
     monkeypatch.setattr(gestao, "_run", fake_run)
-    data, cached = gestao.get_importacoes({}, {"limit": 20, "offset": 0, "order_dir": "DESC", "order_by": "dt_upload", "force_refresh": True})
+    data, cached = gestao.get_importacoes({"status": "CONCLUIDO", "nomeArquivo": "leads"}, {"page": 1, "pageSize": 20, "offset": 0})
     assert cached is False
-    assert data["items"] == []
-    assert data["tabelas_disponiveis"]["logs_importacoes"] is False
-    assert "migração" in data["message"]
+    assert data["pagination"] == {"page": 1, "pageSize": 20, "total": 1, "totalPages": 1}
+    assert data["items"][0]["upload_id"] == "u1"
+    assert "payload" not in data["items"][0]
+    assert "email" not in data["items"][0]
+    assert "vw_historico_importacoes" in calls[0][0]
+    assert "ORDER BY criado_em DESC" in calls[1][0]
 
 
 def test_importacoes_csv_has_no_payload(monkeypatch):
@@ -293,3 +316,46 @@ def test_fila_export_uses_same_order_function(monkeypatch):
     assert "ORDER BY grupo_prioridade ASC, data_inscricao DESC NULLS LAST" in captured["sql"]
     assert "*******4321" in content.decode("utf-8-sig")
     assert count == 1
+
+
+def test_parse_import_history_request_bounded_and_camel_case():
+    filters, meta = gestao.parse_import_history_request({"page": "2", "pageSize": "999", "status": "ERRO", "dataInicio": "2026-06-01", "dataFim": "2026-06-10", "nomeArquivo": "leads"})
+    assert filters == {"status": "ERRO", "nomeArquivo": "leads", "dataInicio": "2026-06-01", "dataFim": "2026-06-10"}
+    assert meta["page"] == 2
+    assert meta["pageSize"] <= 100
+    assert meta["offset"] == meta["pageSize"]
+
+
+def test_export_importacoes_csv_semicolon_bom_and_no_sensitive(monkeypatch):
+    monkeypatch.setattr(gestao, "_run", lambda sql, params, op: [{"upload_id": "1", "nome_arquivo": "leads, \"junho\".csv", "mensagem": "linha1\nlinha2", "payload": "segredo", "cpf": "123"}])
+    filename, content, count = gestao.export_importacoes({}, {})
+    assert filename.startswith("historico_importacoes_")
+    assert count == 1
+    assert content.startswith(b"\xef\xbb\xbf")
+    text = content.decode("utf-8-sig")
+    assert ";" in text.splitlines()[0]
+    assert "payload" not in text.lower()
+    assert "123" not in text
+    assert '"leads, ""junho"".csv"' in text
+
+
+def test_upload_log_uses_insert_then_update_same_upload(monkeypatch):
+    calls = []
+    monkeypatch.setattr(gestao.bq, "_run_gestao_query", lambda sql, params=None, operation_name="": calls.append((sql, params or [], operation_name)))
+    gestao.criar_log_importacao(upload_id="u1", id_importacao="i1", nome_arquivo="leads.csv", tipo_arquivo="csv", tamanho_arquivo_bytes=10, usuario="user", correlation_id="c1")
+    gestao.atualizar_log_importacao(upload_id="u1", status="CONCLUIDO", etapa="FINALIZADO", mensagem="ok", finalizado=True, linhas_recebidas=1)
+    assert calls[0][2] == "import_log_create"
+    assert "INSERT INTO" in calls[0][0] and "logs_importacoes" in calls[0][0]
+    assert calls[1][2] == "import_log_update"
+    assert "UPDATE" in calls[1][0] and "WHERE upload_id = @upload_id" in calls[1][0]
+    assert [p.value for p in calls[1][1] if p.name == "upload_id"] == ["u1"]
+
+
+def test_fila_priority_never_worked_before_worked_no_status():
+    rows = [
+        {"nome": "sem status trabalhado recente", "status": "", "celular": "11999999996", "data_inscricao": "2026-06-10", "data_disparo": "2026-06-10"},
+        {"nome": "nunca trabalhado antigo", "status": None, "celular": "11999999999", "data_inscricao": "2026-06-01", "data_disparo": None, "data_ultima_acao": None},
+        {"nome": "ec recente", "status": "EC", "celular": "11999999998", "data_inscricao": "2026-06-11"},
+    ]
+    ordered = gestao.prioritize_fila_rows(rows)
+    assert [r["nome"] for r in ordered] == ["nunca trabalhado antigo", "sem status trabalhado recente", "ec recente"]
