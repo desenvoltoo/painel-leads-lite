@@ -77,11 +77,12 @@ ORDERABLE_FILA = {
 }
 
 ORDERABLE_IMPORTACOES = {
-    "dt_upload": "dt_upload",
+    "criado_em": "criado_em",
+    "dt_upload": "criado_em",
     "nome_arquivo": "nome_arquivo",
     "usuario": "usuario",
     "status": "status",
-    "total_recebido": "total_recebido",
+    "total_linhas": "total_linhas",
 }
 
 EMPTY_TEXTS = {"", "NULL", "N/A", "NA", "SEM INFORMACAO", "SEM INFORMAÇÃO", "-"}
@@ -104,6 +105,285 @@ QUALITY_TYPES = OrderedDict([
 
 class GestaoValidationError(ValueError):
     pass
+
+
+IMPORT_HISTORY_VIEW = "vw_historico_importacoes"
+IMPORT_HISTORY_EXPORT_VIEW = "vw_export_historico_importacoes"
+QUALITY_VIEW = "vw_qualidade_dados"
+IMPORT_LOG_TABLE = "logs_importacoes"
+REJECTIONS_SUMMARY_VIEW = "vw_resumo_rejeicoes_import"
+
+QUALITY_RESPONSE_KEYS = {
+    "total_registros": "totalRegistros",
+    "total_leads": "totalLeads",
+    "registros_com_cpf_valido": "registrosComCpfValido",
+    "registros_sem_cpf_valido": "registrosSemCpfValido",
+    "registros_com_celular_valido": "registrosComCelularValido",
+    "registros_sem_celular_valido": "registrosSemCelularValido",
+    "registros_com_email_valido": "registrosComEmailValido",
+    "registros_sem_email_valido": "registrosSemEmailValido",
+    "registros_sem_chave_valida": "registrosSemChaveValida",
+    "duplicidades_cpf": "duplicidadesCpf",
+    "duplicidades_celular": "duplicidadesCelular",
+    "duplicidades_email": "duplicidadesEmail",
+    "duplicidades_totais": "duplicidadesTotais",
+    "percentual_duplicidade": "percentualDuplicidade",
+    "leads_sem_pessoa": "leadsSemPessoa",
+    "leads_sem_data_inscricao": "leadsSemDataInscricao",
+    "leads_sem_status": "leadsSemStatus",
+    "leads_sem_disparo": "leadsSemDisparo",
+    "nunca_trabalhados": "nuncaTrabalhados",
+    "ultima_atualizacao": "ultimaAtualizacao",
+}
+
+QUALITY_DEFAULTS = {
+    "totalRegistros": 0,
+    "totalLeads": 0,
+    "registrosComCpfValido": 0,
+    "registrosSemCpfValido": 0,
+    "registrosComCelularValido": 0,
+    "registrosSemCelularValido": 0,
+    "registrosComEmailValido": 0,
+    "registrosSemEmailValido": 0,
+    "registrosSemChaveValida": 0,
+    "duplicidadesCpf": 0,
+    "duplicidadesCelular": 0,
+    "duplicidadesEmail": 0,
+    "duplicidadesTotais": 0,
+    "percentualDuplicidade": 0,
+    "leadsSemPessoa": 0,
+    "leadsSemDataInscricao": 0,
+    "leadsSemStatus": 0,
+    "leadsSemDisparo": 0,
+    "nuncaTrabalhados": 0,
+    "ultimaAtualizacao": None,
+}
+
+SENSITIVE_IMPORT_FIELDS = {"detalhes_json", "payload", "cpf", "celular", "telefone", "nome", "nome_lead", "email", "cpf_raw", "celular_raw", "nome_raw", "email_raw"}
+
+
+def _to_number(value: Any, *, integer: bool = True) -> Any:
+    if value is None or value == "":
+        return 0
+    try:
+        number = float(value)
+        return int(number) if integer else number
+    except (TypeError, ValueError):
+        return 0
+
+
+def map_qualidade_row(row: Optional[Mapping[str, Any]]) -> Dict[str, Any]:
+    data = dict(QUALITY_DEFAULTS)
+    if not row:
+        return data
+    for snake, camel in QUALITY_RESPONSE_KEYS.items():
+        value = row.get(snake)
+        if camel == "ultimaAtualizacao":
+            data[camel] = value if value not in ("", None) else None
+        else:
+            data[camel] = _to_number(value, integer=(camel != "percentualDuplicidade"))
+    if data["duplicidadesTotais"] == 0:
+        data["duplicidadesTotais"] = data["duplicidadesCpf"] + data["duplicidadesCelular"] + data["duplicidadesEmail"]
+    if data["totalRegistros"] == 0 and data["percentualDuplicidade"]:
+        data["percentualDuplicidade"] = 0
+    return data
+
+
+def get_qualidade_dados(filters: Mapping[str, Any] | None = None, meta: Mapping[str, Any] | None = None) -> Tuple[Dict[str, Any], bool]:
+    sql = f"""
+    SELECT *
+    FROM {bq.bq_ref(QUALITY_VIEW)}
+    LIMIT 1
+    """
+    row = _single(sql, [], "gestao_qualidade_dados")
+    return map_qualidade_row(row), False
+
+
+def _history_param_date(value: Any, field: str) -> Optional[str]:
+    return _date_or_none(value, field)
+
+
+def parse_import_history_request(source: Mapping[str, Any]) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    filters: Dict[str, Any] = {}
+    status = str(source.get("status") or "").strip()
+    if status:
+        filters["status"] = status[:80]
+    nome = str(source.get("nomeArquivo") or source.get("nome_arquivo") or "").strip()
+    if nome:
+        filters["nomeArquivo"] = nome[:200]
+    data_inicio = _history_param_date(source.get("dataInicio") or source.get("data_ini"), "dataInicio")
+    data_fim = _history_param_date(source.get("dataFim") or source.get("data_fim"), "dataFim")
+    if data_inicio and data_fim and data_inicio > data_fim:
+        raise GestaoValidationError("dataInicio não pode ser maior que dataFim.")
+    if data_inicio:
+        filters["dataInicio"] = data_inicio
+    if data_fim:
+        filters["dataFim"] = data_fim
+    try:
+        page = max(1, int(source.get("page") or 1))
+    except (TypeError, ValueError):
+        page = 1
+    try:
+        page_size = int(source.get("pageSize") or source.get("limit") or 20)
+    except (TypeError, ValueError):
+        page_size = 20
+    page_size = max(1, min(page_size, min(MAX_PAGE_SIZE, 100)))
+    return filters, {"page": page, "pageSize": page_size, "offset": (page - 1) * page_size}
+
+
+def _importacoes_where(filters: Mapping[str, Any], params: List[Any], alias: str = "i") -> str:
+    where = ["1=1"]
+    if filters.get("dataInicio"):
+        where.append(f"DATE({alias}.criado_em) >= @dataInicio")
+        params.append(bigquery.ScalarQueryParameter("dataInicio", "DATE", filters["dataInicio"]))
+    if filters.get("dataFim"):
+        where.append(f"DATE({alias}.criado_em) <= @dataFim")
+        params.append(bigquery.ScalarQueryParameter("dataFim", "DATE", filters["dataFim"]))
+    if filters.get("status"):
+        where.append(f"UPPER(TRIM(CAST({alias}.status AS STRING))) = UPPER(@status)")
+        params.append(bigquery.ScalarQueryParameter("status", "STRING", filters["status"]))
+    if filters.get("nomeArquivo"):
+        where.append(f"UPPER(CAST({alias}.nome_arquivo AS STRING)) LIKE CONCAT('%', UPPER(@nomeArquivo), '%')")
+        params.append(bigquery.ScalarQueryParameter("nomeArquivo", "STRING", filters["nomeArquivo"]))
+    return " AND ".join(where)
+
+
+def _sanitize_import_row(row: Mapping[str, Any]) -> Dict[str, Any]:
+    safe = {k: v for k, v in dict(row).items() if k not in SENSITIVE_IMPORT_FIELDS and not k.endswith("_raw")}
+    safe.pop("total_registros", None)
+    return safe
+
+
+def get_importacoes(filters: Mapping[str, Any], meta: Mapping[str, Any]) -> Tuple[Dict[str, Any], bool]:
+    page = int(meta.get("page") or 1)
+    page_size = min(int(meta.get("pageSize") or meta.get("limit") or 20), min(MAX_PAGE_SIZE, 100))
+    offset = int(meta.get("offset", (page - 1) * page_size))
+    params: List[Any] = []
+    where = _importacoes_where(filters, params)
+    count_sql = f"SELECT COUNT(1) AS total FROM {bq.bq_ref(IMPORT_HISTORY_VIEW)} i WHERE {where}"
+    count_row = _single(count_sql, list(params), "importacoes_historico_count")
+    total = int(count_row.get("total") or 0)
+    query_params = list(params) + [bigquery.ScalarQueryParameter("limit", "INT64", page_size), bigquery.ScalarQueryParameter("offset", "INT64", offset)]
+    sql = f"""
+    SELECT *
+    FROM {bq.bq_ref(IMPORT_HISTORY_VIEW)} i
+    WHERE {where}
+    ORDER BY criado_em DESC
+    LIMIT @limit OFFSET @offset
+    """
+    rows = [_sanitize_import_row(r) for r in _run(sql, query_params, "importacoes_historico")]
+    return {"items": rows, "pagination": {"page": page, "pageSize": page_size, "total": total, "totalPages": math.ceil(total / page_size) if page_size else 0}}, False
+
+
+def get_importacoes_historico(filters: Mapping[str, Any], meta: Mapping[str, Any]) -> Tuple[Dict[str, Any], bool]:
+    return get_importacoes(filters, meta)
+
+
+def export_importacoes(filters: Mapping[str, Any], meta: Mapping[str, Any]) -> Tuple[str, bytes, int]:
+    params: List[Any] = []
+    where = _importacoes_where(filters, params)
+    sql = f"""
+    SELECT *
+    FROM {bq.bq_ref(IMPORT_HISTORY_EXPORT_VIEW)} i
+    WHERE {where}
+    ORDER BY criado_em DESC
+    LIMIT 5000
+    """
+    rows = [_sanitize_import_row(r) for r in _run(sql, params, "importacoes_historico_exportar")]
+    keys: List[str] = []
+    for row in rows:
+        for key in row.keys():
+            if key not in keys and key not in SENSITIVE_IMPORT_FIELDS:
+                keys.append(key)
+    if not keys:
+        keys = ["upload_id", "id_importacao", "nome_arquivo", "tipo_arquivo", "tamanho_arquivo_bytes", "usuario", "status", "etapa", "mensagem", "criado_em", "iniciado_em", "finalizado_em", "duracao_ms", "total_linhas", "linhas_recebidas", "linhas_validas", "linhas_inseridas", "linhas_atualizadas", "linhas_ignoradas", "linhas_rejeitadas", "duplicados_arquivo", "duplicados_banco", "erros"]
+    headers = [(key, key.replace("_", " ").title()) for key in keys if key not in SENSITIVE_IMPORT_FIELDS]
+    return f"historico_importacoes_{date.today().isoformat()}.csv", _csv_response_bytes(headers, rows), len(rows)
+
+
+def _sanitize_message(message: Optional[str]) -> Optional[str]:
+    if not message:
+        return None
+    text = str(message).replace("\n", " ").replace("\r", " ")
+    return text[:500]
+
+
+def _run_import_log_dml(sql: str, params: List[Any], operation: str, upload_id: str, etapa: str) -> None:
+    started = perf_counter()
+    try:
+        bq._run_gestao_query(sql, params=params, operation_name=operation)
+        logger.info("import_log operation=%s upload_id=%s etapa=%s table=%s duration=%.3fs", operation, upload_id, etapa, IMPORT_LOG_TABLE, perf_counter() - started)
+    except Exception as exc:
+        logger.warning("import_log_failed operation=%s upload_id=%s etapa=%s table=%s duration=%.3fs error_code=%s mensagem=%s", operation, upload_id, etapa, IMPORT_LOG_TABLE, perf_counter() - started, exc.__class__.__name__, _sanitize_message(str(exc)))
+
+
+def criar_log_importacao(*, upload_id: str, id_importacao: str, nome_arquivo: str, tipo_arquivo: str, tamanho_arquivo_bytes: int, usuario: str, correlation_id: str, mensagem: str = "Upload recebido.") -> None:
+    sql = f"""
+    INSERT INTO {bq.bq_ref(IMPORT_LOG_TABLE)}
+    (upload_id, id_importacao, nome_arquivo, tipo_arquivo, tamanho_arquivo_bytes, usuario, status, etapa, mensagem, criado_em, iniciado_em, atualizado_em, correlation_id)
+    VALUES (@upload_id, @id_importacao, @nome_arquivo, @tipo_arquivo, @tamanho_arquivo_bytes, @usuario, 'RECEBIDO', 'RECEBIMENTO', @mensagem, CURRENT_TIMESTAMP(), CURRENT_TIMESTAMP(), CURRENT_TIMESTAMP(), @correlation_id)
+    """
+    params = [
+        bigquery.ScalarQueryParameter("upload_id", "STRING", upload_id),
+        bigquery.ScalarQueryParameter("id_importacao", "STRING", id_importacao),
+        bigquery.ScalarQueryParameter("nome_arquivo", "STRING", nome_arquivo),
+        bigquery.ScalarQueryParameter("tipo_arquivo", "STRING", tipo_arquivo),
+        bigquery.ScalarQueryParameter("tamanho_arquivo_bytes", "INT64", int(tamanho_arquivo_bytes or 0)),
+        bigquery.ScalarQueryParameter("usuario", "STRING", usuario),
+        bigquery.ScalarQueryParameter("mensagem", "STRING", _sanitize_message(mensagem)),
+        bigquery.ScalarQueryParameter("correlation_id", "STRING", correlation_id),
+    ]
+    _run_import_log_dml(sql, params, "import_log_create", upload_id, "RECEBIMENTO")
+
+
+def atualizar_log_importacao(*, upload_id: str, status: str, etapa: str, mensagem: Optional[str] = None, correlation_id: Optional[str] = None, detalhes_json: Optional[Mapping[str, Any]] = None, finalizado: bool = False, duracao_ms: Optional[int] = None, **counters: Any) -> None:
+    allowed_status = {"RECEBIDO", "VALIDANDO", "PROCESSANDO", "CONCLUIDO", "CONCLUIDO_COM_REJEICOES", "ERRO"}
+    if status not in allowed_status:
+        status = "ERRO"
+    counter_fields = ["total_linhas", "linhas_recebidas", "linhas_validas", "linhas_inseridas", "linhas_atualizadas", "linhas_ignoradas", "linhas_rejeitadas", "duplicados_arquivo", "duplicados_banco", "erros"]
+    set_parts = ["status = @status", "etapa = @etapa", "mensagem = @mensagem", "atualizado_em = CURRENT_TIMESTAMP()"]
+    params: List[Any] = [bigquery.ScalarQueryParameter("status", "STRING", status), bigquery.ScalarQueryParameter("etapa", "STRING", etapa), bigquery.ScalarQueryParameter("mensagem", "STRING", _sanitize_message(mensagem)), bigquery.ScalarQueryParameter("upload_id", "STRING", upload_id)]
+    if correlation_id:
+        set_parts.append("correlation_id = @correlation_id")
+        params.append(bigquery.ScalarQueryParameter("correlation_id", "STRING", correlation_id))
+    for field in counter_fields:
+        if field in counters and counters[field] is not None:
+            set_parts.append(f"{field} = @{field}")
+            params.append(bigquery.ScalarQueryParameter(field, "INT64", int(counters[field] or 0)))
+    if detalhes_json is not None:
+        safe_details = {k: str(v)[:300] for k, v in detalhes_json.items() if k not in SENSITIVE_IMPORT_FIELDS}
+        set_parts.append("detalhes_json = @detalhes_json")
+        params.append(bigquery.ScalarQueryParameter("detalhes_json", "STRING", json.dumps(safe_details, ensure_ascii=False)))
+    if duracao_ms is not None:
+        set_parts.append("duracao_ms = @duracao_ms")
+        params.append(bigquery.ScalarQueryParameter("duracao_ms", "INT64", int(duracao_ms)))
+    if finalizado:
+        set_parts.append("finalizado_em = CURRENT_TIMESTAMP()")
+    sql = f"UPDATE {bq.bq_ref(IMPORT_LOG_TABLE)} SET {', '.join(set_parts)} WHERE upload_id = @upload_id"
+    _run_import_log_dml(sql, params, "import_log_update", upload_id, etapa)
+
+
+def registrar_importacao_upload(**kwargs: Any) -> None:
+    # Compatibilidade com chamadas antigas: grava um único registro sintético quando necessário.
+    upload_id = kwargs.get("upload_id") or kwargs.get("id_importacao")
+    if not upload_id:
+        return
+    atualizar_log_importacao(
+        upload_id=upload_id,
+        status=kwargs.get("status") or "ERRO",
+        etapa=kwargs.get("etapa") or "FINALIZADO",
+        mensagem=kwargs.get("mensagem_erro"),
+        finalizado=True,
+        duracao_ms=int(float(kwargs.get("duracao_segundos") or 0) * 1000),
+        total_linhas=kwargs.get("total_recebido"),
+        linhas_recebidas=kwargs.get("total_recebido"),
+        linhas_validas=kwargs.get("total_valido"),
+        linhas_rejeitadas=kwargs.get("total_rejeitado"),
+        linhas_inseridas=kwargs.get("total_inserido"),
+        linhas_atualizadas=kwargs.get("total_atualizado"),
+        linhas_ignoradas=kwargs.get("total_ignorado_antigo"),
+        erros=1 if kwargs.get("status") == "ERRO" else 0,
+    )
 
 
 def utc_now_iso() -> str:
@@ -285,6 +565,46 @@ def _filled_text_sql(expr: str) -> str:
 def _digits_sql(expr: str) -> str:
     return f"REGEXP_REPLACE(COALESCE(CAST({expr} AS STRING), ''), r'[^0-9]', '')"
 
+
+
+def _digits_only(value: Any) -> str:
+    return "".join(ch for ch in str(value or "") if ch.isdigit())
+
+
+def _mask_last4(value: Any, prefix: str = "*******") -> str:
+    digits = _digits_only(value)
+    return f"{prefix}{digits[-4:]}" if digits else ""
+
+
+def _mask_cpf(value: Any) -> str:
+    digits = _digits_only(value)
+    return f"***.***.***-{digits[-4:]}" if digits else ""
+
+
+def _mask_email(value: Any) -> str:
+    text = str(value or "").strip()
+    if "@" not in text:
+        return ""
+    local, domain = text.split("@", 1)
+    return f"{(local[:1] or '*')}***@{domain}"
+
+
+def mask_rejection_row(row: Mapping[str, Any]) -> Dict[str, Any]:
+    masked: Dict[str, Any] = {}
+    for key, value in dict(row).items():
+        if key in {"payload", "detalhes_json"}:
+            continue
+        if key in {"cpf", "cpf_raw"}:
+            masked[key] = _mask_cpf(value)
+        elif key in {"celular", "celular_raw", "telefone"}:
+            masked[key] = _mask_last4(value)
+        elif key in {"email", "email_raw"}:
+            masked[key] = _mask_email(value)
+        elif key in {"nome_raw"}:
+            masked[key] = "***" if value else ""
+        else:
+            masked[key] = value
+    return masked
 
 def _mask_sql(expr: str, kind: str) -> str:
     digits = _digits_sql(expr)
@@ -647,16 +967,22 @@ def _fila_sql(filters: Mapping[str, Any], meta: Mapping[str, Any], *, export: bo
     status_norm = _status_norm_expr("v")
     polo_expr = "v.polo" if _has("polo") else "v.unidade" if _has("unidade") else "CAST(NULL AS STRING)"
     status_expr = "v.status" if _has("status") else "v.status_inscricao" if _has("status_inscricao") else "CAST(NULL AS STRING)"
+    data_disparo = _timestamp_col("data_disparo", alias="v")
+    data_ultima_acao_only = _timestamp_col("data_ultima_acao", "ultima_atividade", alias="v")
+    nunca_trabalhado = f"({sem_status} AND {data_disparo} IS NULL AND {data_ultima_acao_only} IS NULL)"
+    sem_status_trabalhado = f"({sem_status} AND ({data_disparo} IS NOT NULL OR {data_ultima_acao_only} IS NOT NULL))"
     grupo = f"""
       CASE
-        WHEN NOT {matriculado} AND {sem_status} AND {data_inscricao} IS NOT NULL THEN 1
-        WHEN NOT {matriculado} AND {status_ec} THEN 2
-        WHEN NOT {matriculado} AND NOT {excluido} THEN 3
+        WHEN {matriculado} THEN 99
+        WHEN {nunca_trabalhado} THEN 1
+        WHEN {sem_status_trabalhado} THEN 2
+        WHEN {status_ec} THEN 3
+        WHEN NOT {excluido} THEN 4
         ELSE 99
       END
     """
-    prioridade = f"CASE WHEN ({grupo}) = 1 THEN 100 WHEN ({grupo}) = 2 THEN 70 WHEN ({grupo}) = 3 THEN 40 ELSE 0 END"
-    motivo = f"CASE WHEN ({grupo}) = 1 THEN 'Lead recente sem status' WHEN ({grupo}) = 2 THEN 'Lead classificado como EC' WHEN ({grupo}) = 3 THEN 'Lead elegível para acompanhamento' ELSE 'Lead não elegível' END"
+    prioridade = f"CASE WHEN ({grupo}) = 1 THEN 100 WHEN ({grupo}) = 2 THEN 85 WHEN ({grupo}) = 3 THEN 70 WHEN ({grupo}) = 4 THEN 40 ELSE 0 END"
+    motivo = f"CASE WHEN ({grupo}) = 1 THEN 'Nunca trabalhado, sem status e sem ação registrada' WHEN ({grupo}) = 2 THEN 'Sem status, já teve disparo ou contato' WHEN ({grupo}) = 3 THEN 'Lead classificado como EC' WHEN ({grupo}) = 4 THEN 'Lead elegível para acompanhamento' ELSE 'Lead não elegível' END"
     sql = f"""
     WITH base AS (
       SELECT
@@ -775,7 +1101,7 @@ def get_qualidade(filters: Mapping[str, Any], meta: Mapping[str, Any]) -> Tuple[
         """
         indicadores = _single(sql, params, "gestao_qualidade")
         try:
-            rej_sql = f"SELECT COUNT(*) AS total FROM {bq._tbl('logs_rejeicoes_import')}"
+            rej_sql = f"SELECT COALESCE(SUM(total_rejeicoes), 0) AS total FROM {bq.bq_ref(REJECTIONS_SUMMARY_VIEW)}"
             indicadores["rejeitado"] = _single(rej_sql, [], "gestao_qualidade_rejeitados").get("total", 0)
         except NotFound:
             indicadores["rejeitado"] = None
@@ -813,14 +1139,7 @@ def _quality_details_sql(tipo: str, filters: Mapping[str, Any], meta: Mapping[st
     dup_tel_cte = f"SELECT {e['tel_digits']} tel_key, COUNT(*) qtd FROM base v WHERE {e['tel_digits']} != '' GROUP BY tel_key HAVING qtd > 1" if e["tel_col"] else "SELECT '' tel_key, 0 qtd WHERE FALSE"
     condition = cond[tipo] if tipo != "rejeitado" else "FALSE"
     if tipo == "rejeitado":
-        sql = f"""
-        SELECT motivo, COALESCE(nome_raw, nome, '') AS nome, '' AS curso, '' AS consultor, ts AS data_upload,
-               {_mask_sql('cpf_raw', 'cpf')} AS identificador, {_email_mask_sql('email_raw')} AS email_mascarado,
-               {_mask_sql('celular_raw', 'celular')} AS celular_mascarado, CAST(NULL AS TIMESTAMP) AS data_inscricao,
-               '' AS origem, '' AS status, COUNT(*) OVER() AS total_registros
-        FROM {bq._tbl('logs_rejeicoes_import')}
-        ORDER BY ts DESC NULLS LAST
-        """
+        raise GestaoValidationError("Rejeições individuais exigem autorização específica e não são expostas neste endpoint.")
     else:
         sql = f"""
         WITH base AS (SELECT v.* FROM {bq._tbl(bq.BQ_VIEW_LEADS)} v WHERE {where}),
@@ -849,9 +1168,9 @@ def get_qualidade_detalhes(filters: Mapping[str, Any], meta: Mapping[str, Any], 
     return {"indicadores": {}, "items": rows, "pagination": _pagination(meta, total)}, False
 
 
-def _csv_response_bytes(headers: List[Tuple[str, str]], rows: List[Dict[str, Any]]) -> bytes:
+def _csv_response_bytes(headers: List[Tuple[str, str]], rows: List[Dict[str, Any]], delimiter: str = ";") -> bytes:
     output = io.StringIO()
-    writer = csv.writer(output, lineterminator="\n")
+    writer = csv.writer(output, delimiter=delimiter, quotechar='"', quoting=csv.QUOTE_MINIMAL, lineterminator="\n")
     writer.writerow([label for _key, label in headers])
     for row in rows:
         writer.writerow([row.get(key, "") for key, _label in headers])
@@ -866,75 +1185,6 @@ def export_qualidade(filters: Mapping[str, Any], meta: Mapping[str, Any], tipo: 
     return filename, _csv_response_bytes(headers, rows), len(rows)
 
 
-def _importacoes_where(filters: Mapping[str, Any], params: List[Any], alias: str = "i") -> str:
-    where = ["1=1"]
-    if filters.get("data_ini"):
-        where.append(f"DATE({alias}.dt_upload) >= @data_ini")
-        params.append(bigquery.ScalarQueryParameter("data_ini", "DATE", filters["data_ini"]))
-    if filters.get("data_fim"):
-        where.append(f"DATE({alias}.dt_upload) <= @data_fim")
-        params.append(bigquery.ScalarQueryParameter("data_fim", "DATE", filters["data_fim"]))
-    for key in ("status_importacao", "nome_arquivo", "usuario"):
-        if filters.get(key):
-            col = "status" if key == "status_importacao" else key
-            op = "=" if key == "status_importacao" else "LIKE"
-            param = f"imp_{key}"
-            if op == "=":
-                where.append(f"UPPER(TRIM(CAST({alias}.{col} AS STRING))) = UPPER(@{param})")
-                params.append(bigquery.ScalarQueryParameter(param, "STRING", filters[key]))
-            else:
-                where.append(f"UPPER(CAST({alias}.{col} AS STRING)) LIKE CONCAT('%', UPPER(@{param}), '%')")
-                params.append(bigquery.ScalarQueryParameter(param, "STRING", filters[key]))
-    return " AND ".join(where)
-
-
-def get_importacoes(filters: Mapping[str, Any], meta: Mapping[str, Any]) -> Tuple[Dict[str, Any], bool]:
-    def load():
-        limit = min(meta.get("limit", 20), MAX_PAGE_SIZE)
-        offset = meta.get("offset", 0)
-        params = [bigquery.ScalarQueryParameter("limit", "INT64", limit), bigquery.ScalarQueryParameter("offset", "INT64", offset)]
-        where = _importacoes_where(filters, params)
-        order_by = ORDERABLE_IMPORTACOES.get(meta.get("order_by") or "dt_upload", "dt_upload")
-        order_dir = meta.get("order_dir", "DESC")
-        try:
-            sql = f"""
-            SELECT id_importacao, nome_arquivo, usuario, dt_upload, dt_inicio, dt_fim,
-                   total_recebido, total_valido, total_rejeitado, total_inserido,
-                   total_atualizado, total_ignorado_antigo, total_sem_celular,
-                   status, etapa, mensagem_erro, job_id, duracao_segundos,
-                   COUNT(*) OVER() AS total_registros
-            FROM {bq._tbl('logs_importacoes')} i
-            WHERE {where}
-            ORDER BY {order_by} {order_dir}
-            LIMIT @limit OFFSET @offset
-            """
-            rows = _run(sql, params, "gestao_importacoes")
-            total = rows[0].get("total_registros", 0) if rows else 0
-            return {"items": rows, "pagination": _pagination({**meta, "limit": limit, "offset": offset}, total), "tabelas_disponiveis": {"logs_importacoes": True}}
-        except NotFound:
-            return {"items": [], "pagination": _pagination({**meta, "limit": limit, "offset": offset}, 0), "tabelas_disponiveis": {"logs_importacoes": False}, "message": "Tabela logs_importacoes não encontrada. Aplique a migração SQL entregue."}
-    return _with_cache("importacoes", filters, {k: meta.get(k) for k in ("limit", "offset", "order_by", "order_dir")}, meta.get("force_refresh", False), load)
-
-
-def export_importacoes(filters: Mapping[str, Any], meta: Mapping[str, Any]) -> Tuple[str, bytes, int]:
-    params: List[Any] = []
-    where = _importacoes_where(filters, params)
-    order_by = ORDERABLE_IMPORTACOES.get(meta.get("order_by") or "dt_upload", "dt_upload")
-    order_dir = meta.get("order_dir", "DESC")
-    sql = f"""
-    SELECT id_importacao, nome_arquivo, usuario, dt_upload, dt_inicio, dt_fim, duracao_segundos,
-           total_recebido, total_valido, total_rejeitado, total_inserido, total_atualizado,
-           total_ignorado_antigo, total_sem_celular, status, etapa, mensagem_erro, job_id
-    FROM {bq._tbl('logs_importacoes')} i
-    WHERE {where}
-    ORDER BY {order_by} {order_dir}
-    LIMIT 5000
-    """
-    rows = _run(sql, params, "gestao_importacoes_exportar")
-    headers = [("id_importacao", "ID da importação"), ("nome_arquivo", "Arquivo"), ("usuario", "Usuário"), ("dt_upload", "Data do upload"), ("dt_inicio", "Início"), ("dt_fim", "Fim"), ("duracao_segundos", "Duração (s)"), ("total_recebido", "Recebidos"), ("total_valido", "Válidos"), ("total_rejeitado", "Rejeitados"), ("total_inserido", "Inseridos"), ("total_atualizado", "Atualizados"), ("total_ignorado_antigo", "Ignorados antigos"), ("total_sem_celular", "Sem celular"), ("status", "Status"), ("etapa", "Etapa"), ("mensagem_erro", "Mensagem resumida"), ("job_id", "Job ID")]
-    return f"historico_importacoes_{date.today().isoformat()}.csv", _csv_response_bytes(headers, rows), len(rows)
-
-
 def export_fila(filters: Mapping[str, Any], meta: Mapping[str, Any]) -> Tuple[str, bytes, int]:
     sql, params = _fila_sql(filters, {**meta, "limit": 5000, "offset": 0}, export=True)
     rows = _run(sql, params, "gestao_fila_exportar")
@@ -944,14 +1194,6 @@ def export_fila(filters: Mapping[str, Any], meta: Mapping[str, Any]) -> Tuple[st
     return f"fila_operacional_{date.today().isoformat()}.csv", _csv_response_bytes(headers, rows), len(rows)
 
 
-def registrar_importacao_upload(*, id_importacao: str, nome_arquivo: str, usuario: str, dt_upload: datetime, dt_inicio: datetime, dt_fim: Optional[datetime], total_recebido: int, total_valido: int, total_rejeitado: int, total_inserido: Optional[int], total_atualizado: Optional[int], total_ignorado_antigo: Optional[int], total_sem_celular: int, status: str, etapa: str, mensagem_erro: Optional[str], job_id: Optional[str], duracao_segundos: Optional[float]) -> None:
-    row = {"id_importacao": id_importacao, "nome_arquivo": nome_arquivo, "usuario": usuario, "dt_upload": dt_upload.isoformat(), "dt_inicio": dt_inicio.isoformat(), "dt_fim": dt_fim.isoformat() if dt_fim else None, "total_recebido": total_recebido, "total_valido": total_valido, "total_rejeitado": total_rejeitado, "total_inserido": total_inserido, "total_atualizado": total_atualizado, "total_ignorado_antigo": total_ignorado_antigo, "total_sem_celular": total_sem_celular, "status": status, "etapa": etapa, "mensagem_erro": (mensagem_erro or "")[:500] or None, "job_id": job_id, "duracao_segundos": duracao_segundos}
-    try:
-        errors = bq.get_bq_client().insert_rows_json(f"{bq.GCP_PROJECT_ID}.{bq.BQ_DATASET}.logs_importacoes", [row])
-        if errors:
-            logger.error("gestao_import_log_error operation=registrar_importacao_upload error_type=insert_rows_json errors=%s", errors)
-    except Exception as exc:
-        logger.warning("gestao_import_log_unavailable operation=registrar_importacao_upload error_type=%s", exc.__class__.__name__)
 
 def get_opcoes(filters: Mapping[str, Any], meta: Mapping[str, Any]) -> Tuple[Dict[str, Any], bool]:
     def load():
@@ -1071,12 +1313,16 @@ def prioritize_fila_rows(rows: List[Mapping[str, Any]]) -> List[Dict[str, Any]]:
         if status_norm in {"CANCELADO", "CANCELADA", "CANC", "DESCARTADO", "DESCARTADA", "ENCERRADO", "ENCERRADA", "PERDIDO", "PERDIDA", "MAT", "MATRICULADO"}:
             continue
         dt = parse_lead_date(row.get("data_inscricao"))
-        if is_status_empty(status) and dt is not None:
-            grupo, prioridade, motivo = 1, 100, "Lead recente sem status"
+        data_disparo = parse_lead_date(row.get("data_disparo"))
+        data_ultima_acao = parse_lead_date(row.get("data_ultima_acao") or row.get("ultima_atividade"))
+        if is_status_empty(status) and data_disparo is None and data_ultima_acao is None:
+            grupo, prioridade, motivo = 1, 100, "Nunca trabalhado, sem status e sem ação registrada"
+        elif is_status_empty(status):
+            grupo, prioridade, motivo = 2, 85, "Sem status, já teve disparo ou contato"
         elif is_status_ec(row.get("status"), row.get("status_inscricao"), row.get("tipo_negocio")):
-            grupo, prioridade, motivo = 2, 70, "Lead classificado como EC"
+            grupo, prioridade, motivo = 3, 70, "Lead classificado como EC"
         else:
-            grupo, prioridade, motivo = 3, 40, "Lead elegível para acompanhamento"
+            grupo, prioridade, motivo = 4, 40, "Lead elegível para acompanhamento"
         row.update({"grupo_prioridade": grupo, "prioridade": prioridade, "motivo_prioridade": motivo, "data_inscricao_normalizada": dt, "status_normalizado": status_norm, "dias_desde_inscricao": (date.today() - dt).days if dt else None})
         out.append(row)
     out.sort(key=lambda r: (r["grupo_prioridade"], -(r["data_inscricao_normalizada"].toordinal() if r.get("data_inscricao_normalizada") else 0)))

@@ -1,40 +1,70 @@
--- Views de referência do módulo Gestão Operacional.
--- A prioridade máxima não usa data_disparo: lead nunca trabalhado é definido apenas por status IS NULL.
+-- View de referência do módulo Gestão Operacional.
+-- Usa somente objetos oficiais do dataset modelo_estrela e não cria arquitetura paralela.
 -- Não altera vw_leads_painel_lite.
 
 CREATE OR REPLACE VIEW `painel-universidade.modelo_estrela.vw_leads_priorizados` AS
 SELECT
   v.*,
-  v.status IS NULL AS nunca_trabalhado,
+  (
+    (v.status IS NULL OR TRIM(CAST(v.status AS STRING)) = '')
+    AND v.data_disparo IS NULL
+    AND v.data_ultima_acao IS NULL
+  ) AS nunca_trabalhado,
   CASE
-    WHEN UPPER(TRIM(CAST(v.status AS STRING))) = 'MAT'
+    WHEN UPPER(TRIM(CAST(v.status AS STRING))) IN ('MAT', 'MATRICULADO')
+      OR COALESCE(SAFE_CAST(v.flag_matriculado AS BOOL), FALSE)
+      THEN 99
+    WHEN (v.status IS NULL OR TRIM(CAST(v.status AS STRING)) = '')
+      AND v.data_disparo IS NULL
+      AND v.data_ultima_acao IS NULL
+      THEN 1
+    WHEN (v.status IS NULL OR TRIM(CAST(v.status AS STRING)) = '')
+      AND (v.data_disparo IS NOT NULL OR v.data_ultima_acao IS NOT NULL)
+      THEN 2
+    WHEN UPPER(TRIM(CAST(v.status AS STRING))) = 'EC'
+      THEN 3
+    ELSE 4
+  END AS grupo_prioridade,
+  CASE
+    WHEN UPPER(TRIM(CAST(v.status AS STRING))) IN ('MAT', 'MATRICULADO')
       OR COALESCE(SAFE_CAST(v.flag_matriculado AS BOOL), FALSE)
       THEN 'BAIXA'
-    WHEN v.status IS NULL THEN 'CRÍTICA'
+    WHEN (v.status IS NULL OR TRIM(CAST(v.status AS STRING)) = '')
+      AND v.data_disparo IS NULL
+      AND v.data_ultima_acao IS NULL
+      THEN 'CRÍTICA'
+    WHEN (v.status IS NULL OR TRIM(CAST(v.status AS STRING)) = '')
+      THEN 'ALTA'
+    WHEN UPPER(TRIM(CAST(v.status AS STRING))) = 'EC'
+      THEN 'MÉDIA'
     ELSE 'MÉDIA'
   END AS nivel_prioridade,
   CASE
-    WHEN UPPER(TRIM(CAST(v.status AS STRING))) = 'MAT'
+    WHEN UPPER(TRIM(CAST(v.status AS STRING))) IN ('MAT', 'MATRICULADO')
       OR COALESCE(SAFE_CAST(v.flag_matriculado AS BOOL), FALSE)
-      THEN 10
-    WHEN v.status IS NULL THEN 100
-    ELSE 50
+      THEN 0
+    WHEN (v.status IS NULL OR TRIM(CAST(v.status AS STRING)) = '')
+      AND v.data_disparo IS NULL
+      AND v.data_ultima_acao IS NULL
+      THEN 100
+    WHEN (v.status IS NULL OR TRIM(CAST(v.status AS STRING)) = '')
+      THEN 85
+    WHEN UPPER(TRIM(CAST(v.status AS STRING))) = 'EC'
+      THEN 70
+    ELSE 40
   END AS score_prioridade,
   CASE
-    WHEN UPPER(TRIM(CAST(v.status AS STRING))) = 'MAT'
+    WHEN UPPER(TRIM(CAST(v.status AS STRING))) IN ('MAT', 'MATRICULADO')
       OR COALESCE(SAFE_CAST(v.flag_matriculado AS BOOL), FALSE)
       THEN 'MATRICULADO'
-    WHEN v.status IS NULL THEN 'NUNCA_TRABALHADO'
-    ELSE 'EM_CARTEIRA'
+    WHEN (v.status IS NULL OR TRIM(CAST(v.status AS STRING)) = '')
+      AND v.data_disparo IS NULL
+      AND v.data_ultima_acao IS NULL
+      THEN 'NUNCA_TRABALHADO'
+    WHEN (v.status IS NULL OR TRIM(CAST(v.status AS STRING)) = '')
+      THEN 'SEM_STATUS_TRABALHADO'
+    WHEN UPPER(TRIM(CAST(v.status AS STRING))) = 'EC'
+      THEN 'EC'
+    ELSE 'ELEGIVEL'
   END AS etapa_operacional
 FROM `painel-universidade.modelo_estrela.vw_leads_painel_lite` v;
-
-CREATE OR REPLACE VIEW `painel-universidade.modelo_estrela.vw_operacao_rpa_prioridade_corrigida` AS
-SELECT
-  COUNT(*) AS total_leads,
-  COUNTIF(status IS NULL) AS nunca_trabalhados,
-  COUNTIF(status IS NULL) AS leads_criticos,
-  COUNTIF(status IS NOT NULL AND NOT (UPPER(TRIM(CAST(status AS STRING))) = 'MAT' OR COALESCE(SAFE_CAST(flag_matriculado AS BOOL), FALSE))) AS leads_em_carteira,
-  COUNTIF(UPPER(TRIM(CAST(status AS STRING))) = 'MAT' OR COALESCE(SAFE_CAST(flag_matriculado AS BOOL), FALSE)) AS matriculados,
-  SAFE_DIVIDE(COUNTIF(UPPER(TRIM(CAST(status AS STRING))) = 'MAT' OR COALESCE(SAFE_CAST(flag_matriculado AS BOOL), FALSE)), COUNT(*)) * 100 AS taxa_geral_conversao
-FROM `painel-universidade.modelo_estrela.vw_leads_painel_lite`;
