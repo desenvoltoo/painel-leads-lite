@@ -144,3 +144,12 @@ button, a, input, select { min-height: 40px; }
 .btn[disabled] { cursor: wait; opacity:.65; }
 @media (min-width: 1280px) { .funnel-grid { min-width: 0; } }
 @media (max-width: 360px) { .gestao-shell { padding-left:.5rem!important; padding-right:.5rem!important; } .data-panel, .filter-panel { padding:.75rem; } .table-wrap table { min-width:680px; } }
+
+.operacao-disparos .nav-pills .nav-link { border: 1px solid var(--go-border); color: var(--go-text); font-weight: 800; }
+.operacao-disparos .nav-pills .nav-link.active { background: var(--go-blue); color: #fff; }
+.filters-grid.compact { grid-template-columns: repeat(5, minmax(0, 1fr)); }
+.kpi-grid.compact .kpi-card { min-height: 96px; }
+.op-status-buttons { display: flex; flex-wrap: wrap; gap: .25rem; min-width: 240px; }
+.op-status-buttons .btn { min-height: 30px; padding: .15rem .45rem; }
+.op-observacao { min-width: 220px; }
+@media (max-width: 1200px) { .filters-grid.compact { grid-template-columns: repeat(2, minmax(0, 1fr)); } }

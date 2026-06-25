@@ -64,6 +64,20 @@ from services.gestao import (
     utc_now_iso as gestao_utc_now_iso,
 )
 
+from services.gestao_operacional import (
+    create_operational_tables as gestao_op_create_tables,
+    get_dashboard as gestao_op_get_dashboard,
+    get_leads_disponiveis as gestao_op_get_leads_disponiveis,
+    criar_lote as gestao_op_criar_lote,
+    get_lotes as gestao_op_get_lotes,
+    get_lote_detalhe as gestao_op_get_lote_detalhe,
+    start_lote as gestao_op_start_lote,
+    finish_lote as gestao_op_finish_lote,
+    get_meus_leads as gestao_op_get_meus_leads,
+    update_lead_status as gestao_op_update_lead_status,
+    parse_operational_request as gestao_op_parse_request,
+)
+
 logger = logging.getLogger(__name__)
  
 
@@ -689,6 +703,105 @@ def create_app() -> Flask:
     @app.get("/api/gestao/opcoes")
     def api_gestao_opcoes():
         return _gestao_endpoint(gestao_get_opcoes)
+
+
+
+    def _gestao_operacional_endpoint(loader):
+        try:
+            filters, meta = gestao_op_parse_request(request.args)
+            data, cached = loader(filters, meta)
+            return _gestao_success(data, filters, cached=cached)
+        except ValueError as exc:
+            return jsonify({"ok": False, "error": {"code": "GESTAO_OPERACIONAL_INVALID", "message": str(exc)}}), 400
+        except TimeoutError as exc:
+            return _gestao_error_response(exc, status=504, code="GESTAO_OPERACIONAL_TIMEOUT", message="Tempo esgotado ao consultar a operação de disparos.")
+        except Exception as exc:
+            return _gestao_error_response(exc, code="GESTAO_OPERACIONAL_ERROR", message="Não foi possível carregar a operação de disparos.")
+
+    @app.get("/api/gestao/operacional/dashboard")
+    def api_gestao_operacional_dashboard():
+        try:
+            data, cached = gestao_op_get_dashboard()
+            return _gestao_success(data, {}, cached=cached)
+        except Exception as exc:
+            return _gestao_error_response(exc, code="GESTAO_OPERACIONAL_DASHBOARD_ERROR", message="Não foi possível carregar o dashboard operacional.")
+
+    @app.get("/api/gestao/operacional/leads-disponiveis")
+    def api_gestao_operacional_leads_disponiveis():
+        return _gestao_operacional_endpoint(gestao_op_get_leads_disponiveis)
+
+    @app.post("/api/gestao/operacional/lotes")
+    def api_gestao_operacional_criar_lote():
+        try:
+            data, cached = gestao_op_criar_lote(request.get_json(silent=True) or {})
+            return _gestao_success(data, {}, cached=cached), 201
+        except ValueError as exc:
+            return jsonify({"ok": False, "error": {"code": "GESTAO_OPERACIONAL_INVALID", "message": str(exc)}}), 400
+        except Exception as exc:
+            return _gestao_error_response(exc, code="GESTAO_OPERACIONAL_CREATE_ERROR", message="Não foi possível criar o lote.")
+
+    @app.get("/api/gestao/operacional/lotes")
+    def api_gestao_operacional_lotes():
+        return _gestao_operacional_endpoint(gestao_op_get_lotes)
+
+    @app.get("/api/gestao/operacional/lotes/<lote_id>")
+    def api_gestao_operacional_lote_detalhe(lote_id):
+        try:
+            data, cached = gestao_op_get_lote_detalhe(lote_id)
+            return _gestao_success(data, {"lote_id": lote_id}, cached=cached)
+        except Exception as exc:
+            return _gestao_error_response(exc, code="GESTAO_OPERACIONAL_DETAIL_ERROR", message="Não foi possível carregar o lote.")
+
+    @app.post("/api/gestao/operacional/lotes/<lote_id>/start")
+    def api_gestao_operacional_lote_start(lote_id):
+        try:
+            data, cached = gestao_op_start_lote(lote_id)
+            return _gestao_success(data, {"lote_id": lote_id}, cached=cached)
+        except Exception as exc:
+            return _gestao_error_response(exc, code="GESTAO_OPERACIONAL_START_ERROR", message="Não foi possível iniciar o lote.")
+
+    @app.post("/api/gestao/operacional/lotes/<lote_id>/finish")
+    def api_gestao_operacional_lote_finish(lote_id):
+        try:
+            data, cached = gestao_op_finish_lote(lote_id)
+            return _gestao_success(data, {"lote_id": lote_id}, cached=cached)
+        except Exception as exc:
+            return _gestao_error_response(exc, code="GESTAO_OPERACIONAL_FINISH_ERROR", message="Não foi possível finalizar o lote.")
+
+    @app.get("/api/gestao/operacional/meus-leads")
+    def api_gestao_operacional_meus_leads():
+        try:
+            filters, meta = gestao_op_parse_request(request.args)
+            consultor = request.args.get("consultor_disparo") or request.args.get("consultor") or ""
+            data, cached = gestao_op_get_meus_leads(consultor, filters, meta)
+            return _gestao_success(data, filters, cached=cached)
+        except Exception as exc:
+            return _gestao_error_response(exc, code="GESTAO_OPERACIONAL_MEUS_LEADS_ERROR", message="Não foi possível carregar os leads do consultor.")
+
+    @app.patch("/api/gestao/operacional/leads/<int:sk_pessoa>/status")
+    def api_gestao_operacional_lead_status(sk_pessoa):
+        try:
+            data, cached = gestao_op_update_lead_status(sk_pessoa, request.get_json(silent=True) or {})
+            return _gestao_success(data, {"sk_pessoa": sk_pessoa}, cached=cached)
+        except ValueError as exc:
+            return jsonify({"ok": False, "error": {"code": "GESTAO_OPERACIONAL_INVALID", "message": str(exc)}}), 400
+        except Exception as exc:
+            return _gestao_error_response(exc, code="GESTAO_OPERACIONAL_STATUS_ERROR", message="Não foi possível atualizar o status do lead.")
+
+    @app.post("/api/gestao/operacional/admin/create-tables")
+    def api_gestao_operacional_create_tables():
+        admin_token = os.getenv("ADMIN_TOKEN", "").strip()
+        env = (os.getenv("FLASK_ENV") or os.getenv("NODE_ENV") or "").lower()
+        if admin_token:
+            if request.headers.get("x-admin-token") != admin_token:
+                return jsonify({"ok": False, "error": {"code": "ADMIN_TOKEN_INVALID", "message": "Token administrativo inválido."}}), 403
+        elif env == "production":
+            return jsonify({"ok": False, "error": {"code": "ADMIN_TOKEN_REQUIRED", "message": "ADMIN_TOKEN é obrigatório em produção."}}), 403
+        try:
+            data = gestao_op_create_tables()
+            return _gestao_success(data, {}, cached=False)
+        except Exception as exc:
+            return _gestao_error_response(exc, code="GESTAO_OPERACIONAL_CREATE_TABLES_ERROR", message="Não foi possível criar as tabelas operacionais.")
 
     @app.get("/login")
     def login():
