@@ -187,3 +187,47 @@ Os testes usam mocks e não dependem de conexão real com o BigQuery.
 ## Deploy Cloud Run
 
 O repositório possui `Dockerfile` e `cloudbuild.yaml`. Configure variáveis de ambiente no Cloud Run, faça o build da imagem e publique mantendo as permissões da service account para BigQuery.
+
+## Operação de Disparos em `/gestao`
+
+A página de Gestão agora possui a aba **Operação de Disparos**, reaproveitando o Flask atual, o serviço Cloud Run `painel-leads-lite` e o dataset BigQuery `painel-universidade.modelo_estrela`. A fila operacional usa a view `vw_leads_priorizados` como fonte dos leads disponíveis.
+
+### Tabelas operacionais
+
+A migration idempotente `sql/migrations/20260625_operacao_lotes_disparo.sql` cria somente tabelas operacionais com prefixo `op_`:
+
+- `op_lotes_disparo`
+- `op_lote_leads`
+- `op_lead_eventos`
+- `op_bigquery_sync`
+
+### Criar tabelas operacionais
+
+Em ambiente local sem `ADMIN_TOKEN`, o endpoint administrativo é permitido quando `FLASK_ENV`/`NODE_ENV` não for `production`:
+
+```bash
+curl -X POST http://localhost:8080/api/gestao/operacional/admin/create-tables
+```
+
+Em produção, configure `ADMIN_TOKEN` e envie o header:
+
+```bash
+curl -X POST https://SEU_HOST/api/gestao/operacional/admin/create-tables \
+  -H "x-admin-token: $ADMIN_TOKEN"
+```
+
+### Criação de lotes
+
+`POST /api/gestao/operacional/lotes` recebe nome, campanha, tipo de disparo (`ROBO`, `URA` ou `MANUAL`), consultor, quantidade e filtros. O backend consulta `vw_leads_priorizados`, ignora matriculados e exclui leads já presentes em lote ativo (`status_atendimento` diferente de `CONCLUIDO`, `MAT` ou `CANCELADO`). Se houver menos leads do que o solicitado, o lote é criado com a quantidade disponível e retorna um aviso.
+
+### Atualização de status de leads
+
+`PATCH /api/gestao/operacional/leads/<sk_pessoa>/status` atualiza a linha por `lote_id + sk_pessoa`, grava observação, aplica as flags operacionais (`retorno`, `positivo`, `negativo`, `matriculado`) conforme o status e registra evento em `op_lead_eventos`.
+
+### Finalização de lotes
+
+`POST /api/gestao/operacional/lotes/<lote_id>/finish` calcula total de leads, retornos, positivos, negativos, matrículas, taxa de retorno e taxa de matrícula; atualiza `op_lotes_disparo` para `CONCLUIDO`; registra sincronização em `op_bigquery_sync`; e cria evento de finalização.
+
+### Antiduplicidade
+
+A seleção de fila faz `LEFT JOIN` com `op_lote_leads` e considera ativo tudo que não estiver em `CONCLUIDO`, `MAT` ou `CANCELADO`. A inserção dos leads do lote também usa `WHERE NOT EXISTS` com a mesma regra, evitando que o mesmo `sk_pessoa` entre em dois lotes ativos.

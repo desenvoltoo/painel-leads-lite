@@ -464,3 +464,62 @@ def test_get_fila_contract_and_pagination(monkeypatch):
     assert cached is False
     assert list(data.keys()) == ["items", "pagination"]
     assert data["pagination"] == {"page": 1, "page_size": 25, "total": 1, "total_pages": 1}
+
+
+def test_operacional_leads_disponiveis_endpoint(client, monkeypatch):
+    login(client)
+    def fake(filters, meta):
+        assert filters["curso"] == "Direito"
+        return {"items": [{"sk_pessoa": 1, "nome": "Ana"}], "count": 1}, False
+    monkeypatch.setattr("app.gestao_op_get_leads_disponiveis", fake)
+    resp = client.get("/api/gestao/operacional/leads-disponiveis?curso=Direito&limit=10")
+    body = resp.get_json()
+    assert resp.status_code == 200
+    assert body["ok"] is True
+    assert body["data"]["count"] == 1
+
+
+def test_operacional_criar_lote_endpoint(client, monkeypatch):
+    login(client)
+    def fake(payload):
+        assert payload["tipo_disparo"] == "ROBO"
+        return {"lote_id": "l1", "quantidade_leads": 2, "status_lote": "ABERTO"}, False
+    monkeypatch.setattr("app.gestao_op_criar_lote", fake)
+    resp = client.post("/api/gestao/operacional/lotes", json={"tipo_disparo": "ROBO", "quantidade": 2})
+    body = resp.get_json()
+    assert resp.status_code == 201
+    assert body["data"]["lote_id"] == "l1"
+
+
+def test_operacional_get_lotes_endpoint(client, monkeypatch):
+    login(client)
+    def fake(filters, meta):
+        assert filters["status_lote"] == "ABERTO"
+        return {"items": [{"lote_id": "l1"}], "count": 1}, False
+    monkeypatch.setattr("app.gestao_op_get_lotes", fake)
+    resp = client.get("/api/gestao/operacional/lotes?status_lote=ABERTO")
+    assert resp.status_code == 200
+    assert resp.get_json()["data"]["items"][0]["lote_id"] == "l1"
+
+
+def test_operacional_update_lead_status_endpoint(client, monkeypatch):
+    login(client)
+    def fake(sk_pessoa, payload):
+        assert sk_pessoa == 123
+        assert payload["status_atendimento"] == "AC"
+        return {"sk_pessoa": sk_pessoa, "status_atendimento": "AC", "retorno": True}, False
+    monkeypatch.setattr("app.gestao_op_update_lead_status", fake)
+    resp = client.patch("/api/gestao/operacional/leads/123/status", json={"lote_id": "l1", "status_atendimento": "AC"})
+    assert resp.status_code == 200
+    assert resp.get_json()["data"]["retorno"] is True
+
+
+def test_operacional_finish_lote_endpoint(client, monkeypatch):
+    login(client)
+    def fake(lote_id):
+        assert lote_id == "l1"
+        return {"lote_id": lote_id, "status_lote": "CONCLUIDO"}, False
+    monkeypatch.setattr("app.gestao_op_finish_lote", fake)
+    resp = client.post("/api/gestao/operacional/lotes/l1/finish")
+    assert resp.status_code == 200
+    assert resp.get_json()["data"]["status_lote"] == "CONCLUIDO"
