@@ -583,3 +583,73 @@ def test_operacional_recalcular_metricas_lote_atualiza_totais(monkeypatch):
     assert m["total_matriculas"] == 1
     assert calls[0][1]["txr"] == 50.0
     assert calls[0][2] == "operacional_recalcular_lote"
+
+
+def test_operacional_fila_order_and_new_lead_rules(monkeypatch):
+    from services import gestao_operacional as op
+    captured = {}
+    def fake(sql, params=None, operation=''):
+        captured['sql'] = sql
+        return []
+    monkeypatch.setattr(op, '_run', fake)
+    data, cached = op.get_fila_leads({}, {'limit': 10, 'offset': 0})
+    sql = captured['sql']
+    assert 'l.data_inscricao DESC' in sql
+    assert 'l.score_prioridade DESC' in sql
+    assert 'l.nunca_disparado DESC' in sql
+    assert 'l.data_disparo IS NULL' in sql
+    assert 'COALESCE(l.flag_matriculado, FALSE) = FALSE' in sql
+    assert 'COALESCE(l.nunca_disparado, FALSE) = TRUE' in sql
+    assert "TRIM(l.consultor_disparo) = ''" in sql
+    assert "TRIM(l.tipo_disparo) = ''" in sql
+    assert data['items'] == [] and cached is False
+
+
+def test_operacional_lotes_select_endpoint(client, monkeypatch):
+    login(client)
+    monkeypatch.setattr('app.gestao_op_get_lotes_select', lambda: ({'items': [{'lote_id': 'L1'}]}, False))
+    resp = client.get('/api/gestao/operacional/lotes-select')
+    assert resp.status_code == 200
+    assert resp.get_json()['data'][0]['lote_id'] == 'L1'
+
+
+def test_operacional_preview_endpoint(client, monkeypatch):
+    login(client)
+    monkeypatch.setattr('app.gestao_op_preview_proximo_lote', lambda filters: ({'items': [], 'total_disponivel': 0}, False))
+    resp = client.get('/api/gestao/operacional/preview-proximo-lote?quantidade=5')
+    assert resp.status_code == 200
+    assert resp.get_json()['data']['total_disponivel'] == 0
+
+
+def test_operacional_export_endpoint(client, monkeypatch):
+    login(client)
+    monkeypatch.setattr('app.gestao_op_exportar_proximo_lote', lambda payload: ({'lote_id': 'L1', 'quantidade_exportada': 1, 'download_url': '/x'}, False))
+    resp = client.post('/api/gestao/operacional/exportar-proximo-lote', json={'tipo_disparo': 'ROBO', 'quantidade': 1})
+    assert resp.status_code == 201
+    assert resp.get_json()['data']['lote_id'] == 'L1'
+
+
+def test_operacional_importar_lote_disparado_endpoint(client, monkeypatch):
+    login(client)
+    monkeypatch.setattr('app.gestao_op_importar_lote_disparado', lambda file, lote_id, usuario: ({'lote_id': lote_id, 'linhas_lidas': 1, 'linhas_atualizadas': 1, 'linhas_rejeitadas': 0, 'erros': []}, False))
+    resp = client.post('/api/gestao/operacional/importar-lote-disparado', data={'lote_id': 'L1', 'usuario': 'u', 'file': (BytesIO(b'sk_pessoa,status_atendimento\n1,AC\n'), 'r.csv')}, content_type='multipart/form-data')
+    assert resp.status_code == 200
+    assert resp.get_json()['data']['linhas_atualizadas'] == 1
+
+
+def test_operacional_importar_novos_leads_validation_endpoint(client, monkeypatch):
+    login(client)
+    monkeypatch.setattr('app.gestao_op_importar_novos_leads', lambda file, metadata: ({'linhas_lidas': 1, 'linhas_validas': 1, 'message': 'ok'}, False))
+    resp = client.post('/api/gestao/operacional/importar-novos-leads', data={'file': (BytesIO(b'nome,cpf,curso,polo\nA,1,C,P\n'), 'n.csv')}, content_type='multipart/form-data')
+    assert resp.status_code == 200
+    assert resp.get_json()['data']['upload_url'] == '/api/upload'
+
+
+def test_operacional_create_tables_error_has_details(client, monkeypatch):
+    login(client)
+    def boom():
+        raise RuntimeError('op_lotes_disparo not found')
+    monkeypatch.setattr('app.gestao_op_create_tables', boom)
+    resp = client.post('/api/gestao/operacional/admin/create-tables')
+    assert resp.status_code == 500
+    assert resp.get_json()['error']['code'] == 'GESTAO_OPERACIONAL_CREATE_TABLES_ERROR'

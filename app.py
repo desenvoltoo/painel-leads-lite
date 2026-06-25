@@ -83,6 +83,15 @@ from services.gestao_operacional import (
     listar_regras_distribuicao as gestao_op_listar_regras,
     ativar_desativar_regra as gestao_op_toggle_regra,
     parse_operational_request as gestao_op_parse_request,
+    get_lotes_select as gestao_op_get_lotes_select,
+    preview_proximo_lote as gestao_op_preview_proximo_lote,
+    exportar_proximo_lote as gestao_op_exportar_proximo_lote,
+    lote_csv_bytes as gestao_op_lote_csv_bytes,
+    importar_lote_disparado as gestao_op_importar_lote_disparado,
+    importar_novos_leads as gestao_op_importar_novos_leads,
+    get_fila_leads as gestao_op_get_fila_leads,
+    cancelar_lote as gestao_op_cancelar_lote,
+    get_operacao_logs as gestao_op_get_logs,
 )
 
 logger = logging.getLogger(__name__)
@@ -733,6 +742,91 @@ def create_app() -> Flask:
         except Exception as exc:
             return _gestao_error_response(exc, code="GESTAO_OPERACIONAL_DASHBOARD_ERROR", message="Não foi possível carregar o dashboard operacional.")
 
+
+
+    @app.get("/api/gestao/operacional/lotes-select")
+    def api_gestao_operacional_lotes_select():
+        try:
+            data, cached = gestao_op_get_lotes_select()
+            return _gestao_success(data.get("items", data), {}, cached=cached)
+        except Exception as exc:
+            return _gestao_error_response(exc, code="GESTAO_OPERACIONAL_LOTES_SELECT_ERROR", message="Não foi possível carregar o seletor de lotes.")
+
+    @app.get("/api/gestao/operacional/preview-proximo-lote")
+    def api_gestao_operacional_preview_proximo_lote():
+        try:
+            filters, meta = gestao_op_parse_request(request.args)
+            merged = {**filters, **meta, **request.args.to_dict()}
+            data, cached = gestao_op_preview_proximo_lote(merged)
+            return _gestao_success(data, filters, cached=cached)
+        except Exception as exc:
+            return _gestao_error_response(exc, code="GESTAO_OPERACIONAL_PREVIEW_ERROR", message="Não foi possível pré-visualizar o próximo lote.")
+
+    @app.post("/api/gestao/operacional/exportar-proximo-lote")
+    def api_gestao_operacional_exportar_proximo_lote():
+        try:
+            data, cached = gestao_op_exportar_proximo_lote(request.get_json(silent=True) or {})
+            return _gestao_success(data, {}, cached=cached), 201
+        except ValueError as exc:
+            return jsonify({"ok": False, "error": {"code": "GESTAO_OPERACIONAL_INVALID", "message": str(exc)}}), 400
+        except Exception as exc:
+            return _gestao_error_response(exc, code="GESTAO_OPERACIONAL_EXPORT_ERROR", message="Não foi possível exportar o próximo lote.")
+
+    @app.get("/api/gestao/operacional/lotes/<lote_id>/download")
+    def api_gestao_operacional_lote_download(lote_id):
+        try:
+            data = gestao_op_lote_csv_bytes(lote_id)
+            return send_file(io.BytesIO(data), mimetype="text/csv; charset=utf-8", as_attachment=True, download_name=f"lote_{lote_id}.csv")
+        except Exception as exc:
+            return _gestao_error_response(exc, code="GESTAO_OPERACIONAL_DOWNLOAD_ERROR", message="Não foi possível baixar o lote.")
+
+    @app.post("/api/gestao/operacional/importar-lote-disparado")
+    def api_gestao_operacional_importar_lote_disparado():
+        try:
+            file = request.files.get("file")
+            if not file:
+                return jsonify({"ok": False, "error": {"code": "GESTAO_OPERACIONAL_INVALID", "message": "Arquivo é obrigatório."}}), 400
+            data, cached = gestao_op_importar_lote_disparado(file, request.form.get("lote_id", ""), request.form.get("usuario", ""))
+            return _gestao_success(data, {"lote_id": request.form.get("lote_id", "")}, cached=cached)
+        except ValueError as exc:
+            return jsonify({"ok": False, "error": {"code": "GESTAO_OPERACIONAL_INVALID", "message": str(exc)}}), 400
+        except Exception as exc:
+            return _gestao_error_response(exc, code="GESTAO_OPERACIONAL_IMPORT_LOTE_ERROR", message="Não foi possível importar o lote disparado.")
+
+    @app.post("/api/gestao/operacional/importar-novos-leads")
+    def api_gestao_operacional_importar_novos_leads():
+        try:
+            file = request.files.get("file")
+            if not file:
+                return jsonify({"ok": False, "error": {"code": "GESTAO_OPERACIONAL_INVALID", "message": "Arquivo é obrigatório. Use POST /api/upload para a carga oficial."}}), 400
+            data, cached = gestao_op_importar_novos_leads(file, request.form.to_dict())
+            data["upload_url"] = "/api/upload"
+            return _gestao_success(data, {}, cached=cached)
+        except ValueError as exc:
+            return jsonify({"ok": False, "error": {"code": "GESTAO_OPERACIONAL_INVALID", "message": str(exc)}}), 400
+        except Exception as exc:
+            return _gestao_error_response(exc, code="GESTAO_OPERACIONAL_IMPORT_NOVOS_ERROR", message="Não foi possível validar a importação de novos leads.")
+
+    @app.get("/api/gestao/operacional/fila-leads")
+    def api_gestao_operacional_fila_leads():
+        return _gestao_operacional_endpoint(gestao_op_get_fila_leads)
+
+    @app.post("/api/gestao/operacional/lotes/<lote_id>/cancel")
+    def api_gestao_operacional_lote_cancel(lote_id):
+        try:
+            data, cached = gestao_op_cancelar_lote(lote_id)
+            return _gestao_success(data, {"lote_id": lote_id}, cached=cached)
+        except Exception as exc:
+            return _gestao_error_response(exc, code="GESTAO_OPERACIONAL_CANCEL_ERROR", message="Não foi possível cancelar o lote.")
+
+    @app.get("/api/gestao/operacional/logs")
+    def api_gestao_operacional_logs():
+        try:
+            filters, meta = gestao_op_parse_request(request.args)
+            data, cached = gestao_op_get_logs(filters)
+            return _gestao_success(data, filters, cached=cached)
+        except Exception as exc:
+            return _gestao_error_response(exc, code="GESTAO_OPERACIONAL_LOGS_ERROR", message="Não foi possível carregar o histórico operacional.")
 
     @app.post("/api/gestao/operacional/liberar-proximos-leads")
     def api_gestao_operacional_liberar_proximos_leads():
