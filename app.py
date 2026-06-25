@@ -525,10 +525,11 @@ def create_app() -> Flask:
 
     def _gestao_error_response(exc, *, status=500, code="GESTAO_QUERY_ERROR", message="Não foi possível carregar os dados."):
         logger.exception(
-            "gestao_api_error route=%s operation=%s exception_type=%s",
+            "gestao_api_error route=%s operation=%s exception_type=%s error=%s",
             request.path,
             request.endpoint,
             exc.__class__.__name__,
+            str(exc),
         )
         return jsonify({"ok": False, "success": False, "error": {"code": code, "message": message, "correlationId": getattr(g, "correlation_id", None)}}), status
 
