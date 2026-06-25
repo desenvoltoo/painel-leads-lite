@@ -153,3 +153,13 @@ button, a, input, select { min-height: 40px; }
 .op-status-buttons .btn { min-height: 30px; padding: .15rem .45rem; }
 .op-observacao { min-width: 220px; }
 @media (max-width: 1200px) { .filters-grid.compact { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+
+.gestao-operacional-layout { display: grid; gap: 1rem; grid-template-columns: 250px minmax(0, 1fr); align-items: start; }
+.gestao-module-sidebar { background: #f8fafc; border: 1px solid var(--go-border); border-radius: 18px; padding: .85rem; position: sticky; top: 104px; }
+.gestao-module-title { color: var(--go-muted); font-size: .74rem; font-weight: 850; letter-spacing: .08em; margin: .2rem .2rem .7rem; text-transform: uppercase; }
+.gestao-module-sidebar .nav { gap: .35rem; }
+.gestao-module-sidebar .nav-item { list-style: none; width: 100%; }
+.gestao-module-sidebar .nav-link { border: 1px solid transparent; border-radius: 12px; text-align: left; width: 100%; }
+.gestao-module-content { min-width: 0; }
+.op-quick-actions { display: flex; flex-wrap: wrap; gap: .55rem; }
+@media (max-width: 991.98px) { .gestao-operacional-layout { display: block; } .gestao-module-sidebar { margin-bottom: 1rem; position: static; } }

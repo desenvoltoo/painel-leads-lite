@@ -83,6 +83,13 @@ from services.gestao_operacional import (
     listar_regras_distribuicao as gestao_op_listar_regras,
     ativar_desativar_regra as gestao_op_toggle_regra,
     parse_operational_request as gestao_op_parse_request,
+    get_lotes_select as gestao_op_get_lotes_select,
+    preview_proximo_lote as gestao_op_preview_proximo_lote,
+    exportar_proximo_lote as gestao_op_exportar_proximo_lote,
+    importar_lote_disparado as gestao_op_importar_lote_disparado,
+    importar_novos_leads as gestao_op_importar_novos_leads,
+    get_operacao_logs as gestao_op_get_logs,
+    cancelar_lote as gestao_op_cancelar_lote,
 )
 
 logger = logging.getLogger(__name__)
@@ -735,6 +742,76 @@ def create_app() -> Flask:
             return _gestao_error_response(exc, code="GESTAO_OPERACIONAL_DASHBOARD_ERROR", message="Não foi possível carregar o dashboard operacional.")
 
 
+
+    @app.get("/api/gestao/operacional/lotes-select")
+    def api_gestao_operacional_lotes_select():
+        try:
+            data, cached = gestao_op_get_lotes_select()
+            return _gestao_success(data, {}, cached=cached)
+        except Exception as exc:
+            return _gestao_error_response(exc, code="GESTAO_OPERACIONAL_LOTES_SELECT_ERROR", message="Não foi possível carregar o seletor de lotes.")
+
+    @app.get("/api/gestao/operacional/preview-proximo-lote")
+    def api_gestao_operacional_preview_proximo_lote():
+        try:
+            data, cached = gestao_op_preview_proximo_lote(request.args)
+            return _gestao_success(data, dict(request.args), cached=cached)
+        except ValueError as exc:
+            return jsonify({"ok": False, "error": {"code": "GESTAO_OPERACIONAL_INVALID", "message": str(exc)}}), 400
+        except Exception as exc:
+            return _gestao_error_response(exc, code="GESTAO_OPERACIONAL_PREVIEW_ERROR", message="Não foi possível pré-visualizar o próximo lote.")
+
+    @app.post("/api/gestao/operacional/exportar-proximo-lote")
+    def api_gestao_operacional_exportar_proximo_lote():
+        try:
+            data, cached = gestao_op_exportar_proximo_lote(request.get_json(silent=True) or {})
+            if data.get("base64"):
+                raw = __import__('base64').b64decode(data["base64"])
+                return send_file(io.BytesIO(raw), mimetype=data.get("content_type") or "text/csv", as_attachment=True, download_name=data.get("filename") or "lote.csv")
+            return _gestao_success(data, {}, cached=cached), 201
+        except ValueError as exc:
+            return jsonify({"ok": False, "error": {"code": "GESTAO_OPERACIONAL_INVALID", "message": str(exc)}}), 400
+        except Exception as exc:
+            return _gestao_error_response(exc, code="GESTAO_OPERACIONAL_EXPORTAR_ERROR", message="Não foi possível exportar o próximo lote.")
+
+    @app.post("/api/gestao/operacional/importar-lote-disparado")
+    def api_gestao_operacional_importar_lote_disparado():
+        try:
+            file = request.files.get("file")
+            if not file:
+                return jsonify({"ok": False, "error": {"code": "GESTAO_OPERACIONAL_INVALID", "message": "Arquivo é obrigatório."}}), 400
+            data, cached = gestao_op_importar_lote_disparado(file, request.form.get("lote_id", ""), request.form.get("usuario", ""))
+            return _gestao_success(data, {}, cached=cached)
+        except ValueError as exc:
+            return jsonify({"ok": False, "error": {"code": "GESTAO_OPERACIONAL_INVALID", "message": str(exc)}}), 400
+        except Exception as exc:
+            return _gestao_error_response(exc, code="GESTAO_OPERACIONAL_IMPORTAR_LOTE_ERROR", message="Não foi possível importar o lote disparado.")
+
+    @app.post("/api/gestao/operacional/importar-novos-leads")
+    def api_gestao_operacional_importar_novos_leads():
+        try:
+            file = request.files.get("file")
+            if not file:
+                return jsonify({"ok": False, "error": {"code": "GESTAO_OPERACIONAL_INVALID", "message": "Arquivo é obrigatório. Use /api/upload para a carga oficial."}}), 400
+            data, cached = gestao_op_importar_novos_leads(file, request.form)
+            return _gestao_success(data, {}, cached=cached)
+        except ValueError as exc:
+            return jsonify({"ok": False, "error": {"code": "GESTAO_OPERACIONAL_INVALID", "message": str(exc)}}), 400
+        except Exception as exc:
+            return _gestao_error_response(exc, code="GESTAO_OPERACIONAL_IMPORTAR_NOVOS_ERROR", message="Não foi possível validar a importação de novos leads.")
+
+    @app.get("/api/gestao/operacional/fila-leads")
+    def api_gestao_operacional_fila_leads():
+        return _gestao_operacional_endpoint(gestao_op_get_leads_disponiveis)
+
+    @app.get("/api/gestao/operacional/logs")
+    def api_gestao_operacional_logs():
+        try:
+            data, cached = gestao_op_get_logs(request.args)
+            return _gestao_success(data, dict(request.args), cached=cached)
+        except Exception as exc:
+            return _gestao_error_response(exc, code="GESTAO_OPERACIONAL_LOGS_ERROR", message="Não foi possível carregar histórico e logs.")
+
     @app.post("/api/gestao/operacional/liberar-proximos-leads")
     def api_gestao_operacional_liberar_proximos_leads():
         try:
@@ -824,6 +901,15 @@ def create_app() -> Flask:
             return _gestao_success(data, {"lote_id": lote_id}, cached=cached)
         except Exception as exc:
             return _gestao_error_response(exc, code="GESTAO_OPERACIONAL_START_ERROR", message="Não foi possível iniciar o lote.")
+
+
+    @app.post("/api/gestao/operacional/lotes/<lote_id>/cancel")
+    def api_gestao_operacional_lote_cancel(lote_id):
+        try:
+            data, cached = gestao_op_cancelar_lote(lote_id)
+            return _gestao_success(data, {"lote_id": lote_id}, cached=cached)
+        except Exception as exc:
+            return _gestao_error_response(exc, code="GESTAO_OPERACIONAL_CANCEL_ERROR", message="Não foi possível cancelar o lote.")
 
     @app.post("/api/gestao/operacional/lotes/<lote_id>/finish")
     def api_gestao_operacional_lote_finish(lote_id):
