@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import base64
+import csv
+import io
 import os
 import uuid
 from pathlib import Path
@@ -48,6 +51,7 @@ def _available_leads_predicate(alias: str = "l") -> str:
     return f"""COALESCE({alias}.flag_matriculado, FALSE) = FALSE
       AND COALESCE({alias}.nunca_disparado, FALSE) = TRUE
       AND ({alias}.consultor_disparo IS NULL OR TRIM({alias}.consultor_disparo) = '')
+      AND ({alias}.tipo_disparo IS NULL OR TRIM({alias}.tipo_disparo) = '')
       AND {alias}.data_disparo IS NULL"""
 
 
@@ -106,7 +110,7 @@ def _int(value: Any, default: int, min_value: int = 0, max_value: int = 5000) ->
 
 
 def _filters_meta(source: Mapping[str, Any]) -> Tuple[Dict[str, str], Dict[str, int]]:
-    filters = {k: str(source.get(k) or "").strip() for k in ["campanha", "curso", "polo", "origem", "tipo_disparo", "nivel_prioridade", "status_lote", "consultor_disparo", "status_atendimento", "lote_id"] if str(source.get(k) or "").strip()}
+    filters = {k: str(source.get(k) or "").strip() for k in ["campanha", "curso", "polo", "origem", "nivel_prioridade", "status_lote", "consultor_disparo", "status_atendimento", "lote_id"] if str(source.get(k) or "").strip()}
     meta = {"limit": _int(source.get("limit"), 100, 1, 5000), "offset": _int(source.get("offset"), 0, 0, 1_000_000)}
     return filters, meta
 
@@ -174,7 +178,7 @@ def get_dashboard() -> Tuple[Dict[str, Any], bool]:
 def get_leads_disponiveis(filters: Mapping[str, Any], meta: Mapping[str, Any]) -> Tuple[Dict[str, Any], bool]:
     where = ["op.sk_pessoa IS NULL", _available_leads_predicate("l")]
     params: List[Any] = []
-    _add_eq(where, params, "l", filters, ["campanha", "curso", "polo", "origem", "tipo_disparo", "nivel_prioridade"])
+    _add_eq(where, params, "l", filters, ["campanha", "curso", "polo", "origem", "nivel_prioridade"])
     params += [bigquery.ScalarQueryParameter("limit", "INT64", _int(meta.get("limit"), 100, 1, 5000)), bigquery.ScalarQueryParameter("offset", "INT64", _int(meta.get("offset"), 0, 0, 1_000_000))]
     sql = f"""
     SELECT l.*
@@ -183,7 +187,7 @@ def get_leads_disponiveis(filters: Mapping[str, Any], meta: Mapping[str, Any]) -
       ON l.sk_pessoa = op.sk_pessoa
      AND op.status_atendimento IN ('PENDENTE','EM_ATENDIMENTO','AC','EC','NT','IF','NI','COU')
     WHERE {' AND '.join(where)}
-    ORDER BY l.score_prioridade DESC, l.nunca_disparado DESC, l.dias_sem_acao DESC, l.data_inscricao ASC
+    ORDER BY l.data_inscricao DESC, l.score_prioridade DESC, l.nunca_disparado DESC, COALESCE(l.dias_sem_acao, 0) DESC, l.sk_pessoa DESC
     LIMIT @limit OFFSET @offset
     """
     rows = _run(sql, params, "operacional_leads_disponiveis")
@@ -398,3 +402,129 @@ def executar_regras_distribuicao() -> Tuple[Dict[str, Any], bool]:
         _evento(None, None, None, "REGRA_EXECUTADA", None, None, f"Regra {r.get('regra_id')} executada", "REGRA_AUTOMATICA")
     invalidate_gestao_cache()
     return {"items": resultados, "count": len(resultados)}, False
+
+
+EXPORT_COLUMNS_OPERACIONAL = [
+    "lote_id", "sk_pessoa", "nome", "cpf", "celular", "email", "curso", "modalidade", "turno",
+    "polo", "origem", "campanha", "canal", "acao_comercial", "tipo_disparo", "consultor_disparo",
+    "data_inscricao", "score_prioridade", "nivel_prioridade", "etapa_operacional", "status_atendimento",
+]
+
+
+def get_operacao_dashboard() -> Tuple[Dict[str, Any], bool]:
+    return get_dashboard()
+
+
+def get_lotes_select() -> Tuple[Dict[str, Any], bool]:
+    rows = _run(f"""
+    SELECT lote_id,nome_lote,consultor_disparo,tipo_disparo,status_lote,campanha,created_at
+    FROM {_ref('op_lotes_disparo')}
+    ORDER BY created_at DESC
+    LIMIT 500
+    """, operation="operacional_lotes_select")
+    return {"items": rows, "count": len(rows)}, False
+
+
+def preview_proximo_lote(filters: Mapping[str, Any]) -> Tuple[Dict[str, Any], bool]:
+    quantidade = _int(filters.get("quantidade") or filters.get("limit"), 100, 1, 5000)
+    clean = {k: v for k, v in dict(filters or {}).items() if k in {"campanha", "curso", "polo", "origem", "nivel_prioridade"}}
+    data, cached = get_leads_disponiveis(clean, {"limit": quantidade, "offset": _int(filters.get("offset"), 0)})
+    return {"items": data.get("items", []), "count": data.get("count", 0), "ordenacao": ["data_inscricao DESC", "score_prioridade DESC", "nunca_disparado DESC", "dias_sem_acao DESC", "sk_pessoa DESC"]}, cached
+
+
+def _rows_to_csv_b64(rows: List[Dict[str, Any]]) -> str:
+    out = io.StringIO()
+    writer = csv.DictWriter(out, fieldnames=EXPORT_COLUMNS_OPERACIONAL, extrasaction="ignore")
+    writer.writeheader()
+    for row in rows:
+        writer.writerow({k: row.get(k) for k in EXPORT_COLUMNS_OPERACIONAL})
+    return base64.b64encode(out.getvalue().encode("utf-8-sig")).decode("ascii")
+
+
+def exportar_proximo_lote(payload: Mapping[str, Any]) -> Tuple[Dict[str, Any], bool]:
+    lote, cached = criar_lote(payload)
+    detalhe, _ = get_lote_detalhe(lote["lote_id"])
+    rows = []
+    for lead in detalhe.get("leads", []):
+        enriched = {**lead, "lote_id": lote["lote_id"], "status_atendimento": lead.get("status_atendimento") or "PENDENTE"}
+        rows.append(enriched)
+    _evento(lote["lote_id"], None, None, "LOTE_EXPORTADO", None, "PENDENTE", "Lote criado e exportado", payload.get("criado_por"))
+    return {**lote, "filename": f"lote_{lote['lote_id']}.csv", "content_type": "text/csv; charset=utf-8", "base64": _rows_to_csv_b64(rows), "items": rows}, cached
+
+
+def _read_upload_rows(file: Any) -> List[Dict[str, Any]]:
+    name = (getattr(file, "filename", "") or "").lower()
+    raw = file.read()
+    if hasattr(file, "seek"):
+        file.seek(0)
+    if name.endswith((".xlsx", ".xls")):
+        try:
+            import pandas as pd
+            return pd.read_excel(io.BytesIO(raw)).fillna("").to_dict("records")
+        except Exception as exc:
+            raise ValueError(f"Não foi possível ler XLSX: {exc}")
+    text = raw.decode("utf-8-sig", errors="replace")
+    sample = text[:2048]
+    dialect = csv.Sniffer().sniff(sample, delimiters=",;\t") if sample.strip() else csv.excel
+    return list(csv.DictReader(io.StringIO(text), dialect=dialect))
+
+
+def importar_lote_disparado(file: Any, lote_id: str, usuario: str = "") -> Tuple[Dict[str, Any], bool]:
+    if not lote_id:
+        raise ValueError("lote_id é obrigatório.")
+    rows = _read_upload_rows(file)
+    updated = rejected = not_found = errors = 0
+    for row in rows:
+        try:
+            sk = row.get("sk_pessoa") or row.get("SK_PESSOA")
+            status = str(row.get("status_atendimento") or row.get("status") or "").strip().upper()
+            if not sk or status not in STATUS_ATENDIMENTO_MAP:
+                rejected += 1; continue
+            update_lead_status(int(float(sk)), {"lote_id": lote_id, "status_atendimento": status, "observacao": row.get("observacao") or "", "usuario": usuario})
+            _evento(lote_id, int(float(sk)), row.get("cpf"), "LEAD_STATUS_IMPORTADO", None, status, "Status importado por arquivo", usuario)
+            updated += 1
+        except Exception:
+            errors += 1
+    recalcular_metricas_lote(lote_id)
+    _run(f"INSERT INTO {_ref('op_bigquery_sync')} (sync_id,lote_id,status_sync,tentativas,linhas_processadas,erro,created_at,synced_at) VALUES (@sync_id,@lote_id,'CONCLUIDO',1,@total,NULL,CURRENT_TIMESTAMP(),CURRENT_TIMESTAMP())", [bigquery.ScalarQueryParameter("sync_id", "STRING", str(uuid.uuid4())), bigquery.ScalarQueryParameter("lote_id", "STRING", lote_id), bigquery.ScalarQueryParameter("total", "INT64", updated)], "operacional_import_sync")
+    invalidate_gestao_cache()
+    return {"linhas_lidas": len(rows), "atualizados": updated, "rejeitados": rejected, "nao_encontrados": not_found, "erros": errors}, False
+
+
+def importar_novos_leads(file: Any, metadata: Mapping[str, Any]) -> Tuple[Dict[str, Any], bool]:
+    rows = _read_upload_rows(file)
+    cols = {c.lower().strip() for c in (rows[0].keys() if rows else [])}
+    missing = [c for c in ["nome", "curso"] if c not in cols]
+    if "cpf" not in cols and "celular" not in cols:
+        missing.append("cpf ou celular")
+    if "polo" not in cols and "unidade" not in cols:
+        missing.append("unidade/polo")
+    if missing:
+        raise ValueError("Colunas mínimas ausentes: " + ", ".join(missing))
+    return {"linhas_lidas": len(rows), "linhas_validas": len(rows), "mensagem": "Arquivo validado. Use POST /api/upload para a carga oficial com dt_upload do backend.", "metadata": dict(metadata or {})}, False
+
+
+def get_fila_leads(filters: Mapping[str, Any]) -> Tuple[Dict[str, Any], bool]:
+    f, m = _filters_meta(filters)
+    return get_leads_disponiveis(f, m)
+
+
+def finalizar_lote(lote_id: str) -> Tuple[Dict[str, Any], bool]:
+    return finish_lote(lote_id, {"confirmacao_forcada": True})
+
+
+def cancelar_lote(lote_id: str) -> Tuple[Dict[str, Any], bool]:
+    p = [bigquery.ScalarQueryParameter("lote_id", "STRING", lote_id)]
+    _run(f"UPDATE {_ref('op_lotes_disparo')} SET status_lote='CANCELADO', updated_at=CURRENT_TIMESTAMP() WHERE lote_id=@lote_id", p, "operacional_cancelar_lote")
+    _run(f"UPDATE {_ref('op_lote_leads')} SET status_atendimento='CANCELADO', updated_at=CURRENT_TIMESTAMP() WHERE lote_id=@lote_id AND status_atendimento IN ('PENDENTE','EM_ATENDIMENTO','AC','EC','NT','IF','NI','COU')", p, "operacional_cancelar_lote_leads")
+    _evento(lote_id, None, None, "LOTE_CANCELADO", None, "CANCELADO", "Lote cancelado", None)
+    invalidate_gestao_cache()
+    return {"lote_id": lote_id, "status_lote": "CANCELADO"}, False
+
+
+def get_operacao_logs(filters: Mapping[str, Any]) -> Tuple[Dict[str, Any], bool]:
+    limit = _int(filters.get("limit"), 100, 1, 1000)
+    params = [bigquery.ScalarQueryParameter("limit", "INT64", limit)]
+    eventos = _run(f"SELECT 'evento' AS origem, created_at, tipo_evento AS tipo, lote_id, sk_pessoa, descricao, usuario FROM {_ref('op_lead_eventos')} ORDER BY created_at DESC LIMIT @limit", params, "operacional_logs_eventos")
+    sync = _run(f"SELECT 'bigquery_sync' AS origem, created_at, status_sync AS tipo, lote_id, NULL AS sk_pessoa, erro AS descricao, NULL AS usuario FROM {_ref('op_bigquery_sync')} ORDER BY created_at DESC LIMIT @limit", params, "operacional_logs_sync")
+    return {"items": sorted(eventos + sync, key=lambda r: str(r.get("created_at") or ""), reverse=True)[:limit], "count": min(len(eventos) + len(sync), limit)}, False
