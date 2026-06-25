@@ -523,3 +523,63 @@ def test_operacional_finish_lote_endpoint(client, monkeypatch):
     resp = client.post("/api/gestao/operacional/lotes/l1/finish")
     assert resp.status_code == 200
     assert resp.get_json()["data"]["status_lote"] == "CONCLUIDO"
+
+
+def test_operacional_liberar_proximos_leads_prioriza_e_retorna_quantidade(monkeypatch):
+    leads = [
+        {"sk_pessoa": 2, "cpf": "2", "nome": "B", "celular": "119", "email": "b@x.com", "curso": "Direito", "modalidade": None, "turno": None, "polo": "SP", "origem": "Site", "tipo_negocio": None, "campanha": "C", "canal": None, "acao_comercial": None, "tipo_disparo": "ROBO", "score_prioridade": 90, "nivel_prioridade": "ALTA", "etapa_operacional": "NOVO"},
+        {"sk_pessoa": 1, "cpf": "1", "nome": "A", "celular": "118", "email": "a@x.com", "curso": "Direito", "modalidade": None, "turno": None, "polo": "SP", "origem": "Site", "tipo_negocio": None, "campanha": "C", "canal": None, "acao_comercial": None, "tipo_disparo": "ROBO", "score_prioridade": 80, "nivel_prioridade": "MEDIA", "etapa_operacional": "NOVO"},
+    ]
+    calls = []
+    import services.gestao_operacional as op
+    monkeypatch.setattr(op, "get_leads_disponiveis", lambda filters, meta: ({"items": leads[:meta["limit"]]}, False))
+    monkeypatch.setattr(op, "_run", lambda sql, params=None, operation="": calls.append((sql, params or [], operation)) or [])
+    monkeypatch.setattr(op, "_evento", lambda *args, **kwargs: calls.append(("EVENT", args, "evento")))
+    monkeypatch.setattr(op, "invalidate_gestao_cache", lambda: None)
+    data, _ = op.liberar_proximos_leads({"tipo_disparo": "ROBO", "quantidade": 2, "campanha": "C"})
+    assert data["quantidade_liberada"] == 2
+    assert any("NOT EXISTS" in c[0] and "PENDENTE" in c[0] for c in calls if isinstance(c[0], str))
+
+
+def test_operacional_update_status_recalcula_lote(monkeypatch):
+    import services.gestao_operacional as op
+    calls = []
+    monkeypatch.setattr(op, "_single", lambda *a, **k: {"status_atendimento": "PENDENTE", "cpf": "123", "retorno": False, "positivo": False, "negativo": False, "matriculado": False})
+    monkeypatch.setattr(op, "_run", lambda sql, params=None, operation="": calls.append(operation) or [])
+    monkeypatch.setattr(op, "_evento", lambda *a, **k: calls.append("evento"))
+    monkeypatch.setattr(op, "recalcular_metricas_lote", lambda lote_id: calls.append(f"recalc:{lote_id}") or {})
+    monkeypatch.setattr(op, "invalidate_gestao_cache", lambda: calls.append("cache"))
+    data, _ = op.update_lead_status(123, {"lote_id": "l1", "status_atendimento": "AC"})
+    assert data["retorno"] is True
+    assert "recalc:l1" in calls
+    assert "cache" in calls
+
+
+def test_operacional_finalizar_lote_exige_confirmacao_com_pendentes(monkeypatch):
+    import services.gestao_operacional as op
+    monkeypatch.setattr(op, "_single", lambda sql, *a, **k: {"qtd": 1} if "COUNT(*) qtd" in sql else {"status_lote": "ABERTO"})
+    with pytest.raises(ValueError):
+        op.finish_lote("l1", {})
+
+
+def test_operacional_executar_regra_automatica_respeita_limite(monkeypatch):
+    import services.gestao_operacional as op
+    regras = [{"regra_id": "r1", "tipo_disparo": "ROBO", "consultor_disparo": "", "campanha": "C", "limite_lotes_ativos": 1, "quantidade_por_lote": 500}]
+    monkeypatch.setattr(op, "_run", lambda sql, params=None, operation="": regras if operation == "operacional_regras_ativas" else [])
+    monkeypatch.setattr(op, "_single", lambda *a, **k: {"qtd": 1})
+    monkeypatch.setattr(op, "_evento", lambda *a, **k: None)
+    monkeypatch.setattr(op, "invalidate_gestao_cache", lambda: None)
+    data, _ = op.executar_regras_distribuicao()
+    assert data["items"][0]["criado"] is False
+    assert "limite" in data["items"][0]["motivo"]
+
+
+def test_operacional_recalcular_metricas_lote_atualiza_totais(monkeypatch):
+    import services.gestao_operacional as op
+    calls = []
+    monkeypatch.setattr(op, "_metrics", lambda lote_id: {"total": 2, "total_retorno": 1, "total_positivo": 1, "total_negativo": 0, "total_matriculas": 1, "taxa_retorno": 50.0, "taxa_matricula": 50.0})
+    monkeypatch.setattr(op, "_run", lambda sql, params=None, operation="": calls.append((sql, {p.name: p.value for p in params}, operation)) or [])
+    m = op.recalcular_metricas_lote("l1")
+    assert m["total_matriculas"] == 1
+    assert calls[0][1]["txr"] == 50.0
+    assert calls[0][2] == "operacional_recalcular_lote"
