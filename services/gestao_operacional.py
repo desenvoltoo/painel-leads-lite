@@ -20,6 +20,8 @@ VIEW_LEADS_PRIORIZADOS = "vw_leads_priorizados"
 FINAL_STATUS = ("CONCLUIDO", "MAT", "CANCELADO")
 ACTIVE_STATUS = ("PENDENTE", "EM_ATENDIMENTO", "AC", "EC", "NT", "IF", "NI", "COU")
 ACTIVE_STATUS_EXCLUDED = FINAL_STATUS
+OP_TABLES = ("op_lotes_disparo", "op_lote_leads", "op_lead_eventos", "op_bigquery_sync", "op_regras_distribuicao", "op_config_operacional")
+
 TIPOS_DISPARO = {"ROBO", "URA", "MANUAL"}
 STATUS_ATENDIMENTO_MAP = {
     "MAT": {"retorno": True, "positivo": True, "negativo": False, "matriculado": True},
@@ -33,6 +35,54 @@ STATUS_ATENDIMENTO_MAP = {
     "CANCELADO": None,
 }
 
+
+def _active_status_sql() -> str:
+    return "'" + "','".join(ACTIVE_STATUS) + "'"
+
+
+def _final_status_sql() -> str:
+    return "'" + "','".join(FINAL_STATUS) + "'"
+
+
+def _available_leads_predicate(alias: str = "l") -> str:
+    return f"""COALESCE({alias}.flag_matriculado, FALSE) = FALSE
+      AND COALESCE({alias}.nunca_disparado, FALSE) = TRUE
+      AND ({alias}.consultor_disparo IS NULL OR TRIM({alias}.consultor_disparo) = '')
+      AND {alias}.data_disparo IS NULL"""
+
+
+def _missing_operational_tables() -> List[str]:
+    params = [bigquery.ArrayQueryParameter("tables", "STRING", list(OP_TABLES))]
+    rows = _run(f"""
+    SELECT table_name
+    FROM `{PROJECT_ID}.{DATASET}.INFORMATION_SCHEMA.TABLES`
+    WHERE table_name IN UNNEST(@tables)
+    """, params, "operacional_check_tables")
+    existing = {str(r.get("table_name")) for r in rows}
+    return [table for table in OP_TABLES if table not in existing]
+
+
+def _zero_operational_indicators(missing: List[str]) -> Dict[str, Any]:
+    return {
+        "leads_disponiveis": 0,
+        "leads_redisparo": 0,
+        "leads_em_lote": 0,
+        "leads_pendentes_em_lote": 0,
+        "leads_em_atendimento": 0,
+        "leads_finalizados": 0,
+        "leads_matriculados": 0,
+        "lotes_abertos": 0,
+        "lotes_em_andamento": 0,
+        "lotes_concluidos": 0,
+        "retornos": 0,
+        "positivos": 0,
+        "negativos": 0,
+        "matriculas": 0,
+        "taxa_retorno": 0,
+        "taxa_matricula": 0,
+        "warning": "Tabelas operacionais ausentes. Execute /api/gestao/operacional/admin/create-tables para criar a estrutura.",
+        "missing_tables": missing,
+    }
 
 def _ref(table: str) -> str:
     return f"`{PROJECT_ID}.{DATASET}.{table}`"
@@ -80,10 +130,34 @@ def create_operational_tables() -> Dict[str, Any]:
 
 
 def get_dashboard() -> Tuple[Dict[str, Any], bool]:
+    missing = _missing_operational_tables()
+    if missing:
+        return _zero_operational_indicators(missing), False
+    active = _active_status_sql()
+    final = _final_status_sql()
+    available = _available_leads_predicate("l")
     data = _single(f"""
     SELECT
-      (SELECT COUNT(*) FROM {_ref(VIEW_LEADS_PRIORIZADOS)} l LEFT JOIN {_ref('op_lote_leads')} op ON l.sk_pessoa=op.sk_pessoa AND op.status_atendimento IN ('PENDENTE','EM_ATENDIMENTO','AC','EC','NT','IF','NI','COU') WHERE op.sk_pessoa IS NULL AND COALESCE(l.flag_matriculado,FALSE)=FALSE) AS leads_disponiveis,
-      (SELECT COUNT(*) FROM {_ref('op_lote_leads')} WHERE status_atendimento IN ('PENDENTE','EM_ATENDIMENTO','AC','EC','NT','IF','NI','COU')) AS leads_em_lote,
+      (SELECT COUNT(*) FROM {_ref(VIEW_LEADS_PRIORIZADOS)} l
+       WHERE {available}
+         AND NOT EXISTS (
+           SELECT 1 FROM {_ref('op_lote_leads')} op
+           WHERE op.sk_pessoa = l.sk_pessoa
+             AND op.status_atendimento IN ({active})
+         )) AS leads_disponiveis,
+      (SELECT COUNT(*) FROM {_ref(VIEW_LEADS_PRIORIZADOS)} l
+       WHERE COALESCE(l.flag_matriculado,FALSE)=FALSE
+         AND (COALESCE(l.nunca_disparado,FALSE)=FALSE OR TRIM(COALESCE(l.consultor_disparo,'')) != '' OR l.data_disparo IS NOT NULL)
+         AND NOT EXISTS (
+           SELECT 1 FROM {_ref('op_lote_leads')} op
+           WHERE op.sk_pessoa = l.sk_pessoa
+             AND op.status_atendimento IN ({active}, {final})
+         )) AS leads_redisparo,
+      (SELECT COUNT(*) FROM {_ref('op_lote_leads')} WHERE status_atendimento IN ({active})) AS leads_em_lote,
+      (SELECT COUNT(*) FROM {_ref('op_lote_leads')} WHERE status_atendimento='PENDENTE') AS leads_pendentes_em_lote,
+      (SELECT COUNT(*) FROM {_ref('op_lote_leads')} WHERE status_atendimento IN ('EM_ATENDIMENTO','AC','EC','NT','IF','NI','COU')) AS leads_em_atendimento,
+      (SELECT COUNT(*) FROM {_ref('op_lote_leads')} WHERE status_atendimento IN ({final})) AS leads_finalizados,
+      (SELECT COUNT(*) FROM {_ref('op_lote_leads')} WHERE matriculado OR status_atendimento='MAT') AS leads_matriculados,
       COUNTIF(status_lote='ABERTO') AS lotes_abertos,
       COUNTIF(status_lote='EM_ANDAMENTO') AS lotes_em_andamento,
       COUNTIF(status_lote='CONCLUIDO') AS lotes_concluidos,
@@ -97,9 +171,8 @@ def get_dashboard() -> Tuple[Dict[str, Any], bool]:
     """, operation="operacional_dashboard")
     return data, False
 
-
 def get_leads_disponiveis(filters: Mapping[str, Any], meta: Mapping[str, Any]) -> Tuple[Dict[str, Any], bool]:
-    where = ["op.sk_pessoa IS NULL", "COALESCE(l.flag_matriculado, FALSE) = FALSE"]
+    where = ["op.sk_pessoa IS NULL", _available_leads_predicate("l")]
     params: List[Any] = []
     _add_eq(where, params, "l", filters, ["campanha", "curso", "polo", "origem", "tipo_disparo", "nivel_prioridade"])
     params += [bigquery.ScalarQueryParameter("limit", "INT64", _int(meta.get("limit"), 100, 1, 5000)), bigquery.ScalarQueryParameter("offset", "INT64", _int(meta.get("offset"), 0, 0, 1_000_000))]
@@ -246,23 +319,7 @@ def liberar_proximos_leads(payload: Mapping[str, Any]) -> Tuple[Dict[str, Any], 
 
 
 def get_esteira_operacional() -> Tuple[Dict[str, Any], bool]:
-    data = _single(f"""
-    SELECT
-      (SELECT COUNT(*) FROM {_ref(VIEW_LEADS_PRIORIZADOS)} l
-       LEFT JOIN {_ref('op_lote_leads')} op ON l.sk_pessoa=op.sk_pessoa AND op.status_atendimento IN ('PENDENTE','EM_ATENDIMENTO','AC','EC','NT','IF','NI','COU')
-       WHERE op.sk_pessoa IS NULL AND COALESCE(l.flag_matriculado,FALSE)=FALSE) AS leads_disponiveis,
-      (SELECT COUNT(*) FROM {_ref('op_lote_leads')} WHERE status_atendimento='PENDENTE') AS leads_pendentes_em_lote,
-      (SELECT COUNT(*) FROM {_ref('op_lote_leads')} WHERE status_atendimento IN ('EM_ATENDIMENTO','AC','EC','NT','IF','NI','COU')) AS leads_em_atendimento,
-      (SELECT COUNT(*) FROM {_ref('op_lote_leads')} WHERE status_atendimento IN ('CONCLUIDO','MAT','CANCELADO')) AS leads_finalizados,
-      (SELECT COUNT(*) FROM {_ref('op_lote_leads')} WHERE matriculado OR status_atendimento='MAT') AS leads_matriculados,
-      COUNTIF(status_lote='ABERTO') AS lotes_abertos,
-      COUNTIF(status_lote='EM_ANDAMENTO') AS lotes_em_andamento,
-      COUNTIF(status_lote='CONCLUIDO') AS lotes_concluidos,
-      COALESCE(AVG(taxa_retorno),0) AS taxa_retorno,
-      COALESCE(AVG(taxa_matricula),0) AS taxa_matricula
-    FROM {_ref('op_lotes_disparo')}
-    """, operation="operacional_esteira")
-    return data, False
+    return get_dashboard()
 
 
 def get_fila_por_prioridade(filters: Mapping[str, Any], meta: Mapping[str, Any]) -> Tuple[Dict[str, Any], bool]:
