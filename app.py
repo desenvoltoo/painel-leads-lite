@@ -75,6 +75,13 @@ from services.gestao_operacional import (
     finish_lote as gestao_op_finish_lote,
     get_meus_leads as gestao_op_get_meus_leads,
     update_lead_status as gestao_op_update_lead_status,
+    liberar_proximos_leads as gestao_op_liberar_proximos_leads,
+    executar_regras_distribuicao as gestao_op_executar_regras_distribuicao,
+    get_esteira_operacional as gestao_op_get_esteira,
+    get_fila_por_prioridade as gestao_op_get_fila_prioridade,
+    criar_regra_distribuicao as gestao_op_criar_regra,
+    listar_regras_distribuicao as gestao_op_listar_regras,
+    ativar_desativar_regra as gestao_op_toggle_regra,
     parse_operational_request as gestao_op_parse_request,
 )
 
@@ -726,6 +733,63 @@ def create_app() -> Flask:
         except Exception as exc:
             return _gestao_error_response(exc, code="GESTAO_OPERACIONAL_DASHBOARD_ERROR", message="Não foi possível carregar o dashboard operacional.")
 
+
+    @app.post("/api/gestao/operacional/liberar-proximos-leads")
+    def api_gestao_operacional_liberar_proximos_leads():
+        try:
+            data, cached = gestao_op_liberar_proximos_leads(request.get_json(silent=True) or {})
+            return _gestao_success(data, {}, cached=cached), 201
+        except ValueError as exc:
+            return jsonify({"ok": False, "error": {"code": "GESTAO_OPERACIONAL_INVALID", "message": str(exc)}}), 400
+        except Exception as exc:
+            return _gestao_error_response(exc, code="GESTAO_OPERACIONAL_LIBERAR_ERROR", message="Não foi possível liberar os próximos leads.")
+
+    @app.post("/api/gestao/operacional/executar-regras-distribuicao")
+    def api_gestao_operacional_executar_regras():
+        try:
+            data, cached = gestao_op_executar_regras_distribuicao()
+            return _gestao_success(data, {}, cached=cached)
+        except Exception as exc:
+            return _gestao_error_response(exc, code="GESTAO_OPERACIONAL_REGRAS_EXEC_ERROR", message="Não foi possível executar as regras automáticas.")
+
+    @app.get("/api/gestao/operacional/esteira")
+    def api_gestao_operacional_esteira():
+        try:
+            data, cached = gestao_op_get_esteira()
+            return _gestao_success(data, {}, cached=cached)
+        except Exception as exc:
+            return _gestao_error_response(exc, code="GESTAO_OPERACIONAL_ESTEIRA_ERROR", message="Não foi possível carregar a esteira operacional.")
+
+    @app.get("/api/gestao/operacional/fila-prioridade")
+    def api_gestao_operacional_fila_prioridade():
+        return _gestao_operacional_endpoint(gestao_op_get_fila_prioridade)
+
+    @app.get("/api/gestao/operacional/regras-distribuicao")
+    def api_gestao_operacional_regras_listar():
+        try:
+            data, cached = gestao_op_listar_regras()
+            return _gestao_success(data, {}, cached=cached)
+        except Exception as exc:
+            return _gestao_error_response(exc, code="GESTAO_OPERACIONAL_REGRAS_ERROR", message="Não foi possível listar as regras.")
+
+    @app.post("/api/gestao/operacional/regras-distribuicao")
+    def api_gestao_operacional_regras_criar():
+        try:
+            data, cached = gestao_op_criar_regra(request.get_json(silent=True) or {})
+            return _gestao_success(data, {}, cached=cached), 201
+        except ValueError as exc:
+            return jsonify({"ok": False, "error": {"code": "GESTAO_OPERACIONAL_INVALID", "message": str(exc)}}), 400
+        except Exception as exc:
+            return _gestao_error_response(exc, code="GESTAO_OPERACIONAL_REGRAS_CREATE_ERROR", message="Não foi possível criar a regra.")
+
+    @app.patch("/api/gestao/operacional/regras-distribuicao/<regra_id>")
+    def api_gestao_operacional_regras_toggle(regra_id):
+        try:
+            data, cached = gestao_op_toggle_regra(regra_id, request.get_json(silent=True) or {})
+            return _gestao_success(data, {"regra_id": regra_id}, cached=cached)
+        except Exception as exc:
+            return _gestao_error_response(exc, code="GESTAO_OPERACIONAL_REGRAS_TOGGLE_ERROR", message="Não foi possível atualizar a regra.")
+
     @app.get("/api/gestao/operacional/leads-disponiveis")
     def api_gestao_operacional_leads_disponiveis():
         return _gestao_operacional_endpoint(gestao_op_get_leads_disponiveis)
@@ -763,7 +827,11 @@ def create_app() -> Flask:
     @app.post("/api/gestao/operacional/lotes/<lote_id>/finish")
     def api_gestao_operacional_lote_finish(lote_id):
         try:
-            data, cached = gestao_op_finish_lote(lote_id)
+            payload = request.get_json(silent=True) or {}
+            try:
+                data, cached = gestao_op_finish_lote(lote_id, payload)
+            except TypeError:
+                data, cached = gestao_op_finish_lote(lote_id)
             return _gestao_success(data, {"lote_id": lote_id}, cached=cached)
         except Exception as exc:
             return _gestao_error_response(exc, code="GESTAO_OPERACIONAL_FINISH_ERROR", message="Não foi possível finalizar o lote.")

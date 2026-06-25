@@ -76,3 +76,27 @@ CREATE TABLE IF NOT EXISTS `painel-universidade.modelo_estrela.op_bigquery_sync`
   created_at TIMESTAMP,
   synced_at TIMESTAMP
 );
+
+CREATE TABLE IF NOT EXISTS `painel-universidade.modelo_estrela.op_regras_distribuicao` (
+  regra_id STRING NOT NULL,
+  nome_regra STRING,
+  tipo_disparo STRING,
+  consultor_disparo STRING,
+  campanha STRING,
+  curso STRING,
+  polo STRING,
+  origem STRING,
+  nivel_prioridade STRING,
+  quantidade_por_lote INT64,
+  limite_lotes_ativos INT64,
+  ativo BOOL,
+  created_at TIMESTAMP,
+  updated_at TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS `painel-universidade.modelo_estrela.op_config_operacional` (
+  chave STRING NOT NULL,
+  valor STRING,
+  descricao STRING,
+  updated_at TIMESTAMP
+);
