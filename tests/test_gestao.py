@@ -42,6 +42,80 @@ def test_gestao_api_requires_auth(client):
     assert resp.get_json()["ok"] is False
 
 
+def test_auth_login_accepts_werkzeug_hash_without_rehashing(client, monkeypatch):
+    from werkzeug.security import generate_password_hash
+
+    rehashed = []
+
+    def fake_buscar_usuario_login(email):
+        return {
+            "usuario_id": "user-1",
+            "nome": "Usuário Teste",
+            "email": email,
+            "password_hash": generate_password_hash("senha-correta"),
+            "ativo": True,
+            "status_usuario": "ATIVO",
+            "perfil_id": "ADMIN",
+        }
+
+    monkeypatch.setattr("app.gestao_op_buscar_usuario_login", fake_buscar_usuario_login)
+    monkeypatch.setattr("app.gestao_op_registrar_login_usuario", lambda *args, **kwargs: None)
+    monkeypatch.setattr("app.gestao_op_atualizar_password_hash_usuario", lambda *args, **kwargs: rehashed.append(args))
+
+    resp = client.post("/api/auth/login", json={"email": "user@example.com", "password": "senha-correta"})
+
+    assert resp.status_code == 200
+    assert resp.get_json()["ok"] is True
+    assert rehashed == []
+
+
+def test_auth_login_rehashes_matching_plaintext_password(client, monkeypatch):
+    rehashed = []
+
+    def fake_buscar_usuario_login(email):
+        return {
+            "usuario_id": "user-2",
+            "nome": "Usuário Legado",
+            "email": email,
+            "password_hash": "senha-legada",
+            "ativo": True,
+            "status_usuario": "ATIVO",
+            "perfil_id": "ADMIN",
+        }
+
+    monkeypatch.setattr("app.gestao_op_buscar_usuario_login", fake_buscar_usuario_login)
+    monkeypatch.setattr("app.gestao_op_registrar_login_usuario", lambda *args, **kwargs: None)
+    monkeypatch.setattr("app.gestao_op_atualizar_password_hash_usuario", lambda *args: rehashed.append(args))
+
+    resp = client.post("/api/auth/login", json={"email": "legacy@example.com", "password": "senha-legada"})
+
+    assert resp.status_code == 200
+    assert resp.get_json()["ok"] is True
+    assert rehashed and rehashed[0][0] == "user-2"
+    assert rehashed[0][1].startswith(("pbkdf2:", "scrypt:"))
+
+
+def test_auth_login_rejects_inactive_user(client, monkeypatch):
+    from werkzeug.security import generate_password_hash
+
+    def fake_buscar_usuario_login(email):
+        return {
+            "usuario_id": "user-3",
+            "email": email,
+            "password_hash": generate_password_hash("senha-correta"),
+            "ativo": True,
+            "status_usuario": "INATIVO",
+            "perfil_id": "ADMIN",
+        }
+
+    monkeypatch.setattr("app.gestao_op_buscar_usuario_login", fake_buscar_usuario_login)
+
+    resp = client.post("/api/auth/login", json={"email": "inactive@example.com", "password": "senha-correta"})
+
+    assert resp.status_code == 401
+    assert "Verifique se o usuário está ativo" in resp.get_json()["error"]
+
+
 def test_gestao_page_opens_authenticated(client):
     login(client)
     resp = client.get("/gestao")
