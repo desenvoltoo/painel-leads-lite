@@ -755,7 +755,7 @@ def create_app() -> Flask:
     def api_gestao_operacional_preview_proximo_lote():
         try:
             data, cached = gestao_op_preview_proximo_lote(request.args)
-            return _gestao_success(data, dict(request.args), cached=cached)
+            return jsonify({"ok": True, **data})
         except ValueError as exc:
             return jsonify({"ok": False, "error": {"code": "GESTAO_OPERACIONAL_INVALID", "message": str(exc)}}), 400
         except Exception as exc:
@@ -781,7 +781,7 @@ def create_app() -> Flask:
             if not file:
                 return jsonify({"ok": False, "error": {"code": "GESTAO_OPERACIONAL_INVALID", "message": "Arquivo é obrigatório."}}), 400
             data, cached = gestao_op_importar_lote_disparado(file, request.form.get("lote_id", ""), request.form.get("usuario", ""))
-            return _gestao_success(data, {}, cached=cached)
+            return jsonify({"ok": True, **data})
         except ValueError as exc:
             return jsonify({"ok": False, "error": {"code": "GESTAO_OPERACIONAL_INVALID", "message": str(exc)}}), 400
         except Exception as exc:
@@ -794,7 +794,7 @@ def create_app() -> Flask:
             if not file:
                 return jsonify({"ok": False, "error": {"code": "GESTAO_OPERACIONAL_INVALID", "message": "Arquivo é obrigatório. Use /api/upload para a carga oficial."}}), 400
             data, cached = gestao_op_importar_novos_leads(file, request.form)
-            return _gestao_success(data, {}, cached=cached)
+            return jsonify({"ok": True, **data})
         except ValueError as exc:
             return jsonify({"ok": False, "error": {"code": "GESTAO_OPERACIONAL_INVALID", "message": str(exc)}}), 400
         except Exception as exc:

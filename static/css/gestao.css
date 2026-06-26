@@ -163,3 +163,17 @@ button, a, input, select { min-height: 40px; }
 .gestao-module-content { min-width: 0; }
 .op-quick-actions { display: flex; flex-wrap: wrap; gap: .55rem; }
 @media (max-width: 991.98px) { .gestao-operacional-layout { display: block; } .gestao-module-sidebar { margin-bottom: 1rem; position: static; } }
+
+/* Gestão Operacional simplificada */
+.global-lote { min-width: 230px; width: auto; }
+.gestao-module-content .gestao-module-page { display: none; }
+.gestao-module-content .gestao-module-page.active { display: block; }
+.gestao-module-sidebar .nav-link.active { background: var(--go-blue); color: #fff; }
+.op-flow { display: grid; gap: .6rem; grid-template-columns: repeat(6, minmax(120px, 1fr)); margin: 1rem 0; overflow-x: auto; }
+.op-flow span { align-items: center; background: #eff6ff; border: 1px solid #bfdbfe; border-radius: 14px; color: #1e40af; display: flex; font-size: .86rem; font-weight: 850; justify-content: center; min-height: 70px; padding: .75rem; position: relative; text-align: center; }
+.op-flow span:not(:last-child)::after { content: "→"; color: #64748b; position: absolute; right: -.55rem; z-index: 1; }
+.gestao-module-page .panel-heading { border-bottom: 1px solid var(--go-border); padding-bottom: .75rem; }
+.gestao-module-page code { color: #1d4ed8; }
+.is-loading { cursor: wait; opacity: .7; }
+@media (max-width: 1200px) { .op-flow { grid-template-columns: repeat(3, minmax(140px, 1fr)); } }
+@media (max-width: 767.98px) { .op-flow { grid-template-columns: 1fr; } .op-flow span::after { display: none; } .global-lote { width: 100%; } }

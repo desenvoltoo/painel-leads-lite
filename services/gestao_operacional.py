@@ -19,7 +19,8 @@ except Exception:  # pragma: no cover
 
 PROJECT_ID = os.getenv("BIGQUERY_PROJECT_ID") or os.getenv("GCP_PROJECT_ID") or bq.GCP_PROJECT_ID or "painel-universidade"
 DATASET = os.getenv("BIGQUERY_DATASET") or os.getenv("BQ_DATASET") or bq.BQ_DATASET or "modelo_estrela"
-VIEW_LEADS_PRIORIZADOS = "vw_leads_priorizados"
+VIEW_LEADS_PRIORIZADOS = "vw_op_leads_disponiveis_novos"
+FALLBACK_VIEW_LEADS_PRIORIZADOS = "vw_leads_priorizados"
 FINAL_STATUS = ("CONCLUIDO", "MAT", "CANCELADO")
 ACTIVE_STATUS = ("PENDENTE", "EM_ATENDIMENTO", "AC", "EC", "NT", "IF", "NI", "COU")
 ACTIVE_STATUS_EXCLUDED = FINAL_STATUS
@@ -91,6 +92,22 @@ def _zero_operational_indicators(missing: List[str]) -> Dict[str, Any]:
 def _ref(table: str) -> str:
     return f"`{PROJECT_ID}.{DATASET}.{table}`"
 
+def _lead_source_ref() -> str:
+    """Prefer the operational availability view and fall back to prioritized leads."""
+    try:
+        row = _single(
+            f"""SELECT COUNT(*) AS qtd
+            FROM `{PROJECT_ID}.{DATASET}.INFORMATION_SCHEMA.TABLES`
+            WHERE table_name=@view_name""",
+            [bigquery.ScalarQueryParameter("view_name", "STRING", VIEW_LEADS_PRIORIZADOS)],
+            "operacional_check_available_view",
+        )
+        if int(row.get("qtd") or 0) > 0:
+            return _ref(VIEW_LEADS_PRIORIZADOS)
+    except Exception:
+        pass
+    return _ref(FALLBACK_VIEW_LEADS_PRIORIZADOS)
+
 
 def _run(sql: str, params: Optional[List[Any]] = None, operation: str = "gestao_operacional") -> List[Dict[str, Any]]:
     return bq._rows_to_json_safe(bq._run_gestao_query(sql, params=params or [], operation_name=operation))
@@ -142,14 +159,14 @@ def get_dashboard() -> Tuple[Dict[str, Any], bool]:
     available = _available_leads_predicate("l")
     data = _single(f"""
     SELECT
-      (SELECT COUNT(*) FROM {_ref(VIEW_LEADS_PRIORIZADOS)} l
+      (SELECT COUNT(*) FROM {_lead_source_ref()} l
        WHERE {available}
          AND NOT EXISTS (
            SELECT 1 FROM {_ref('op_lote_leads')} op
            WHERE op.sk_pessoa = l.sk_pessoa
              AND op.status_atendimento IN ({active})
          )) AS leads_disponiveis,
-      (SELECT COUNT(*) FROM {_ref(VIEW_LEADS_PRIORIZADOS)} l
+      (SELECT COUNT(*) FROM {_lead_source_ref()} l
        WHERE COALESCE(l.flag_matriculado,FALSE)=FALSE
          AND (COALESCE(l.nunca_disparado,FALSE)=FALSE OR TRIM(COALESCE(l.consultor_disparo,'')) != '' OR l.data_disparo IS NOT NULL)
          AND NOT EXISTS (
@@ -182,7 +199,7 @@ def get_leads_disponiveis(filters: Mapping[str, Any], meta: Mapping[str, Any]) -
     params += [bigquery.ScalarQueryParameter("limit", "INT64", _int(meta.get("limit"), 100, 1, 5000)), bigquery.ScalarQueryParameter("offset", "INT64", _int(meta.get("offset"), 0, 0, 1_000_000))]
     sql = f"""
     SELECT l.*
-    FROM {_ref(VIEW_LEADS_PRIORIZADOS)} l
+    FROM {_lead_source_ref()} l
     LEFT JOIN {_ref('op_lote_leads')} op
       ON l.sk_pessoa = op.sk_pessoa
      AND op.status_atendimento IN ('PENDENTE','EM_ATENDIMENTO','AC','EC','NT','IF','NI','COU')
@@ -429,7 +446,15 @@ def preview_proximo_lote(filters: Mapping[str, Any]) -> Tuple[Dict[str, Any], bo
     quantidade = _int(filters.get("quantidade") or filters.get("limit"), 100, 1, 5000)
     clean = {k: v for k, v in dict(filters or {}).items() if k in {"campanha", "curso", "polo", "origem", "nivel_prioridade"}}
     data, cached = get_leads_disponiveis(clean, {"limit": quantidade, "offset": _int(filters.get("offset"), 0)})
-    return {"items": data.get("items", []), "count": data.get("count", 0), "ordenacao": ["data_inscricao DESC", "score_prioridade DESC", "nunca_disparado DESC", "dias_sem_acao DESC", "sk_pessoa DESC"]}, cached
+    leads = data.get("items", [])
+    return {
+        "total_disponivel": len(leads),
+        "quantidade_preview": len(leads),
+        "leads": leads,
+        "items": leads,
+        "count": len(leads),
+        "ordenacao": ["data_inscricao DESC", "score_prioridade DESC", "nunca_disparado DESC", "dias_sem_acao DESC", "sk_pessoa DESC"],
+    }, cached
 
 
 def _rows_to_csv_b64(rows: List[Dict[str, Any]]) -> str:
@@ -440,6 +465,21 @@ def _rows_to_csv_b64(rows: List[Dict[str, Any]]) -> str:
         writer.writerow({k: row.get(k) for k in EXPORT_COLUMNS_OPERACIONAL})
     return base64.b64encode(out.getvalue().encode("utf-8-sig")).decode("ascii")
 
+def _rows_to_xlsx_b64(rows: List[Dict[str, Any]]) -> str:
+    try:
+        from openpyxl import Workbook
+    except Exception as exc:
+        raise ValueError("Exportação XLSX não está disponível neste ambiente. Selecione CSV.") from exc
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "lote"
+    ws.append(EXPORT_COLUMNS_OPERACIONAL)
+    for row in rows:
+        ws.append([row.get(k) for k in EXPORT_COLUMNS_OPERACIONAL])
+    out = io.BytesIO()
+    wb.save(out)
+    return base64.b64encode(out.getvalue()).decode("ascii")
+
 
 def exportar_proximo_lote(payload: Mapping[str, Any]) -> Tuple[Dict[str, Any], bool]:
     lote, cached = criar_lote(payload)
@@ -449,7 +489,12 @@ def exportar_proximo_lote(payload: Mapping[str, Any]) -> Tuple[Dict[str, Any], b
         enriched = {**lead, "lote_id": lote["lote_id"], "status_atendimento": lead.get("status_atendimento") or "PENDENTE"}
         rows.append(enriched)
     _evento(lote["lote_id"], None, None, "LOTE_EXPORTADO", None, "PENDENTE", "Lote criado e exportado", payload.get("criado_por"))
-    return {**lote, "filename": f"lote_{lote['lote_id']}.csv", "content_type": "text/csv; charset=utf-8", "base64": _rows_to_csv_b64(rows), "items": rows}, cached
+    formato = str(payload.get("formato") or "csv").strip().lower()
+    data_tag = __import__("datetime").datetime.utcnow().strftime("%Y%m%d")
+    tipo = str(payload.get("tipo_disparo") or "LOTE").strip().upper()
+    if formato == "xlsx":
+        return {**lote, "filename": f"lote_{lote['lote_id']}_{tipo}_{data_tag}.xlsx", "content_type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "base64": _rows_to_xlsx_b64(rows), "items": rows}, cached
+    return {**lote, "filename": f"lote_{lote['lote_id']}_{tipo}_{data_tag}.csv", "content_type": "text/csv; charset=utf-8", "base64": _rows_to_csv_b64(rows), "items": rows}, cached
 
 
 def _read_upload_rows(file: Any) -> List[Dict[str, Any]]:
@@ -469,26 +514,48 @@ def _read_upload_rows(file: Any) -> List[Dict[str, Any]]:
     return list(csv.DictReader(io.StringIO(text), dialect=dialect))
 
 
+def _truthy(value: Any) -> bool:
+    return str(value or "").strip().lower() in {"1", "true", "sim", "s", "yes", "y", "mat", "matriculado"}
+
 def importar_lote_disparado(file: Any, lote_id: str, usuario: str = "") -> Tuple[Dict[str, Any], bool]:
     if not lote_id:
         raise ValueError("lote_id é obrigatório.")
     rows = _read_upload_rows(file)
     updated = rejected = not_found = errors = 0
-    for row in rows:
+    error_list: List[str] = []
+    lote = _single(f"SELECT lote_id FROM {_ref('op_lotes_disparo')} WHERE lote_id=@lote_id", [bigquery.ScalarQueryParameter("lote_id", "STRING", lote_id)], "operacional_import_lote_exists")
+    if not lote:
+        raise ValueError("Lote não encontrado.")
+    for idx, row in enumerate(rows, start=2):
         try:
-            sk = row.get("sk_pessoa") or row.get("SK_PESSOA")
-            status = str(row.get("status_atendimento") or row.get("status") or "").strip().upper()
-            if not sk or status not in STATUS_ATENDIMENTO_MAP:
-                rejected += 1; continue
-            update_lead_status(int(float(sk)), {"lote_id": lote_id, "status_atendimento": status, "observacao": row.get("observacao") or "", "usuario": usuario})
-            _evento(lote_id, int(float(sk)), row.get("cpf"), "LEAD_STATUS_IMPORTADO", None, status, "Status importado por arquivo", usuario)
+            normalized = {str(k).strip().lower(): v for k, v in row.items()}
+            status = str(normalized.get("status_atendimento") or normalized.get("status") or "").strip().upper()
+            if _truthy(normalized.get("matriculado")):
+                status = "MAT"
+            if status not in STATUS_ATENDIMENTO_MAP:
+                rejected += 1; error_list.append(f"Linha {idx}: status inválido."); continue
+            sk = normalized.get("sk_pessoa")
+            cpf = str(normalized.get("cpf") or "").strip()
+            celular = str(normalized.get("celular") or "").strip()
+            if sk:
+                found = _single(f"SELECT sk_pessoa,cpf,status_atendimento FROM {_ref('op_lote_leads')} WHERE lote_id=@lote_id AND sk_pessoa=@sk_pessoa", [bigquery.ScalarQueryParameter("lote_id", "STRING", lote_id), bigquery.ScalarQueryParameter("sk_pessoa", "INT64", int(float(sk)))], "operacional_import_find_sk")
+            elif cpf:
+                found = _single(f"SELECT sk_pessoa,cpf,status_atendimento FROM {_ref('op_lote_leads')} WHERE lote_id=@lote_id AND REGEXP_REPLACE(COALESCE(cpf,''), r'[^0-9]', '')=REGEXP_REPLACE(@cpf, r'[^0-9]', '')", [bigquery.ScalarQueryParameter("lote_id", "STRING", lote_id), bigquery.ScalarQueryParameter("cpf", "STRING", cpf)], "operacional_import_find_cpf")
+            elif celular:
+                found = _single(f"SELECT sk_pessoa,cpf,status_atendimento FROM {_ref('op_lote_leads')} WHERE lote_id=@lote_id AND REGEXP_REPLACE(COALESCE(celular,''), r'[^0-9]', '')=REGEXP_REPLACE(@celular, r'[^0-9]', '')", [bigquery.ScalarQueryParameter("lote_id", "STRING", lote_id), bigquery.ScalarQueryParameter("celular", "STRING", celular)], "operacional_import_find_celular")
+            else:
+                rejected += 1; error_list.append(f"Linha {idx}: informe sk_pessoa, cpf ou celular."); continue
+            if not found:
+                not_found += 1; continue
+            update_lead_status(int(found["sk_pessoa"]), {"lote_id": lote_id, "status_atendimento": status, "observacao": normalized.get("observacao") or "", "usuario": usuario})
             updated += 1
-        except Exception:
-            errors += 1
+        except Exception as exc:
+            errors += 1; error_list.append(f"Linha {idx}: {exc}")
     recalcular_metricas_lote(lote_id)
     _run(f"INSERT INTO {_ref('op_bigquery_sync')} (sync_id,lote_id,status_sync,tentativas,linhas_processadas,erro,created_at,synced_at) VALUES (@sync_id,@lote_id,'CONCLUIDO',1,@total,NULL,CURRENT_TIMESTAMP(),CURRENT_TIMESTAMP())", [bigquery.ScalarQueryParameter("sync_id", "STRING", str(uuid.uuid4())), bigquery.ScalarQueryParameter("lote_id", "STRING", lote_id), bigquery.ScalarQueryParameter("total", "INT64", updated)], "operacional_import_sync")
+    _evento(lote_id, None, None, "LOTE_RESULTADO_IMPORTADO", None, None, f"Resultado importado: {updated} atualizados", usuario)
     invalidate_gestao_cache()
-    return {"linhas_lidas": len(rows), "atualizados": updated, "rejeitados": rejected, "nao_encontrados": not_found, "erros": errors}, False
+    return {"lote_id": lote_id, "linhas_lidas": len(rows), "linhas_atualizadas": updated, "linhas_rejeitadas": rejected, "nao_encontrados": not_found, "erros": error_list}, False
 
 
 def importar_novos_leads(file: Any, metadata: Mapping[str, Any]) -> Tuple[Dict[str, Any], bool]:
@@ -501,7 +568,7 @@ def importar_novos_leads(file: Any, metadata: Mapping[str, Any]) -> Tuple[Dict[s
         missing.append("unidade/polo")
     if missing:
         raise ValueError("Colunas mínimas ausentes: " + ", ".join(missing))
-    return {"linhas_lidas": len(rows), "linhas_validas": len(rows), "mensagem": "Arquivo validado. Use POST /api/upload para a carga oficial com dt_upload do backend.", "metadata": dict(metadata or {})}, False
+    return {"linhas_lidas": len(rows), "linhas_validas": len(rows), "linhas_rejeitadas": 0, "mensagem": "Arquivo validado. Use POST /api/upload para a carga oficial com dt_upload preenchido pelo backend.", "erros": [], "metadata": dict(metadata or {})}, False
 
 
 def get_fila_leads(filters: Mapping[str, Any]) -> Tuple[Dict[str, Any], bool]:
