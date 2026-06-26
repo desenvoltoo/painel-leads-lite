@@ -182,3 +182,18 @@ button, a, input, select { min-height: 40px; }
 .status-em_andamento { background: #fef3c7; color: #92400e; }
 .status-concluido { background: #dcfce7; color: #166534; }
 .status-cancelado { background: #fee2e2; color: #991b1b; }
+
+/* Final UI/UX cleanup for management panel */
+.gestao-module-sidebar { background: rgba(255,255,255,.96); box-shadow: var(--go-shadow); }
+.gestao-module-sidebar .nav-link { align-items: center; color: #334155; display: flex; font-weight: 800; gap: .65rem; min-height: 46px; padding: .55rem .7rem; }
+.gestao-module-sidebar .nav-link span { align-items: center; background: #e2e8f0; border-radius: 999px; color: #334155; display: inline-flex; font-size: .75rem; height: 1.55rem; justify-content: center; min-width: 1.55rem; }
+.gestao-module-sidebar .nav-link.active span { background: rgba(255,255,255,.22); color: #fff; }
+.row-actions { align-items: center; display: flex; flex-wrap: wrap; gap: .35rem; min-width: 220px; }
+.row-actions .btn { min-height: 32px; white-space: nowrap; }
+.block-loading { position: relative; }
+.block-loading-active::after { align-items: center; background: rgba(248,250,252,.78); border: 1px dashed var(--go-border); border-radius: var(--go-radius-sm); color: var(--go-muted); content: "Carregando..."; display: flex; font-weight: 800; inset: 0; justify-content: center; min-height: 86px; position: absolute; z-index: 5; }
+.toast-region .alert { border: 0; border-left: 5px solid currentColor; border-radius: 16px; font-weight: 700; }
+.status-importado { background: #cffafe; color: #155e75; }
+.status-aberto, .status-em_andamento, .status-importado, .status-concluido, .status-cancelado { text-transform: uppercase; }
+.modal-content { border: 0; border-radius: 22px; box-shadow: var(--go-shadow); }
+@media (min-width: 992px) { .gestao-module-sidebar { max-height: calc(100vh - 124px); overflow: auto; } }
