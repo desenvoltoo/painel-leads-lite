@@ -117,6 +117,19 @@ logger = logging.getLogger(__name__)
  
 
 
+def validar_senha(password_hash, senha_digitada):
+    if not password_hash:
+        return False
+
+    password_hash = str(password_hash).strip()
+    senha_digitada = str(senha_digitada).strip()
+
+    if password_hash.startswith(("pbkdf2:", "scrypt:")):
+        return check_password_hash(password_hash, senha_digitada)
+
+    return password_hash == senha_digitada
+
+
 ALLOWED_UPLOAD_EXTENSIONS = {".csv", ".xlsx", ".xls"}
 
 
@@ -1396,37 +1409,43 @@ def create_app() -> Flask:
         try:
             user = gestao_op_buscar_usuario_login(email)
         except Exception:
+            logger.exception("auth_login_lookup_failed email=%s", email)
             user = None
-        user_hash = (user or {}).get("password_hash") or users.get(email)
 
-        def _check_password(stored_password: str, raw_password: str) -> bool:
-            if not stored_password:
-                return False
-            if stored_password.startswith(("pbkdf2:", "scrypt:")):
-                return check_password_hash(stored_password, raw_password)
-            return stored_password == raw_password
-
+        logger.info("auth_login_user_lookup email=%s found=%s", email, bool(user))
+        user_hash = (user or {}).get("password_hash")
         active = bool((user or {}).get("ativo", True)) and str((user or {}).get("status_usuario") or "ATIVO").upper() == "ATIVO"
-        senha_ok = _check_password(str(user_hash or ""), password)
+        logger.info(
+            "auth_login_user_status email=%s ativo=%s status_usuario=%s",
+            email,
+            bool((user or {}).get("ativo", True)),
+            str((user or {}).get("status_usuario") or "ATIVO").upper(),
+        )
+        validation_type = "HASH" if str(user_hash or "").strip().startswith(("pbkdf2:", "scrypt:")) else "TEXTO_PURO"
+        logger.info("auth_login_password_validation_type email=%s tipo=%s", email, validation_type)
+        senha_ok = validar_senha(user_hash, password)
         if not user_hash or not active or not senha_ok:
             logger.warning("auth_login_failed email=%s reason=%s", email, "inactive" if user_hash and not active else "invalid_credentials")
             return jsonify({"ok": False, "error": "E-mail ou senha inválidos. Verifique se o usuário está ativo e tente novamente."}), 401
 
-        if user and user_hash and not str(user_hash).startswith(("pbkdf2:", "scrypt:")):
+        if user and user_hash and validation_type == "TEXTO_PURO":
             try:
                 gestao_op_atualizar_password_hash_usuario(str(user.get("usuario_id") or ""), generate_password_hash(password))
             except Exception:
                 logger.exception("auth_login_password_rehash_failed user=%s", email)
 
-        perfil = str((user or {}).get("nome_perfil") or (user or {}).get("codigo_perfil") or (user or {}).get("perfil_id") or ("ADMIN" if email in users else "LEITURA")).upper()
+        perfil = str((user or {}).get("nome_perfil") or (user or {}).get("codigo_perfil") or (user or {}).get("perfil_id") or "LEITURA").upper()
         permissions = sorted(PROFILE_PERMISSIONS.get(perfil, PROFILE_PERMISSIONS["LEITURA"]))
         session.clear()
         session.permanent = True
         session["usuario_id"] = (user or {}).get("usuario_id") or email
+        session["usuario_email"] = (user or {}).get("email") or email
+        session["usuario_nome"] = (user or {}).get("nome") or email
         session["nome"] = (user or {}).get("nome") or email
         session["email"] = email
         session["username"] = email
         session["perfil_id"] = (user or {}).get("perfil_id") or perfil
+        session["logged_in"] = True
         session["nome_perfil"] = perfil
         session["perfil"] = perfil
         session["permissions"] = permissions
