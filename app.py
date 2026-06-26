@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Dict, Any, Tuple
  
 from flask import Flask, render_template, request, jsonify, send_file, redirect, url_for, make_response, g, session, Response, stream_with_context
-from werkzeug.security import check_password_hash
+from werkzeug.security import check_password_hash, generate_password_hash
 from google.api_core.exceptions import Forbidden, NotFound
 from startup_diagnostics import build_error_payload, env_bool, env_int
  
@@ -92,6 +92,17 @@ from services.gestao_operacional import (
     get_operacao_logs as gestao_op_get_logs,
     cancelar_lote as gestao_op_cancelar_lote,
     marcar_lote_disparado as gestao_op_marcar_lote_disparado,
+    importar_retorno_lote as gestao_op_importar_retorno_lote,
+    buscar_leads as gestao_op_buscar_leads,
+    get_lead_timeline as gestao_op_get_lead_timeline,
+    get_lead_lotes as gestao_op_get_lead_lotes,
+    get_lead_eventos as gestao_op_get_lead_eventos,
+    listar_usuarios as gestao_op_listar_usuarios,
+    salvar_usuario as gestao_op_salvar_usuario,
+    alterar_status_usuario as gestao_op_alterar_status_usuario,
+    resetar_senha_usuario as gestao_op_resetar_senha_usuario,
+    listar_perfis as gestao_op_listar_perfis,
+    auditoria_usuario as gestao_op_auditoria_usuario,
 )
 
 logger = logging.getLogger(__name__)
@@ -512,6 +523,17 @@ def create_app() -> Flask:
     @app.get("/gestao")
     def gestao():
         # A página é carregada rapidamente; os dados vêm dos endpoints JSON protegidos.
+        return render_template(
+            "gestao.html",
+            asset_version=asset_version,
+            ui_version=ui_version,
+            current_user=getattr(g, "current_user", None),
+            gestao_data=None,
+            gestao_error=None,
+        )
+
+    @app.get("/gestao/usuarios")
+    def gestao_usuarios_page():
         return render_template(
             "gestao.html",
             asset_version=asset_version,
@@ -990,6 +1012,134 @@ def create_app() -> Flask:
             return jsonify({"ok": False, "error": {"code": "GESTAO_OPERACIONAL_INVALID", "message": str(exc)}}), 400
         except Exception as exc:
             return _gestao_error_response(exc, code="GESTAO_OPERACIONAL_STATUS_ERROR", message="Não foi possível atualizar o status do lead.")
+
+
+    @app.post("/api/gestao/lotes/<lote_id>/importar-retorno")
+    def api_gestao_lote_importar_retorno(lote_id):
+        try:
+            file = request.files.get("file")
+            if not file or not _validate_upload_filename(file.filename):
+                return jsonify({"success": False, "ok": False, "error": {"message": "Envie um arquivo CSV/XLSX válido."}}), 400
+            usuario = request.form.get("usuario") or getattr(g, "current_user", None) or "sistema"
+            data, _cached = gestao_op_importar_retorno_lote(file, lote_id, usuario)
+            return jsonify({**data, "ok": True})
+        except ValueError as exc:
+            return jsonify({"success": False, "ok": False, "error": {"message": str(exc)}}), 400
+        except Exception as exc:
+            return _gestao_error_response(exc, code="GESTAO_RETORNO_IMPORT_ERROR", message="Não foi possível importar o retorno do lote.")
+
+    @app.get("/api/gestao/leads/buscar")
+    def api_gestao_leads_buscar():
+        try:
+            data, cached = gestao_op_buscar_leads(request.args.get("q", ""), int(request.args.get("limit", 20)))
+            return _gestao_success(data, {"q": request.args.get("q", "")}, cached=cached)
+        except Exception as exc:
+            return _gestao_error_response(exc, code="GESTAO_LEADS_BUSCAR_ERROR", message="Não foi possível buscar leads.")
+
+    @app.get("/api/gestao/leads/<sk_pessoa>/timeline")
+    def api_gestao_lead_timeline(sk_pessoa):
+        try:
+            data, cached = gestao_op_get_lead_timeline(sk_pessoa)
+            return _gestao_success(data, {"sk_pessoa": sk_pessoa}, cached=cached)
+        except Exception as exc:
+            return _gestao_error_response(exc, code="GESTAO_LEAD_TIMELINE_ERROR", message="Não foi possível carregar a timeline.")
+
+    @app.get("/api/gestao/leads/<sk_pessoa>/lotes")
+    def api_gestao_lead_lotes(sk_pessoa):
+        try:
+            data, cached = gestao_op_get_lead_lotes(sk_pessoa)
+            return _gestao_success(data, {"sk_pessoa": sk_pessoa}, cached=cached)
+        except Exception as exc:
+            return _gestao_error_response(exc, code="GESTAO_LEAD_LOTES_ERROR", message="Não foi possível carregar os lotes do lead.")
+
+    @app.get("/api/gestao/leads/<sk_pessoa>/eventos")
+    def api_gestao_lead_eventos(sk_pessoa):
+        try:
+            data, cached = gestao_op_get_lead_eventos(sk_pessoa)
+            return _gestao_success(data, {"sk_pessoa": sk_pessoa}, cached=cached)
+        except Exception as exc:
+            return _gestao_error_response(exc, code="GESTAO_LEAD_EVENTOS_ERROR", message="Não foi possível carregar eventos técnicos.")
+
+    def _is_admin_user() -> bool:
+        return str(getattr(g, "current_user", "") or "").lower() in {"matheus", "admin"} or str(session.get("perfil") or "").upper() == "ADMIN"
+
+    def _require_admin_json():
+        if not _is_admin_user():
+            return jsonify({"success": False, "message": "Apenas ADMIN pode gerenciar usuários.", "data": None}), 403
+        return None
+
+    def _hash_password(password: str) -> str:
+        try:
+            import bcrypt
+            return bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
+        except Exception:
+            return generate_password_hash(password)
+
+    @app.get("/api/gestao/usuarios")
+    def api_gestao_usuarios_listar():
+        denied = _require_admin_json()
+        if denied: return denied
+        try:
+            data, _ = gestao_op_listar_usuarios(); return jsonify(data)
+        except Exception as exc:
+            return _gestao_error_response(exc, code="USUARIOS_LISTAR_ERROR", message="Não foi possível listar usuários.")
+
+    @app.post("/api/gestao/usuarios")
+    def api_gestao_usuarios_criar():
+        denied = _require_admin_json()
+        if denied: return denied
+        try:
+            payload = request.get_json(silent=True) or {}
+            payload["password_hash"] = _hash_password(str(payload.get("senha") or payload.get("password") or uuid.uuid4().hex[:10]))
+            data, _ = gestao_op_salvar_usuario(payload, getattr(g, "current_user", None) or "sistema")
+            return jsonify(data), 201
+        except ValueError as exc:
+            return jsonify({"success": False, "message": str(exc), "data": None}), 400
+        except Exception as exc:
+            return _gestao_error_response(exc, code="USUARIOS_CRIAR_ERROR", message="Não foi possível criar usuário.")
+
+    @app.put("/api/gestao/usuarios/<usuario_id>")
+    def api_gestao_usuarios_editar(usuario_id):
+        denied = _require_admin_json()
+        if denied: return denied
+        try:
+            data, _ = gestao_op_salvar_usuario(request.get_json(silent=True) or {}, getattr(g, "current_user", None) or "sistema", usuario_id)
+            return jsonify(data)
+        except ValueError as exc:
+            return jsonify({"success": False, "message": str(exc), "data": None}), 400
+        except Exception as exc:
+            return _gestao_error_response(exc, code="USUARIOS_EDITAR_ERROR", message="Não foi possível editar usuário.")
+
+    @app.post("/api/gestao/usuarios/<usuario_id>/ativar")
+    def api_gestao_usuarios_ativar(usuario_id):
+        denied = _require_admin_json()
+        if denied: return denied
+        data, _ = gestao_op_alterar_status_usuario(usuario_id, True, getattr(g, "current_user", None) or "sistema"); return jsonify(data)
+
+    @app.post("/api/gestao/usuarios/<usuario_id>/desativar")
+    def api_gestao_usuarios_desativar(usuario_id):
+        denied = _require_admin_json()
+        if denied: return denied
+        data, _ = gestao_op_alterar_status_usuario(usuario_id, False, getattr(g, "current_user", None) or "sistema"); return jsonify(data)
+
+    @app.post("/api/gestao/usuarios/<usuario_id>/resetar-senha")
+    def api_gestao_usuarios_resetar(usuario_id):
+        denied = _require_admin_json()
+        if denied: return denied
+        payload=request.get_json(silent=True) or {}; senha=str(payload.get("senha") or payload.get("password") or uuid.uuid4().hex[:10])
+        data, _ = gestao_op_resetar_senha_usuario(usuario_id, _hash_password(senha), getattr(g, "current_user", None) or "sistema"); return jsonify(data)
+
+    @app.get("/api/gestao/usuarios/<usuario_id>/auditoria")
+    def api_gestao_usuarios_auditoria(usuario_id):
+        denied = _require_admin_json()
+        if denied: return denied
+        data, _ = gestao_op_auditoria_usuario(usuario_id); return jsonify(data)
+
+    @app.get("/api/gestao/perfis")
+    def api_gestao_perfis():
+        denied = _require_admin_json()
+        if denied: return denied
+        data, _ = gestao_op_listar_perfis(); return jsonify(data)
 
     @app.post("/api/gestao/operacional/admin/create-tables")
     def api_gestao_operacional_create_tables():
