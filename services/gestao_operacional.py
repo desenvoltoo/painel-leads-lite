@@ -1176,7 +1176,7 @@ def buscar_usuario_login(email: str) -> Dict[str, Any]:
     rows = _run(f"""
     SELECT usuario_id,nome,email,perfil_id,nome_perfil,codigo_perfil,ativo,status_usuario,primeiro_acesso,password_hash,ultimo_login_em
     FROM {_ref('vw_op_usuarios_painel')}
-    WHERE LOWER(TRIM(email))=@email
+    WHERE LOWER(email)=LOWER(@email)
     LIMIT 1
     """, params, "usuarios_login_lookup")
     return rows[0] if rows else {}
