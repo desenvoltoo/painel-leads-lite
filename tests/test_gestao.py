@@ -583,3 +583,88 @@ def test_operacional_recalcular_metricas_lote_atualiza_totais(monkeypatch):
     assert m["total_matriculas"] == 1
     assert calls[0][1]["txr"] == 50.0
     assert calls[0][2] == "operacional_recalcular_lote"
+
+
+def test_operacional_preview_proximo_lote_shape_and_order(monkeypatch):
+    from services import gestao_operacional as op
+    captured = {}
+    def fake_get(filters, meta):
+        captured['meta'] = meta
+        return {"items": [{"sk_pessoa": 2}, {"sk_pessoa": 1}], "count": 2}, False
+    monkeypatch.setattr(op, "get_leads_disponiveis", fake_get)
+    data, cached = op.preview_proximo_lote({"quantidade": "2", "curso": "Direito"})
+    assert cached is False
+    assert data["ok"] if "ok" in data else True
+    assert data["total_disponivel"] == 2
+    assert data["quantidade_preview"] == 2
+    assert data["leads"][0]["sk_pessoa"] == 2
+    assert data["ordenacao"][0] == "data_inscricao DESC"
+    assert captured["meta"]["limit"] == 2
+
+
+def test_operacional_exportar_proximo_lote_csv(monkeypatch):
+    from services import gestao_operacional as op
+    monkeypatch.setattr(op, "criar_lote", lambda payload: ({"lote_id": "L1", "quantidade_leads": 1}, False))
+    monkeypatch.setattr(op, "get_lote_detalhe", lambda lote_id: ({"leads": [{"sk_pessoa": 10, "nome": "Ana", "status_atendimento": "PENDENTE"}]}, False))
+    monkeypatch.setattr(op, "_evento", lambda *a, **k: None)
+    data, _ = op.exportar_proximo_lote({"tipo_disparo": "ROBO", "formato": "csv"})
+    assert data["filename"].startswith("lote_L1_ROBO_")
+    assert data["filename"].endswith(".csv")
+    assert data["content_type"].startswith("text/csv")
+    assert data["base64"]
+
+
+def test_operacional_importar_novos_leads_validates_columns():
+    from services import gestao_operacional as op
+    file = BytesIO("nome,cpf,curso,polo\nAna,123,Direito,Centro\n".encode("utf-8"))
+    file.filename = "leads.csv"
+    data, _ = op.importar_novos_leads(file, {"usuario": "tester"})
+    assert data["linhas_lidas"] == 1
+    assert data["linhas_validas"] == 1
+    assert "/api/upload" in data["mensagem"]
+
+
+def test_gestao_operacional_page_has_no_critical_duplicate_forms(client):
+    login(client)
+    resp = client.get("/gestao")
+    html = resp.get_data(as_text=True)
+    assert resp.status_code == 200
+    assert html.count('id="opExportarForm"') == 1
+    assert html.count('id="opImportarDisparadoForm"') == 1
+    assert html.count('id="opImportarNovosForm"') == 1
+    assert "Exportar Próximo Lote" in html
+
+
+def test_operacional_download_csv_endpoint(client, monkeypatch):
+    login(client)
+    def fake(payload):
+        import base64
+        return {"filename": "lote_L1_ROBO_20260626.csv", "content_type": "text/csv", "base64": base64.b64encode(b"lote_id\nL1\n").decode()}, False
+    monkeypatch.setattr("app.gestao_op_exportar_proximo_lote", fake)
+    resp = client.post("/api/gestao/operacional/exportar-proximo-lote", json={"tipo_disparo": "ROBO", "quantidade": 1})
+    assert resp.status_code == 200
+    assert resp.headers["Content-Type"].startswith("text/csv")
+    assert "lote_L1_ROBO_20260626.csv" in resp.headers["Content-Disposition"]
+    assert b"lote_id" in resp.data
+
+
+def test_operacional_table_missing_error_is_safe(client, monkeypatch):
+    login(client)
+    def fake():
+        return {"warning": "Tabelas operacionais ausentes", "missing_tables": ["op_lotes_disparo"]}, False
+    monkeypatch.setattr("app.gestao_op_get_dashboard", fake)
+    resp = client.get("/api/gestao/operacional/dashboard")
+    body = resp.get_json()
+    assert resp.status_code == 200
+    assert body["ok"] is True
+    assert "op_lotes_disparo" in body["data"]["missing_tables"]
+
+
+def test_operacional_importar_lote_disparado_endpoint(client, monkeypatch):
+    login(client)
+    def fake(file, lote_id, usuario):
+        return {"lote_id": lote_id, "linhas_lidas": 1, "linhas_atualizadas": 1, "linhas_rejeitadas": 0, "nao_encontrados": 0, "erros": []}, False
+    monkeypatch.setattr("app.gestao_op_importar_lote_disparado", fake)
+    resp = client.post("/api/gestao/operacional/importar-lote-disparado", data={"lote_id": "L1", "usuario": "u", "file": (BytesIO(b"sk_pessoa,status\n1,AC\n"), "ret.csv")}, content_type="multipart/form-data")
+    assert resp.status_code == 200
+    assert resp.get_json()["linhas_atualizadas"] == 1
