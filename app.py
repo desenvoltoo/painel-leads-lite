@@ -108,6 +108,7 @@ from services.gestao_operacional import (
     auditoria_usuario as gestao_op_auditoria_usuario,
     buscar_usuario_login as gestao_op_buscar_usuario_login,
     registrar_login_usuario as gestao_op_registrar_login_usuario,
+    atualizar_password_hash_usuario as gestao_op_atualizar_password_hash_usuario,
     get_logs_auditoria as gestao_op_get_logs_auditoria,
     classify_bigquery_error as gestao_op_classify_bigquery_error,
 )
@@ -1250,11 +1251,7 @@ def create_app() -> Flask:
         return _require_permission("usuarios:manage")
 
     def _hash_password(password: str) -> str:
-        try:
-            import bcrypt
-            return bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
-        except Exception:
-            return generate_password_hash(password)
+        return generate_password_hash(password)
 
     @app.get("/api/gestao/usuarios")
     def api_gestao_usuarios_listar():
@@ -1384,17 +1381,24 @@ def create_app() -> Flask:
             user = None
         user_hash = (user or {}).get("password_hash") or users.get(email)
 
-        def _check_hash(stored_hash: str, raw_password: str) -> bool:
-            if not stored_hash:
+        def _check_password(stored_password: str, raw_password: str) -> bool:
+            if not stored_password:
                 return False
-            if stored_hash.startswith(("$2a$", "$2b$", "$2y$")):
-                import bcrypt
-                return bcrypt.checkpw(raw_password.encode("utf-8"), stored_hash.encode("utf-8"))
-            return check_password_hash(stored_hash, raw_password)
+            if stored_password.startswith(("pbkdf2:", "scrypt:")):
+                return check_password_hash(stored_password, raw_password)
+            return stored_password == raw_password
 
         active = bool((user or {}).get("ativo", True)) and str((user or {}).get("status_usuario") or "ATIVO").upper() == "ATIVO"
-        if not user_hash or not active or not _check_hash(str(user_hash), password):
-            return jsonify({"ok": False, "error": "E-mail ou senha inválidos. Tente novamente."}), 401
+        senha_ok = _check_password(str(user_hash or ""), password)
+        if not user_hash or not active or not senha_ok:
+            logger.warning("auth_login_failed email=%s reason=%s", email, "inactive" if user_hash and not active else "invalid_credentials")
+            return jsonify({"ok": False, "error": "E-mail ou senha inválidos. Verifique se o usuário está ativo e tente novamente."}), 401
+
+        if user and user_hash and not str(user_hash).startswith(("pbkdf2:", "scrypt:")):
+            try:
+                gestao_op_atualizar_password_hash_usuario(str(user.get("usuario_id") or ""), generate_password_hash(password))
+            except Exception:
+                logger.exception("auth_login_password_rehash_failed user=%s", email)
 
         perfil = str((user or {}).get("nome_perfil") or (user or {}).get("codigo_perfil") or (user or {}).get("perfil_id") or ("ADMIN" if email in users else "LEITURA")).upper()
         permissions = sorted(PROFILE_PERMISSIONS.get(perfil, PROFILE_PERMISSIONS["LEITURA"]))

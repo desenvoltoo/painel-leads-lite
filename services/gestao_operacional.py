@@ -1177,6 +1177,27 @@ def buscar_usuario_login(email: str) -> Dict[str, Any]:
     return rows[0] if rows else {}
 
 
+def atualizar_password_hash_usuario(usuario_id: str, novo_hash: str) -> None:
+    usuario_id = _clean_text(usuario_id)
+    novo_hash = _clean_text(novo_hash)
+    if not usuario_id or not novo_hash:
+        raise ValueError("usuario_id e novo_hash são obrigatórios.")
+    params = [
+        bigquery.ScalarQueryParameter("usuario_id", "STRING", usuario_id),
+        bigquery.ScalarQueryParameter("novo_hash", "STRING", novo_hash),
+    ]
+    _run(
+        f"""
+        UPDATE {_ref('op_usuarios_painel')}
+        SET password_hash = @novo_hash,
+            updated_at = CURRENT_TIMESTAMP()
+        WHERE usuario_id = @usuario_id
+        """,
+        params,
+        "usuarios_password_rehash",
+    )
+
+
 def registrar_login_usuario(session_data: Mapping[str, Any], ip: str = "", user_agent: str = "") -> None:
     usuario_id = _clean_text(session_data.get("usuario_id") or session_data.get("email"))
     email = _clean_text(session_data.get("email") or session_data.get("username")).lower()
