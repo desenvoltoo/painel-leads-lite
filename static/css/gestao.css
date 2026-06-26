@@ -197,3 +197,12 @@ button, a, input, select { min-height: 40px; }
 .status-aberto, .status-em_andamento, .status-importado, .status-concluido, .status-cancelado { text-transform: uppercase; }
 .modal-content { border: 0; border-radius: 22px; box-shadow: var(--go-shadow); }
 @media (min-width: 992px) { .gestao-module-sidebar { max-height: calc(100vh - 124px); overflow: auto; } }
+.op-flow { display: flex; flex-wrap: wrap; gap: .5rem; margin: 1rem 0; }
+.op-flow button { border: 1px solid #d0d7de; background: #fff; border-radius: 999px; padding: .45rem .75rem; color: #57606a; }
+.op-flow button.is-done { background: #dafbe1; border-color: #2da44e; color: #116329; }
+.op-flow button.is-current { background: #ddf4ff; border-color: #0969da; color: #0969da; font-weight: 700; box-shadow: 0 0 0 3px rgba(9,105,218,.12); }
+.op-flow button.is-pending { background: #f6f8fa; }
+.op-progress .progress { height: 1rem; background: #eef2f7; }
+.op-progress .progress-caption { font-size: .9rem; color: #334155; margin-bottom: .35rem; font-weight: 600; }
+#opLoteAtualTable textarea { min-width: 180px; min-height: 38px; }
+#opLoteAtualTable td { vertical-align: top; }
