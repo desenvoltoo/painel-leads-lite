@@ -991,3 +991,38 @@ def resetar_senha_usuario(usuario_id: str, password_hash: str, autor: str) -> Tu
     _run(f"UPDATE {_ref('op_usuarios_painel')} SET password_hash=@password_hash,primeiro_acesso=TRUE,updated_at=CURRENT_TIMESTAMP() WHERE usuario_id=@usuario_id", p, "usuarios_reset_senha")
     registrar_auditoria("RESET_SENHA", usuario_id, autor)
     return _api_response({"usuario_id": usuario_id}, "Senha resetada."), False
+
+
+def buscar_usuario_login(email: str) -> Dict[str, Any]:
+    email = _clean_text(email).lower()
+    if not email:
+        return {}
+    params = [bigquery.ScalarQueryParameter("email", "STRING", email)]
+    rows = _run(f"""
+    SELECT usuario_id,nome,email,perfil_id,nome_perfil,codigo_perfil,ativo,status_usuario,primeiro_acesso,password_hash,ultimo_login
+    FROM {_ref('vw_op_usuarios_painel')}
+    WHERE LOWER(TRIM(email))=@email
+    LIMIT 1
+    """, params, "usuarios_login_lookup")
+    return rows[0] if rows else {}
+
+
+def registrar_login_usuario(session_data: Mapping[str, Any], ip: str = "", user_agent: str = "") -> None:
+    usuario_id = _clean_text(session_data.get("usuario_id") or session_data.get("email"))
+    email = _clean_text(session_data.get("email") or session_data.get("username")).lower()
+    sessao_id = _clean_text(session_data.get("session_id")) or str(uuid.uuid4())
+    params_update = [bigquery.ScalarQueryParameter("usuario_id", "STRING", usuario_id), bigquery.ScalarQueryParameter("email", "STRING", email)]
+    _run(f"UPDATE {_ref('op_usuarios_painel')} SET ultimo_login=CURRENT_TIMESTAMP(), updated_at=CURRENT_TIMESTAMP() WHERE usuario_id=@usuario_id OR LOWER(TRIM(email))=@email", params_update, "usuarios_ultimo_login")
+    params_sessao = [
+        bigquery.ScalarQueryParameter("sessao_id", "STRING", sessao_id),
+        bigquery.ScalarQueryParameter("usuario_id", "STRING", usuario_id),
+        bigquery.ScalarQueryParameter("email", "STRING", email),
+        bigquery.ScalarQueryParameter("ip", "STRING", _clean_text(ip)[:80]),
+        bigquery.ScalarQueryParameter("user_agent", "STRING", _clean_text(user_agent)[:500]),
+    ]
+    _run(f"""
+    INSERT INTO {_ref('op_sessoes_painel')} (sessao_id, usuario_id, email, ip, user_agent, created_at, ultimo_acesso, ativa)
+    SELECT @sessao_id, @usuario_id, @email, @ip, @user_agent, CURRENT_TIMESTAMP(), CURRENT_TIMESTAMP(), TRUE
+    WHERE NOT EXISTS (SELECT 1 FROM {_ref('op_sessoes_painel')} WHERE sessao_id=@sessao_id)
+    """, params_sessao, "usuarios_sessao_insert")
+    registrar_auditoria("LOGIN_SUCESSO", usuario_id, email, {"email": email, "sessao_id": sessao_id})
