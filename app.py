@@ -109,6 +109,7 @@ from services.gestao_operacional import (
     buscar_usuario_login as gestao_op_buscar_usuario_login,
     registrar_login_usuario as gestao_op_registrar_login_usuario,
     get_logs_auditoria as gestao_op_get_logs_auditoria,
+    classify_bigquery_error as gestao_op_classify_bigquery_error,
 )
 
 logger = logging.getLogger(__name__)
@@ -634,15 +635,46 @@ def create_app() -> Flask:
             },
         }), status
 
+    def _safe_request_params():
+        params = request.get_json(silent=True) if request.is_json else request.args.to_dict(flat=False)
+        if isinstance(params, dict):
+            masked = dict(params)
+            for key in list(masked):
+                if key.lower() in {"senha", "password", "senha_temporaria", "password_hash", "cpf", "celular", "email"}:
+                    masked[key] = "***"
+            return masked
+        return {}
+
     def _gestao_error_response(exc, *, status=500, code="GESTAO_QUERY_ERROR", message="Não foi possível carregar os dados."):
+        bq_error = gestao_op_classify_bigquery_error(exc)
+        response_status = status
+        if bq_error["error_type"] == "BIGQUERY_PERMISSION_ERROR":
+            response_status = 403
+        elif bq_error["error_type"] == "BIGQUERY_SCHEMA_ERROR":
+            response_status = 500
+        elif bq_error["error_type"] == "BIGQUERY_INVALID_REQUEST":
+            response_status = 400
+        elif bq_error["error_type"] == "BIGQUERY_TIMEOUT":
+            response_status = 504
+        friendly = bq_error["message"] if bq_error["error_type"].startswith("BIGQUERY") else message
         logger.exception(
-            "gestao_api_error route=%s operation=%s exception_type=%s error=%s",
+            "gestao_api_error route=%s endpoint=%s params=%s user=%s exception_type=%s bigquery_error_type=%s bigquery_full_error=%r",
             request.path,
             request.endpoint,
+            _safe_request_params(),
+            getattr(g, "current_user", None) or session.get("user_email"),
             exc.__class__.__name__,
-            str(exc),
+            bq_error["error_type"],
+            exc,
         )
-        return jsonify({"ok": False, "success": False, "error": {"code": code, "message": message, "correlationId": getattr(g, "correlation_id", None)}}), status
+        payload = {
+            "ok": False, "success": False,
+            "error_type": bq_error["error_type"],
+            "message": friendly,
+            "details": bq_error["details"],
+            "error": {"code": bq_error["error_type"] or code, "message": friendly, "details": bq_error["details"], "correlationId": getattr(g, "correlation_id", None)},
+        }
+        return jsonify(payload), response_status
 
     def _gestao_endpoint(loader):
         try:

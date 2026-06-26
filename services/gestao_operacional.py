@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 from google.cloud import bigquery
+from google.api_core import exceptions as google_exceptions
 
 from services import bigquery as bq
 try:
@@ -41,6 +42,44 @@ STATUS_ATENDIMENTO_MAP = {
     "CANCELADO": None,
 }
 
+
+
+class BigQuerySchemaError(RuntimeError):
+    """Raised when an official operational BigQuery object/column is missing."""
+
+
+def _technical_details(exc: Exception, max_len: int = 900) -> str:
+    text = str(exc) or exc.__class__.__name__
+    return " ".join(text.split())[:max_len]
+
+
+def classify_bigquery_error(exc: Exception) -> Dict[str, str]:
+    details = _technical_details(exc)
+    lowered = details.lower()
+    if isinstance(exc, BigQuerySchemaError) or isinstance(exc, google_exceptions.NotFound) or any(token in lowered for token in ["not found", "unrecognized name", "no such field", "name not found", "schema"]):
+        return {"error_type": "BIGQUERY_SCHEMA_ERROR", "message": "Tabela ou coluna ausente no BigQuery.", "details": details}
+    if isinstance(exc, google_exceptions.Forbidden) or any(token in lowered for token in ["access denied", "permission", "forbidden"]):
+        return {"error_type": "BIGQUERY_PERMISSION_ERROR", "message": "Permissão insuficiente para acessar o BigQuery.", "details": details}
+    if isinstance(exc, google_exceptions.BadRequest) or "invalid" in lowered:
+        return {"error_type": "BIGQUERY_INVALID_REQUEST", "message": "Parâmetro inválido ou consulta BigQuery inválida.", "details": details}
+    if isinstance(exc, TimeoutError) or "timeout" in lowered or "deadline" in lowered:
+        return {"error_type": "BIGQUERY_TIMEOUT", "message": "Tempo esgotado ao consultar o BigQuery.", "details": details}
+    return {"error_type": "BIGQUERY_ERROR", "message": "Erro técnico ao consultar o BigQuery.", "details": details}
+
+
+def validate_bigquery_columns(table: str, required_columns: List[str]) -> None:
+    params = [bigquery.ScalarQueryParameter("table_name", "STRING", table)]
+    rows = _run(f"""
+    SELECT column_name
+    FROM `{PROJECT_ID}.{DATASET}.INFORMATION_SCHEMA.COLUMNS`
+    WHERE table_name=@table_name
+    """, params, f"schema_check_{table}")
+    existing = {str(r.get("column_name")) for r in rows}
+    if not existing:
+        raise BigQuerySchemaError(f"Objeto ausente no BigQuery: {PROJECT_ID}.{DATASET}.{table}")
+    missing = [col for col in required_columns if col not in existing]
+    if missing:
+        raise BigQuerySchemaError(f"Colunas ausentes em {PROJECT_ID}.{DATASET}.{table}: {', '.join(missing)}")
 
 def _active_status_sql() -> str:
     return "'" + "','".join(ACTIVE_STATUS) + "'"
@@ -175,7 +214,7 @@ def _extract_lote_row(rows: List[Dict[str, Any]], fallback: Mapping[str, Any]) -
 
 
 def _filters_meta(source: Mapping[str, Any]) -> Tuple[Dict[str, str], Dict[str, int]]:
-    filters = {k: str(source.get(k) or "").strip() for k in ["campanha", "curso", "polo", "origem", "nivel_prioridade", "status_lote", "consultor_disparo", "status_atendimento", "lote_id", "q", "busca", "somente_pendentes"] if str(source.get(k) or "").strip()}
+    filters = {k: str(source.get(k) or "").strip() for k in ["campanha", "curso", "polo", "origem", "nivel_prioridade", "status_lote", "consultor_disparo", "status_atendimento", "lote_id", "q", "busca", "somente_pendentes", "meus_leads", "usuario", "current_user"] if str(source.get(k) or "").strip()}
     meta = {"limit": _int(source.get("limit"), 100, 1, 5000), "offset": _int(source.get("offset"), 0, 0, 1_000_000)}
     return filters, meta
 
@@ -733,9 +772,51 @@ def get_consultor_momento(filters: Mapping[str, Any], meta: Mapping[str, Any]) -
     return {"items": rows, "count": len(rows)}, False
 
 
+LOTE_ATUAL_COLUMNS = [
+    "lote_id", "nome_lote", "status_lote", "mes_leads", "tipo_disparo", "consultor_lote",
+    "sk_pessoa", "nome", "cpf", "celular", "email", "curso", "modalidade", "turno", "polo",
+    "origem", "tipo_negocio", "campanha", "canal", "acao_comercial", "consultor_disparo",
+    "status_atendimento", "retorno", "positivo", "negativo", "matriculado", "observacao",
+    "retorno_observacao", "retorno_status_raw", "data_inscricao", "data_matricula", "data_disparo",
+    "data_exportacao", "data_importacao_retorno", "score_prioridade", "nivel_prioridade",
+    "etapa_operacional", "ultimo_evento", "ultimo_evento_em", "ultimo_evento_por", "lote_criado_em",
+    "exportado_em", "started_at", "importado_em", "finished_at",
+]
+
+
+def _lote_summary(where: List[str], params: List[Any]) -> Dict[str, Any]:
+    row = _single(f"""
+    SELECT
+      COUNT(1) AS total,
+      COUNTIF(UPPER(COALESCE(status_atendimento,''))='PENDENTE') AS pendentes,
+      COUNTIF(UPPER(COALESCE(status_atendimento,'')) IN ('EM_ATENDIMENTO','AC','EC','IF','NI','NT','COU','MAT')) AS em_atendimento,
+      COUNTIF(COALESCE(retorno,FALSE)) AS retornos,
+      COUNTIF(COALESCE(positivo,FALSE)) AS positivos,
+      COUNTIF(COALESCE(negativo,FALSE)) AS negativos,
+      COUNTIF(COALESCE(matriculado,FALSE)) AS matriculas
+    FROM {_ref('vw_op_lote_atual_leads')} l
+    WHERE {' AND '.join(where)}
+    """, params, "operacional_lote_atual_summary")
+    total = _to_int(row.get("total"))
+    pendentes = _to_int(row.get("pendentes"))
+    trabalhados = max(total - pendentes, 0)
+    return {
+        "total": total, "pendentes": pendentes, "em_atendimento": _to_int(row.get("em_atendimento")),
+        "retornos": _to_int(row.get("retornos")), "positivos": _to_int(row.get("positivos")),
+        "negativos": _to_int(row.get("negativos")), "matriculas": _to_int(row.get("matriculas")),
+        "trabalhados": trabalhados, "percentual_trabalhado": round((trabalhados / total * 100), 2) if total else 0,
+    }
+
+
 def get_lote_atual_leads(filters: Mapping[str, Any], meta: Mapping[str, Any]) -> Tuple[Dict[str, Any], bool]:
+    validate_bigquery_columns("vw_op_lote_atual_leads", LOTE_ATUAL_COLUMNS)
     where, params = ["1=1"], []
     _add_eq(where, params, "l", filters, ["lote_id", "consultor_disparo", "status_atendimento", "curso", "campanha"])
+    if _clean_text(filters.get("meus_leads")):
+        usuario = _clean_text(filters.get("usuario") or filters.get("current_user") or filters.get("consultor_disparo"))
+        if usuario:
+            where.append("UPPER(TRIM(CAST(l.consultor_disparo AS STRING))) = UPPER(TRIM(@meus_leads_usuario))")
+            params.append(bigquery.ScalarQueryParameter("meus_leads_usuario", "STRING", usuario))
     if str(filters.get("somente_pendentes") or "").lower() in {"1", "true", "sim", "s"}:
         where.append("UPPER(COALESCE(l.status_atendimento,''))='PENDENTE'")
     q = _clean_text(filters.get("q") or filters.get("busca"))
@@ -744,12 +825,15 @@ def get_lote_atual_leads(filters: Mapping[str, Any], meta: Mapping[str, Any]) ->
         params.append(bigquery.ScalarQueryParameter("digits", "STRING", "".join(ch for ch in q if ch.isdigit())))
         where.append("""(UPPER(COALESCE(l.nome,'')) LIKE CONCAT('%', UPPER(@q), '%')
           OR REGEXP_REPLACE(COALESCE(l.cpf,''), r'[^0-9]', '') = @digits
-          OR REGEXP_REPLACE(COALESCE(l.celular,''), r'[^0-9]', '') = @digits)""")
-    params += [bigquery.ScalarQueryParameter("limit", "INT64", _int(meta.get("limit"), 100, 1, 500)), bigquery.ScalarQueryParameter("offset", "INT64", _int(meta.get("offset"), 0))]
-    cols = "lote_id,sk_pessoa,nome,cpf,celular,email,curso,polo,campanha,status_atendimento,retorno,positivo,negativo,matriculado,observacao,data_inscricao,data_disparo,ultimo_evento,ultimo_evento_em,ultimo_evento_por,consultor_disparo,data_matricula"
-    rows = _run(f"SELECT {cols} FROM {_ref('vw_op_lote_atual_leads')} l WHERE {' AND '.join(where)} ORDER BY data_inscricao DESC LIMIT @limit OFFSET @offset", params, "operacional_lote_atual_leads")
-    total = _to_int(_single(f"SELECT COUNT(1) AS total FROM {_ref('vw_op_lote_atual_leads')} l WHERE {' AND '.join(where)}", params[:-2], "operacional_lote_atual_total").get("total"))
-    return {"items": rows, "count": len(rows), "pagination": {"total": total, "limit": _int(meta.get("limit"), 100), "offset": _int(meta.get("offset"), 0)}}, False
+          OR REGEXP_REPLACE(COALESCE(l.celular,''), r'[^0-9]', '') = @digits
+          OR CAST(l.sk_pessoa AS STRING)=@q)""")
+    limit = _int(meta.get("limit"), 100, 1, 500)
+    offset = _int(meta.get("offset"), 0)
+    page_params = params + [bigquery.ScalarQueryParameter("limit", "INT64", limit), bigquery.ScalarQueryParameter("offset", "INT64", offset)]
+    cols = ", ".join(f"l.{c}" for c in LOTE_ATUAL_COLUMNS)
+    rows = _run(f"SELECT {cols} FROM {_ref('vw_op_lote_atual_leads')} l WHERE {' AND '.join(where)} ORDER BY l.data_inscricao DESC NULLS LAST, l.sk_pessoa LIMIT @limit OFFSET @offset", page_params, "operacional_lote_atual_leads")
+    summary = _lote_summary(where, params)
+    return {"success": True, "data": rows, "items": rows, "summary": summary, "limit": limit, "offset": offset, "count": len(rows), "pagination": {"total": summary["total"], "limit": limit, "offset": offset}}, False
 
 
 def atualizar_lead_lote(lote_id: str, sk_pessoa: str, payload: Mapping[str, Any], usuario: str) -> Tuple[Dict[str, Any], bool]:
@@ -950,8 +1034,20 @@ def listar_perfis() -> Tuple[Dict[str, Any], bool]:
     return _api_response(rows), False
 
 
+USER_TABLE_COLUMNS = ["usuario_id", "nome", "email", "password_hash", "perfil_id", "status_usuario", "ativo", "primeiro_acesso", "ultimo_login_em", "ultimo_login_ip", "criado_por", "created_at", "updated_at"]
+USER_VIEW_COLUMNS = ["usuario_id", "nome", "email", "perfil_id", "status_usuario", "ativo", "primeiro_acesso"]
+
+
+def validate_user_schema() -> None:
+    validate_bigquery_columns("op_usuarios_painel", USER_TABLE_COLUMNS)
+    validate_bigquery_columns("op_perfis_painel", ["perfil_id"])
+    validate_bigquery_columns("vw_op_usuarios_painel", USER_VIEW_COLUMNS)
+
+
 def listar_usuarios() -> Tuple[Dict[str, Any], bool]:
-    return _api_response(_run(f"SELECT * FROM {_ref('vw_op_usuarios_painel')} ORDER BY nome LIMIT 500", operation="usuarios_listar")), False
+    validate_user_schema()
+    cols = "usuario_id,nome,email,perfil_id,status_usuario,ativo,primeiro_acesso,ultimo_login_em,created_at,updated_at"
+    return _api_response(_run(f"SELECT {cols} FROM {_ref('vw_op_usuarios_painel')} ORDER BY nome LIMIT 500", operation="usuarios_listar")), False
 
 
 def auditoria_usuario(usuario_id: str) -> Tuple[Dict[str, Any], bool]:
@@ -965,6 +1061,7 @@ def registrar_auditoria(acao: str, usuario_id: str, autor: str, detalhes: Mappin
 
 
 def salvar_usuario(payload: Mapping[str, Any], autor: str, usuario_id: str | None = None) -> Tuple[Dict[str, Any], bool]:
+    validate_user_schema()
     nome=_clean_text(payload.get("nome")); email=_clean_text(payload.get("email")).lower(); perfil_id=_clean_text(payload.get("perfil_id")); ativo=bool(payload.get("ativo", True)); status=_clean_text(payload.get("status_usuario")) or ("ATIVO" if ativo else "INATIVO")
     if not nome or not email or not perfil_id: raise ValueError("nome, email e perfil_id são obrigatórios.")
     if usuario_id:
@@ -973,8 +1070,10 @@ def salvar_usuario(payload: Mapping[str, Any], autor: str, usuario_id: str | Non
         registrar_auditoria("EDICAO_USUARIO", usuario_id, autor, {"email": email, "perfil_id": perfil_id})
     else:
         usuario_id=str(uuid.uuid4()); password_hash=_clean_text(payload.get("password_hash"))
-        p=[bigquery.ScalarQueryParameter("usuario_id","STRING",usuario_id), bigquery.ScalarQueryParameter("nome","STRING",nome), bigquery.ScalarQueryParameter("email","STRING",email), bigquery.ScalarQueryParameter("perfil_id","STRING",perfil_id), bigquery.ScalarQueryParameter("ativo","BOOL",ativo), bigquery.ScalarQueryParameter("status_usuario","STRING",status), bigquery.ScalarQueryParameter("primeiro_acesso","BOOL",True), bigquery.ScalarQueryParameter("password_hash","STRING",password_hash)]
-        _run(f"INSERT INTO {_ref('op_usuarios_painel')} (usuario_id,nome,email,perfil_id,ativo,status_usuario,primeiro_acesso,password_hash,created_at,updated_at) VALUES (@usuario_id,@nome,@email,@perfil_id,@ativo,@status_usuario,@primeiro_acesso,@password_hash,CURRENT_TIMESTAMP(),CURRENT_TIMESTAMP())", p, "usuarios_insert")
+        if not password_hash:
+            raise ValueError("Senha inicial é obrigatória para criar usuário.")
+        p=[bigquery.ScalarQueryParameter("usuario_id","STRING",usuario_id), bigquery.ScalarQueryParameter("nome","STRING",nome), bigquery.ScalarQueryParameter("email","STRING",email), bigquery.ScalarQueryParameter("password_hash","STRING",password_hash), bigquery.ScalarQueryParameter("perfil_id","STRING",perfil_id), bigquery.ScalarQueryParameter("status_usuario","STRING",status), bigquery.ScalarQueryParameter("ativo","BOOL",ativo), bigquery.ScalarQueryParameter("primeiro_acesso","BOOL",True), bigquery.ScalarQueryParameter("ultimo_login_em","TIMESTAMP",None), bigquery.ScalarQueryParameter("ultimo_login_ip","STRING",None), bigquery.ScalarQueryParameter("criado_por","STRING",_clean_text(autor) or "sistema")]
+        _run(f"INSERT INTO {_ref('op_usuarios_painel')} (usuario_id,nome,email,password_hash,perfil_id,status_usuario,ativo,primeiro_acesso,ultimo_login_em,ultimo_login_ip,criado_por,created_at,updated_at) VALUES (@usuario_id,@nome,@email,@password_hash,@perfil_id,@status_usuario,@ativo,@primeiro_acesso,@ultimo_login_em,@ultimo_login_ip,@criado_por,CURRENT_TIMESTAMP(),CURRENT_TIMESTAMP())", p, "usuarios_insert")
         registrar_auditoria("CRIACAO_USUARIO", usuario_id, autor, {"email": email, "perfil_id": perfil_id})
     return _api_response({"usuario_id": usuario_id}, "Usuário salvo."), False
 
