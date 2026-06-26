@@ -108,6 +108,7 @@ from services.gestao_operacional import (
     auditoria_usuario as gestao_op_auditoria_usuario,
     buscar_usuario_login as gestao_op_buscar_usuario_login,
     registrar_login_usuario as gestao_op_registrar_login_usuario,
+    get_logs_auditoria as gestao_op_get_logs_auditoria,
 )
 
 logger = logging.getLogger(__name__)
@@ -460,7 +461,7 @@ def create_app() -> Flask:
         "ADMIN": {"dashboard:view", "usuarios:manage", "leads:import", "lotes:create", "lotes:export", "lotes:mark_sent", "retorno:import", "lote_atual:edit", "lotes:finish", "lotes:cancel", "logs:view", "lotes:view", "rastreabilidade:view", "meus_leads:view", "lead_status:edit"},
         "GESTOR": {"dashboard:view", "leads:import", "lotes:create", "lotes:export", "lotes:mark_sent", "retorno:import", "lote_atual:edit", "lotes:finish", "lotes:cancel", "logs:view", "lotes:view", "rastreabilidade:view", "meus_leads:view", "lead_status:edit"},
         "OPERADOR": {"dashboard:view", "meus_leads:view", "lote_atual:view", "lote_atual:edit", "lead_status:edit", "retorno:import"},
-        "LEITURA": {"dashboard:view", "lotes:view", "rastreabilidade:view"},
+        "LEITURA": {"dashboard:view", "lotes:view", "rastreabilidade:view", "logs:view"},
     }
  
     # pastas locais (mantém XLSX)
@@ -980,6 +981,47 @@ def create_app() -> Flask:
             return _gestao_success(data, dict(request.args), cached=cached)
         except Exception as exc:
             return _gestao_error_response(exc, code="GESTAO_OPERACIONAL_LOGS_ERROR", message="Não foi possível carregar histórico e logs.")
+
+
+    def _gestao_logs_endpoint(kind):
+        denied = _require_permission("logs:view")
+        if denied:
+            return denied
+        try:
+            data, cached = gestao_op_get_logs_auditoria(kind, request.args, getattr(g, "user", None) or _current_user_context() or {})
+            return jsonify(data)
+        except ValueError as exc:
+            return jsonify({"success": False, "ok": False, "error": {"code": "GESTAO_LOGS_INVALID", "message": str(exc)}}), 400
+        except Exception as exc:
+            return _gestao_error_response(exc, code="GESTAO_LOGS_ERROR", message="Não foi possível carregar os logs solicitados.")
+
+    @app.get("/api/gestao/logs/importacoes")
+    def api_gestao_logs_importacoes():
+        return _gestao_logs_endpoint("importacoes")
+
+    @app.get("/api/gestao/logs/rejeicoes")
+    def api_gestao_logs_rejeicoes():
+        return _gestao_logs_endpoint("rejeicoes")
+
+    @app.get("/api/gestao/logs/auditoria")
+    def api_gestao_logs_auditoria():
+        return _gestao_logs_endpoint("auditoria")
+
+    @app.get("/api/gestao/logs/eventos-leads")
+    def api_gestao_logs_eventos_leads():
+        return _gestao_logs_endpoint("eventos_leads")
+
+    @app.get("/api/gestao/logs/timeline")
+    def api_gestao_logs_timeline():
+        return _gestao_logs_endpoint("timeline")
+
+    @app.get("/api/gestao/logs/debug-fila")
+    def api_gestao_logs_debug_fila():
+        return _gestao_logs_endpoint("debug_fila")
+
+    @app.get("/api/gestao/logs/bigquery-sync")
+    def api_gestao_logs_bigquery_sync():
+        return _gestao_logs_endpoint("bigquery_sync")
 
     @app.post("/api/gestao/operacional/liberar-proximos-leads")
     def api_gestao_operacional_liberar_proximos_leads():

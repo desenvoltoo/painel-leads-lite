@@ -1026,3 +1026,123 @@ def registrar_login_usuario(session_data: Mapping[str, Any], ip: str = "", user_
     WHERE NOT EXISTS (SELECT 1 FROM {_ref('op_sessoes_painel')} WHERE sessao_id=@sessao_id)
     """, params_sessao, "usuarios_sessao_insert")
     registrar_auditoria("LOGIN_SUCESSO", usuario_id, email, {"email": email, "sessao_id": sessao_id})
+
+# ---------- Logs / Auditoria ----------
+LOG_TABLES = {
+    "importacoes": {"table": "logs_importacoes", "date": "criado_em", "cols": ["upload_id","id_importacao","nome_arquivo","usuario","status","etapa","mensagem","total_linhas","linhas_recebidas","linhas_validas","linhas_inseridas","linhas_atualizadas","linhas_ignoradas","linhas_rejeitadas","duplicados_arquivo","duplicados_banco","erros","criado_em","iniciado_em","finalizado_em","duracao_ms"], "filters": {"status":"eq","usuario":"like","nome_arquivo":"like","upload_id":"eq"}},
+    "rejeicoes": {"table": "logs_rejeicoes_import", "date": "ts", "cols": ["ts","motivo","cpf_raw","celular_raw","nome_raw","email_raw","payload"], "filters": {"motivo":"like","cpf":"digits:cpf_raw","celular":"digits:celular_raw","nome":"like:nome_raw"}},
+    "auditoria": {"table": "op_auditoria_painel", "date": "created_at", "cols": ["created_at","usuario_email","acao","modulo","entidade","entidade_id","lote_id","sk_pessoa","cpf","descricao","payload_json","ip","user_agent"], "filters": {"usuario":"like:usuario_email","acao":"like","modulo":"like","lote_id":"eq","sk_pessoa":"eq_int","cpf":"digits"}},
+    "eventos_leads": {"table": "op_lead_eventos", "date": "created_at", "cols": ["created_at","lote_id","sk_pessoa","cpf","tipo_evento","status_anterior","status_novo","descricao","usuario"], "filters": {"lote_id":"eq","sk_pessoa":"eq_int","cpf":"digits","tipo_evento":"like","usuario":"like"}},
+    "timeline": {"table": "op_lead_timeline", "date": "created_at", "cols": ["created_at","sk_pessoa","cpf","celular","nome","lote_id","nome_lote","evento","etapa_anterior","etapa_nova","status_anterior","status_novo","retorno","positivo","negativo","matriculado","usuario","origem_evento","descricao"], "filters": {"lote_id":"eq","sk_pessoa":"eq_int","cpf":"digits","celular":"digits","nome":"like","evento":"like","usuario":"like"}},
+    "debug_fila": {"table": "vw_op_debug_fila", "date": None, "cols": ["sk_pessoa","nome","cpf","celular","curso","polo","campanha","tipo_disparo","consultor_disparo","flag_matriculado","data_inscricao","data_disparo","score_prioridade","nivel_prioridade","etapa_operacional","motivo_fila"], "filters": {"motivo_fila":"like","curso":"like","polo":"like","campanha":"like","consultor_disparo":"like","tipo_disparo":"eq","busca":"multi: nome cpf celular"}},
+    "bigquery_sync": {"table": "op_bigquery_sync", "date": "created_at", "cols": ["sync_id","lote_id","status_sync","tentativas","linhas_processadas","erro","created_at","synced_at"], "filters": {"lote_id":"eq","status_sync":"eq"}},
+}
+
+SENSITIVE_LOG_COLUMNS = {"cpf", "cpf_raw", "celular", "celular_raw", "email_raw", "payload", "payload_json", "ip", "user_agent"}
+
+def _mask_digits_text(value: Any, keep_start: int = 3, keep_end: int = 2) -> str:
+    text = str(value or "")
+    digits = "".join(ch for ch in text if ch.isdigit())
+    if len(digits) < keep_start + keep_end + 1:
+        return "***" if text else ""
+    return f"{digits[:keep_start]}***{digits[-keep_end:]}"
+
+def _mask_email_text(value: Any) -> str:
+    text = str(value or "")
+    if "@" not in text:
+        return "***" if text else ""
+    name, domain = text.split("@", 1)
+    return f"{name[:2]}***@{domain}"
+
+def _mask_log_row(row: Dict[str, Any], profile: str, sensitive_payload: bool = False) -> Dict[str, Any]:
+    out = dict(row)
+    for key in list(out.keys()):
+        if key in {"cpf", "cpf_raw"}:
+            out[key] = _mask_digits_text(out.get(key), 3, 2)
+        elif key in {"celular", "celular_raw"}:
+            out[key] = _mask_digits_text(out.get(key), 2, 2)
+        elif key == "email_raw":
+            out[key] = _mask_email_text(out.get(key))
+    if profile in {"GESTOR", "LEITURA", "OPERADOR"}:
+        for key in ["payload", "payload_json"]:
+            if key in out and (sensitive_payload or profile != "ADMIN"):
+                out[key] = "[conteúdo ocultado por permissão]" if out.get(key) else out.get(key)
+        if profile == "LEITURA":
+            for key in ["ip", "user_agent"]:
+                if key in out:
+                    out[key] = "[oculto]" if out.get(key) else out.get(key)
+    return out
+
+def _parse_logs_request(source: Mapping[str, Any]) -> Tuple[Dict[str, Any], Dict[str, int]]:
+    filters = {str(k): str(v).strip() for k, v in (source or {}).items() if str(v or "").strip()}
+    return filters, {"limit": _int(filters.get("limit"), 50, 1, 500), "offset": _int(filters.get("offset"), 0, 0, 1_000_000)}
+
+def _add_log_filters(where: List[str], params: List[Any], cfg: Mapping[str, Any], filters: Mapping[str, Any]) -> None:
+    date_col = cfg.get("date")
+    if date_col and filters.get("data_inicio"):
+        where.append(f"DATE({date_col}) >= @data_inicio")
+        params.append(bigquery.ScalarQueryParameter("data_inicio", "DATE", filters.get("data_inicio")))
+    if date_col and filters.get("data_fim"):
+        where.append(f"DATE({date_col}) <= @data_fim")
+        params.append(bigquery.ScalarQueryParameter("data_fim", "DATE", filters.get("data_fim")))
+    for key, mode in (cfg.get("filters") or {}).items():
+        value = str(filters.get(key) or "").strip()
+        if not value:
+            continue
+        col = key
+        if ":" in mode:
+            mode, col = mode.split(":", 1)
+        pname = f"f_{key}"
+        if mode == "eq":
+            where.append(f"UPPER(TRIM(CAST({col} AS STRING))) = UPPER(TRIM(@{pname}))")
+            params.append(bigquery.ScalarQueryParameter(pname, "STRING", value))
+        elif mode == "eq_int":
+            where.append(f"CAST({col} AS INT64) = @{pname}")
+            params.append(bigquery.ScalarQueryParameter(pname, "INT64", int(value)))
+        elif mode == "digits":
+            where.append(f"REGEXP_REPLACE(CAST({col} AS STRING), r'\\D', '') LIKE CONCAT('%', REGEXP_REPLACE(@{pname}, r'\\D', ''), '%')")
+            params.append(bigquery.ScalarQueryParameter(pname, "STRING", value))
+        elif mode == "multi":
+            cols = col.split()
+            where.append("(" + " OR ".join([f"UPPER(CAST({c} AS STRING)) LIKE CONCAT('%', UPPER(@{pname}), '%')" for c in cols]) + ")")
+            params.append(bigquery.ScalarQueryParameter(pname, "STRING", value))
+        else:
+            where.append(f"UPPER(CAST({col} AS STRING)) LIKE CONCAT('%', UPPER(@{pname}), '%')")
+            params.append(bigquery.ScalarQueryParameter(pname, "STRING", value))
+
+def get_logs_auditoria(kind: str, source: Mapping[str, Any], user_context: Mapping[str, Any]) -> Tuple[Dict[str, Any], bool]:
+    cfg = LOG_TABLES.get(kind)
+    if not cfg:
+        raise ValueError("Tipo de log inválido.")
+    filters, meta = _parse_logs_request(source)
+    profile = str((user_context or {}).get("nome_perfil") or (user_context or {}).get("perfil_id") or "LEITURA").upper()
+    email = _clean_text((user_context or {}).get("email"))
+    cols = list(cfg["cols"])
+    where: List[str] = ["1=1"]
+    params: List[Any] = []
+    _add_log_filters(where, params, cfg, filters)
+    if profile == "OPERADOR":
+        params.append(bigquery.ScalarQueryParameter("current_user_email", "STRING", email))
+        allowed = []
+        if "usuario" in cols:
+            allowed.append("LOWER(CAST(usuario AS STRING)) = LOWER(@current_user_email)")
+        if "usuario_email" in cols:
+            allowed.append("LOWER(CAST(usuario_email AS STRING)) = LOWER(@current_user_email)")
+        if "consultor_disparo" in cols:
+            allowed.append("LOWER(CAST(consultor_disparo AS STRING)) = LOWER(@current_user_email)")
+        if kind in {"auditoria", "eventos_leads", "timeline"}:
+            if "lote_id" in cols:
+                allowed.append(f"CAST(lote_id AS STRING) IN (SELECT CAST(lote_id AS STRING) FROM {_ref('op_lotes_disparo')} WHERE LOWER(CAST(consultor_disparo AS STRING))=LOWER(@current_user_email) OR LOWER(CAST(exportado_por AS STRING))=LOWER(@current_user_email))")
+        where.append("(" + " OR ".join(allowed or ["FALSE"]) + ")")
+    elif profile == "LEITURA":
+        if kind == "auditoria":
+            where.append("UPPER(COALESCE(CAST(acao AS STRING),'')) NOT LIKE '%SENHA%'")
+    params_count = list(params)
+    total = _single(f"SELECT COUNT(1) AS total FROM {_ref(cfg['table'])} WHERE {' AND '.join(where)}", params_count, f"logs_{kind}_total").get("total") or 0
+    params.extend([bigquery.ScalarQueryParameter("limit", "INT64", meta["limit"]), bigquery.ScalarQueryParameter("offset", "INT64", meta["offset"])])
+    order_col = cfg.get("date") or cols[0]
+    select_expr = ", ".join(cols)
+    rows = _run(f"SELECT {select_expr} FROM {_ref(cfg['table'])} WHERE {' AND '.join(where)} ORDER BY {order_col} DESC LIMIT @limit OFFSET @offset", params, f"logs_{kind}")
+    sensitive_payload = any(str(filters.get(k) or "").lower() in {"sensivel", "sensitive"} for k in ["modulo", "acao", "motivo"])
+    rows = [_mask_log_row(r, profile, sensitive_payload=sensitive_payload) for r in rows]
+    return {"success": True, "data": rows, "total": int(total), "limit": meta["limit"], "offset": meta["offset"], "items": rows, "pagination": {"limit": meta["limit"], "offset": meta["offset"], "total": int(total)}}, False
