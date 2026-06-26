@@ -19,7 +19,7 @@ except Exception:  # pragma: no cover
 
 PROJECT_ID = os.getenv("BIGQUERY_PROJECT_ID") or os.getenv("GCP_PROJECT_ID") or bq.GCP_PROJECT_ID or "painel-universidade"
 DATASET = os.getenv("BIGQUERY_DATASET") or os.getenv("BQ_DATASET") or bq.BQ_DATASET or "modelo_estrela"
-VIEW_LEADS_PRIORIZADOS = "vw_op_leads_disponiveis_novos"
+VIEW_LEADS_PRIORIZADOS = "vw_op_leads_disponiveis"
 FALLBACK_VIEW_LEADS_PRIORIZADOS = "vw_leads_priorizados"
 FINAL_STATUS = ("CONCLUIDO", "MAT", "CANCELADO")
 ACTIVE_STATUS = ("PENDENTE", "EM_ATENDIMENTO", "AC", "EC", "NT", "IF", "NI", "COU")
@@ -48,12 +48,14 @@ def _final_status_sql() -> str:
     return "'" + "','".join(FINAL_STATUS) + "'"
 
 
-def _available_leads_predicate(alias: str = "l") -> str:
-    return f"""COALESCE({alias}.flag_matriculado, FALSE) = FALSE
-      AND COALESCE({alias}.nunca_disparado, FALSE) = TRUE
-      AND ({alias}.consultor_disparo IS NULL OR TRIM({alias}.consultor_disparo) = '')
-      AND ({alias}.tipo_disparo IS NULL OR TRIM({alias}.tipo_disparo) = '')
-      AND {alias}.data_disparo IS NULL"""
+def _available_leads_predicate(alias: str = "l", redisparo: bool = False) -> str:
+    """Lead livre: não matriculado e sem lote ativo; tipo_disparo nunca restringe a fila."""
+    disparo = (
+        f"{alias}.data_disparo IS NOT NULL AND DATE(SAFE_CAST({alias}.data_disparo AS TIMESTAMP)) < DATE_SUB(CURRENT_DATE(), INTERVAL 7 DAY)"
+        if redisparo
+        else f"{alias}.data_disparo IS NULL"
+    )
+    return f"COALESCE({alias}.flag_matriculado, FALSE) = FALSE AND ({disparo})"
 
 
 def _missing_operational_tables() -> List[str]:
@@ -197,18 +199,34 @@ def get_leads_disponiveis(filters: Mapping[str, Any], meta: Mapping[str, Any]) -
     params: List[Any] = []
     _add_eq(where, params, "l", filters, ["campanha", "curso", "polo", "origem", "nivel_prioridade"])
     params += [bigquery.ScalarQueryParameter("limit", "INT64", _int(meta.get("limit"), 100, 1, 5000)), bigquery.ScalarQueryParameter("offset", "INT64", _int(meta.get("offset"), 0, 0, 1_000_000))]
+    select_cols = """
+      l.sk_pessoa,l.cpf,l.nome,l.celular,l.email,l.curso,l.modalidade,l.turno,l.polo,l.origem,
+      l.tipo_negocio,l.campanha,l.canal,l.acao_comercial,l.consultor_disparo,l.tipo_disparo,
+      l.data_inscricao,l.data_matricula,l.data_disparo,l.score_prioridade,l.nivel_prioridade,
+      l.etapa_operacional,l.nunca_disparado,l.dias_sem_acao,l.flag_matriculado
+    """
+    total = _single(f"""SELECT COUNT(1) AS total
+    FROM {_lead_source_ref()} l
+    LEFT JOIN {_ref('op_lote_leads')} op
+      ON l.sk_pessoa = op.sk_pessoa
+     AND op.status_atendimento IN ('PENDENTE','EM_ATENDIMENTO','AC','EC','NT','IF','NI','COU')
+    WHERE {' AND '.join(where)}""", params, "operacional_leads_disponiveis_total").get("total") or 0
     sql = f"""
-    SELECT l.*
+    SELECT {select_cols}
     FROM {_lead_source_ref()} l
     LEFT JOIN {_ref('op_lote_leads')} op
       ON l.sk_pessoa = op.sk_pessoa
      AND op.status_atendimento IN ('PENDENTE','EM_ATENDIMENTO','AC','EC','NT','IF','NI','COU')
     WHERE {' AND '.join(where)}
-    ORDER BY l.data_inscricao DESC, l.score_prioridade DESC, l.nunca_disparado DESC, COALESCE(l.dias_sem_acao, 0) DESC, l.sk_pessoa DESC
+    ORDER BY l.data_inscricao DESC NULLS LAST,
+      l.score_prioridade DESC,
+      CASE UPPER(COALESCE(l.nivel_prioridade,'')) WHEN 'ALTA' THEN 1 WHEN 'MÉDIA' THEN 2 WHEN 'MEDIA' THEN 2 WHEN 'NORMAL' THEN 3 ELSE 4 END,
+      COALESCE(l.dias_sem_acao, 0) DESC,
+      l.sk_pessoa DESC
     LIMIT @limit OFFSET @offset
     """
     rows = _run(sql, params, "operacional_leads_disponiveis")
-    return {"items": rows, "count": len(rows), "pagination": {"limit": meta.get("limit"), "offset": meta.get("offset")}}, False
+    return {"items": rows, "count": len(rows), "total": int(total), "pagination": {"limit": meta.get("limit"), "offset": meta.get("offset"), "total": int(total)}}, False
 
 
 def criar_lote(payload: Mapping[str, Any]) -> Tuple[Dict[str, Any], bool]:
@@ -220,36 +238,48 @@ def criar_lote(payload: Mapping[str, Any]) -> Tuple[Dict[str, Any], bool]:
     for k in ["campanha", "curso", "polo", "origem", "nivel_prioridade"]:
         if payload.get(k) and k not in filtros:
             filtros[k] = payload.get(k)
-    filtros["tipo_disparo"] = tipo if not filtros.get("tipo_disparo") else filtros["tipo_disparo"]
-    leads_data, _ = get_leads_disponiveis(filtros, {"limit": quantidade, "offset": 0})
-    leads = leads_data["items"]
-    if not leads:
+
+    where = ["op.sk_pessoa IS NULL", _available_leads_predicate("l")]
+    params: List[Any] = []
+    _add_eq(where, params, "l", filtros, ["campanha", "curso", "polo", "origem", "nivel_prioridade"])
+    elegiveis_sql = f"""
+      FROM {_lead_source_ref()} l
+      LEFT JOIN {_ref('op_lote_leads')} op
+        ON l.sk_pessoa = op.sk_pessoa
+       AND op.status_atendimento IN ('PENDENTE','EM_ATENDIMENTO','AC','EC','NT','IF','NI','COU')
+      WHERE {' AND '.join(where)}
+    """
+    qtd_liberada = int((_single(f"SELECT COUNT(1) AS total {elegiveis_sql}", params, "operacional_criar_lote_total").get("total") or 0))
+    if qtd_liberada <= 0:
         raise ValueError("Nenhum lead disponível para os filtros informados.")
     lote_id = str(uuid.uuid4())
-    base_params = [
+    selected = min(quantidade, qtd_liberada)
+    base_params = params + [
         bigquery.ScalarQueryParameter("lote_id", "STRING", lote_id),
         bigquery.ScalarQueryParameter("nome_lote", "STRING", str(payload.get("nome_lote") or "").strip()),
-        bigquery.ScalarQueryParameter("campanha", "STRING", str(payload.get("campanha") or filtros.get("campanha") or "").strip()),
+        bigquery.ScalarQueryParameter("campanha_lote", "STRING", str(payload.get("campanha") or filtros.get("campanha") or "").strip()),
         bigquery.ScalarQueryParameter("tipo_disparo", "STRING", tipo),
         bigquery.ScalarQueryParameter("consultor_disparo", "STRING", str(payload.get("consultor_disparo") or "").strip()),
-        bigquery.ScalarQueryParameter("quantidade_leads", "INT64", len(leads)),
+        bigquery.ScalarQueryParameter("quantidade", "INT64", quantidade),
+        bigquery.ScalarQueryParameter("quantidade_leads", "INT64", selected),
         bigquery.ScalarQueryParameter("criado_por", "STRING", str(payload.get("criado_por") or "").strip()),
     ]
     _run(f"""INSERT INTO {_ref('op_lotes_disparo')}
     (lote_id,nome_lote,campanha,tipo_disparo,consultor_disparo,quantidade_leads,status_lote,total_retorno,total_positivo,total_negativo,total_matriculas,taxa_retorno,taxa_matricula,criado_por,created_at,updated_at)
-    VALUES (@lote_id,@nome_lote,@campanha,@tipo_disparo,@consultor_disparo,@quantidade_leads,'ABERTO',0,0,0,0,0,0,@criado_por,CURRENT_TIMESTAMP(),CURRENT_TIMESTAMP())""", base_params, "operacional_criar_lote")
-    for lead in leads:
-        params = [bigquery.ScalarQueryParameter("lote_id", "STRING", lote_id)] + [bigquery.ScalarQueryParameter(k, "STRING" if k not in {"sk_pessoa","score_prioridade"} else "INT64", lead.get(k)) for k in ["sk_pessoa","cpf","nome","celular","email","curso","modalidade","turno","polo","origem","tipo_negocio","campanha","canal","acao_comercial","tipo_disparo","score_prioridade","nivel_prioridade","etapa_operacional"]]
-        params.append(bigquery.ScalarQueryParameter("consultor_disparo", "STRING", str(payload.get("consultor_disparo") or lead.get("consultor_disparo") or "")))
-        _run(f"""INSERT INTO {_ref('op_lote_leads')}
-        (lote_id,sk_pessoa,cpf,nome,celular,email,curso,modalidade,turno,polo,origem,tipo_negocio,campanha,canal,acao_comercial,tipo_disparo,consultor_disparo,status_atendimento,retorno,positivo,negativo,matriculado,observacao,data_inscricao,data_matricula,data_disparo,score_prioridade,nivel_prioridade,etapa_operacional,created_at,updated_at)
-        SELECT @lote_id,@sk_pessoa,@cpf,@nome,@celular,@email,@curso,@modalidade,@turno,@polo,@origem,@tipo_negocio,@campanha,@canal,@acao_comercial,@tipo_disparo,@consultor_disparo,'PENDENTE',FALSE,FALSE,FALSE,FALSE,NULL,SAFE_CAST(NULL AS DATE),SAFE_CAST(NULL AS DATE),CURRENT_TIMESTAMP(),@score_prioridade,@nivel_prioridade,@etapa_operacional,CURRENT_TIMESTAMP(),CURRENT_TIMESTAMP()
-        WHERE NOT EXISTS (SELECT 1 FROM {_ref('op_lote_leads')} WHERE sk_pessoa=@sk_pessoa AND status_atendimento IN ('PENDENTE','EM_ATENDIMENTO','AC','EC','NT','IF','NI','COU'))""", params, "operacional_criar_lote_lead")
-        _evento(lote_id, lead.get("sk_pessoa"), lead.get("cpf"), "LOTE_CRIADO", None, "PENDENTE", "Lead incluído no lote", payload.get("criado_por"))
+    VALUES (@lote_id,@nome_lote,@campanha_lote,@tipo_disparo,@consultor_disparo,@quantidade_leads,'ABERTO',0,0,0,0,0,0,@criado_por,CURRENT_TIMESTAMP(),CURRENT_TIMESTAMP())""", base_params, "operacional_criar_lote")
+    # Regras de prioridade: data mais recente, score maior, nível ALTA/MÉDIA/NORMAL, maior inatividade e sk_pessoa como desempate.
+    _run(f"""INSERT INTO {_ref('op_lote_leads')}
+    (lote_id,sk_pessoa,cpf,nome,celular,email,curso,modalidade,turno,polo,origem,tipo_negocio,campanha,canal,acao_comercial,tipo_disparo,consultor_disparo,status_atendimento,retorno,positivo,negativo,matriculado,observacao,data_inscricao,data_matricula,data_disparo,score_prioridade,nivel_prioridade,etapa_operacional,created_at,updated_at)
+    SELECT @lote_id,l.sk_pessoa,l.cpf,l.nome,l.celular,l.email,l.curso,l.modalidade,l.turno,l.polo,l.origem,l.tipo_negocio,l.campanha,l.canal,l.acao_comercial,@tipo_disparo,@consultor_disparo,'PENDENTE',FALSE,FALSE,FALSE,FALSE,NULL,l.data_inscricao,l.data_matricula,NULL,l.score_prioridade,l.nivel_prioridade,l.etapa_operacional,CURRENT_TIMESTAMP(),CURRENT_TIMESTAMP()
+    {elegiveis_sql}
+    ORDER BY l.data_inscricao DESC NULLS LAST, l.score_prioridade DESC,
+      CASE UPPER(COALESCE(l.nivel_prioridade,'')) WHEN 'ALTA' THEN 1 WHEN 'MÉDIA' THEN 2 WHEN 'MEDIA' THEN 2 WHEN 'NORMAL' THEN 3 ELSE 4 END,
+      COALESCE(l.dias_sem_acao,0) DESC, l.sk_pessoa DESC
+    LIMIT @quantidade""", base_params, "operacional_criar_lote_leads_select")
+    _evento(lote_id, None, None, "LOTE_CRIADO", None, "PENDENTE", f"Lote criado com {selected} leads", payload.get("criado_por"))
     invalidate_gestao_cache()
-    aviso = None if len(leads) >= quantidade else f"Lote criado com {len(leads)} leads disponíveis de {quantidade} solicitados."
-    return {"lote_id": lote_id, "quantidade_leads": len(leads), "quantidade_liberada": len(leads), "status_lote": "ABERTO", "aviso": aviso}, False
-
+    aviso = None if selected >= quantidade else f"Lote criado com {selected} leads disponíveis de {quantidade} solicitados."
+    return {"lote_id": lote_id, "quantidade_solicitada": quantidade, "quantidade_leads": selected, "quantidade_liberada": selected, "status_lote": "ABERTO", "aviso": aviso}, False
 
 def get_lotes(filters: Mapping[str, Any], meta: Mapping[str, Any]) -> Tuple[Dict[str, Any], bool]:
     where, params = ["1=1"], []
