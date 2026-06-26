@@ -91,6 +91,7 @@ from services.gestao_operacional import (
     importar_novos_leads as gestao_op_importar_novos_leads,
     get_operacao_logs as gestao_op_get_logs,
     cancelar_lote as gestao_op_cancelar_lote,
+    marcar_lote_disparado as gestao_op_marcar_lote_disparado,
 )
 
 logger = logging.getLogger(__name__)
@@ -733,6 +734,19 @@ def create_app() -> Flask:
             return jsonify({"success": False, "ok": False, "error": {"code": "GESTAO_LOTE_INVALID", "message": str(exc)}}), 400
         except Exception as exc:
             return _gestao_error_response(exc, code="GESTAO_LOTE_CRIAR_EXPORTAR_ERROR", message="Não foi possível gerar o lote pela procedure oficial.")
+
+
+    @app.post("/api/gestao/lotes/<lote_id>/marcar-disparado")
+    def api_gestao_lote_marcar_disparado(lote_id):
+        try:
+            payload = request.get_json(silent=True) or {}
+            usuario = payload.get("usuario") or getattr(g, "current_user", None) or "sistema"
+            data, cached = gestao_op_marcar_lote_disparado(lote_id, usuario)
+            return _gestao_success(data, {"lote_id": lote_id}, cached=cached)
+        except ValueError as exc:
+            return jsonify({"ok": False, "error": {"code": "GESTAO_LOTE_INVALID", "message": str(exc)}}), 400
+        except Exception as exc:
+            return _gestao_error_response(exc, code="GESTAO_LOTE_MARCAR_DISPARADO_ERROR", message="Não foi possível marcar o lote como disparado.")
 
     @app.get("/api/gestao/lotes/<lote_id>/csv")
     def api_gestao_lote_csv(lote_id):

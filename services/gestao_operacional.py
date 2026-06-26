@@ -326,10 +326,65 @@ def criar_lote(payload: Mapping[str, Any]) -> Tuple[Dict[str, Any], bool]:
 
 def get_lotes(filters: Mapping[str, Any], meta: Mapping[str, Any]) -> Tuple[Dict[str, Any], bool]:
     where, params = ["1=1"], []
-    _add_eq(where, params, "l", filters, ["status_lote", "consultor_disparo", "tipo_disparo", "campanha"])
-    params += [bigquery.ScalarQueryParameter("limit", "INT64", _int(meta.get("limit"), 100)), bigquery.ScalarQueryParameter("offset", "INT64", _int(meta.get("offset"), 0))]
-    rows = _run(f"SELECT * FROM {_ref('op_lotes_disparo')} l WHERE {' AND '.join(where)} ORDER BY created_at DESC LIMIT @limit OFFSET @offset", params, "operacional_lotes")
+    _add_eq(where, params, "r", filters, ["status_lote", "consultor_disparo", "tipo_disparo", "campanha"])
+    params += [
+        bigquery.ScalarQueryParameter("limit", "INT64", _int(meta.get("limit"), 100)),
+        bigquery.ScalarQueryParameter("offset", "INT64", _int(meta.get("offset"), 0)),
+    ]
+    rows = _run(f"""
+    SELECT
+      r.lote_id,
+      r.nome_lote,
+      r.nome_arquivo_exportado,
+      r.mes_leads,
+      r.exportado_por,
+      r.campanha,
+      r.tipo_disparo,
+      r.consultor_disparo,
+      r.quantidade_leads,
+      r.status_lote,
+      COALESCE(f.etapa_fluxo, r.etapa_fluxo) AS etapa_fluxo,
+      COALESCE(f.proxima_acao, r.proxima_acao) AS proxima_acao,
+      r.total_retorno,
+      r.total_positivo,
+      r.total_negativo,
+      r.total_matriculas,
+      r.taxa_retorno,
+      r.taxa_matricula,
+      r.exportado_em,
+      r.started_at,
+      r.importado_em,
+      r.finished_at
+    FROM {_ref('vw_op_lotes_resumo')} r
+    LEFT JOIN {_ref('vw_op_fluxo_lotes')} f USING (lote_id)
+    WHERE {' AND '.join(where)}
+    ORDER BY COALESCE(r.exportado_em, r.started_at, r.finished_at) DESC
+    LIMIT @limit OFFSET @offset
+    """, params, "operacional_lotes_views")
     return {"items": rows, "count": len(rows)}, False
+
+
+def marcar_lote_disparado(lote_id: str, usuario: str = "") -> Tuple[Dict[str, Any], bool]:
+    lote_id = _clean_text(lote_id)
+    usuario = _clean_text(usuario) or "sistema"
+    if not lote_id:
+        raise ValueError("lote_id é obrigatório.")
+    params = [
+        bigquery.ScalarQueryParameter("lote_id", "STRING", lote_id),
+        bigquery.ScalarQueryParameter("usuario", "STRING", usuario),
+    ]
+    _run(f"""
+    CALL {_ref('sp_op_marcar_lote_disparado')}(
+      @lote_id,
+      @usuario
+    )
+    """, params, "operacional_sp_marcar_lote_disparado")
+    invalidate_gestao_cache()
+    return {
+        "lote_id": lote_id,
+        "status_lote": "EM_ANDAMENTO",
+        "etapa_fluxo": "DISPARO_EM_ANDAMENTO",
+    }, False
 
 
 def get_lote_detalhe(lote_id: str) -> Tuple[Dict[str, Any], bool]:

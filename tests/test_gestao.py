@@ -503,6 +503,23 @@ def test_operacional_get_lotes_endpoint(client, monkeypatch):
     assert resp.get_json()["data"]["items"][0]["lote_id"] == "l1"
 
 
+
+def test_gestao_lote_marcar_disparado_endpoint(client, monkeypatch):
+    login(client)
+
+    def fake(lote_id, usuario):
+        assert lote_id == "l1"
+        assert usuario == "matheus"
+        return {"lote_id": lote_id, "status_lote": "EM_ANDAMENTO", "etapa_fluxo": "DISPARO_EM_ANDAMENTO"}, False
+
+    monkeypatch.setattr("app.gestao_op_marcar_lote_disparado", fake)
+    resp = client.post("/api/gestao/lotes/l1/marcar-disparado", json={})
+    body = resp.get_json()
+    assert resp.status_code == 200
+    assert body["ok"] is True
+    assert body["data"]["status_lote"] == "EM_ANDAMENTO"
+    assert body["data"]["etapa_fluxo"] == "DISPARO_EM_ANDAMENTO"
+
 def test_operacional_update_lead_status_endpoint(client, monkeypatch):
     login(client)
     def fake(sk_pessoa, payload):
