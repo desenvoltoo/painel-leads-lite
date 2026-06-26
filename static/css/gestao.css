@@ -206,3 +206,20 @@ button, a, input, select { min-height: 40px; }
 .op-progress .progress-caption { font-size: .9rem; color: #334155; margin-bottom: .35rem; font-weight: 600; }
 #opLoteAtualTable textarea { min-width: 180px; min-height: 38px; }
 #opLoteAtualTable td { vertical-align: top; }
+.lead-drawer {
+  background: #fff;
+  border-left: 1px solid var(--go-border, #e2e8f0);
+  box-shadow: -18px 0 40px rgba(15, 23, 42, .18);
+  height: 100vh;
+  max-width: 520px;
+  overflow: auto;
+  padding: 1rem;
+  position: fixed;
+  right: 0;
+  top: 0;
+  transform: translateX(105%);
+  transition: transform .2s ease;
+  width: min(96vw, 520px);
+  z-index: 1060;
+}
+.lead-drawer.active { transform: translateX(0); }
