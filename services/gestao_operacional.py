@@ -1062,8 +1062,55 @@ def auditoria_usuario(usuario_id: str) -> Tuple[Dict[str, Any], bool]:
 
 
 def registrar_auditoria(acao: str, usuario_id: str, autor: str, detalhes: Mapping[str, Any] | None = None) -> None:
-    p=[bigquery.ScalarQueryParameter("auditoria_id","STRING",str(uuid.uuid4())), bigquery.ScalarQueryParameter("usuario_id","STRING",usuario_id), bigquery.ScalarQueryParameter("acao","STRING",acao), bigquery.ScalarQueryParameter("autor","STRING",autor or "sistema"), bigquery.ScalarQueryParameter("detalhes","STRING",json.dumps(detalhes or {}, ensure_ascii=False, default=str))]
-    _run(f"INSERT INTO {_ref('op_auditoria_painel')} (auditoria_id, usuario_id, entidade_id, acao, usuario, detalhes, created_at) VALUES (@auditoria_id, @usuario_id, @usuario_id, @acao, @autor, @detalhes, CURRENT_TIMESTAMP())", p, "usuarios_auditoria_insert")
+    autor_email = _clean_text(autor) or "sistema"
+    payload_json = json.dumps(detalhes or {}, ensure_ascii=False, default=str)
+    params = [
+        bigquery.ScalarQueryParameter("audit_id", "STRING", str(uuid.uuid4())),
+        bigquery.ScalarQueryParameter("usuario_id", "STRING", usuario_id),
+        bigquery.ScalarQueryParameter("usuario_email", "STRING", autor_email),
+        bigquery.ScalarQueryParameter("acao", "STRING", acao),
+        bigquery.ScalarQueryParameter("modulo", "STRING", "USUARIOS"),
+        bigquery.ScalarQueryParameter("entidade", "STRING", "op_usuarios_painel"),
+        bigquery.ScalarQueryParameter("entidade_id", "STRING", usuario_id),
+        bigquery.ScalarQueryParameter("descricao", "STRING", f"{acao} em usuário do painel"),
+        bigquery.ScalarQueryParameter("payload_json", "STRING", payload_json),
+        bigquery.ScalarQueryParameter("ip", "STRING", None),
+        bigquery.ScalarQueryParameter("user_agent", "STRING", None),
+    ]
+    _run(
+        f"""
+        INSERT INTO {_ref('op_auditoria_painel')} (
+          audit_id,
+          usuario_id,
+          usuario_email,
+          acao,
+          modulo,
+          entidade,
+          entidade_id,
+          descricao,
+          payload_json,
+          ip,
+          user_agent,
+          created_at
+        )
+        VALUES (
+          @audit_id,
+          @usuario_id,
+          @usuario_email,
+          @acao,
+          @modulo,
+          @entidade,
+          @entidade_id,
+          @descricao,
+          @payload_json,
+          @ip,
+          @user_agent,
+          CURRENT_TIMESTAMP()
+        )
+        """,
+        params,
+        "usuarios_auditoria_insert",
+    )
 
 
 def salvar_usuario(payload: Mapping[str, Any], autor: str, usuario_id: str | None = None) -> Tuple[Dict[str, Any], bool]:

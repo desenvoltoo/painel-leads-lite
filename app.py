@@ -1302,26 +1302,42 @@ def create_app() -> Flask:
     def api_gestao_usuarios_ativar(usuario_id):
         denied = _require_admin_json()
         if denied: return denied
-        data, _ = gestao_op_alterar_status_usuario(usuario_id, True, getattr(g, "current_user", None) or "sistema"); return jsonify(data)
+        try:
+            data, _ = gestao_op_alterar_status_usuario(usuario_id, True, getattr(g, "current_user", None) or "sistema")
+            return jsonify(data)
+        except Exception as exc:
+            return _gestao_error_response(exc, code="USUARIOS_ATIVAR_ERROR", message="Não foi possível ativar usuário.")
 
     @app.post("/api/gestao/usuarios/<usuario_id>/desativar")
     def api_gestao_usuarios_desativar(usuario_id):
         denied = _require_admin_json()
         if denied: return denied
-        data, _ = gestao_op_alterar_status_usuario(usuario_id, False, getattr(g, "current_user", None) or "sistema"); return jsonify(data)
+        try:
+            data, _ = gestao_op_alterar_status_usuario(usuario_id, False, getattr(g, "current_user", None) or "sistema")
+            return jsonify(data)
+        except Exception as exc:
+            return _gestao_error_response(exc, code="USUARIOS_DESATIVAR_ERROR", message="Não foi possível desativar usuário.")
 
     @app.post("/api/gestao/usuarios/<usuario_id>/resetar-senha")
     def api_gestao_usuarios_resetar(usuario_id):
         denied = _require_admin_json()
         if denied: return denied
-        payload=request.get_json(silent=True) or {}; senha=str(payload.get("senha_temporaria") or payload.get("senha") or payload.get("password") or uuid.uuid4().hex[:10])
-        data, _ = gestao_op_resetar_senha_usuario(usuario_id, _hash_password(senha), getattr(g, "current_user", None) or "sistema"); return jsonify(data)
+        try:
+            payload=request.get_json(silent=True) or {}; senha=str(payload.get("senha_temporaria") or payload.get("senha") or payload.get("password") or uuid.uuid4().hex[:10])
+            data, _ = gestao_op_resetar_senha_usuario(usuario_id, _hash_password(senha), getattr(g, "current_user", None) or "sistema")
+            return jsonify(data)
+        except Exception as exc:
+            return _gestao_error_response(exc, code="USUARIOS_RESETAR_SENHA_ERROR", message="Não foi possível resetar senha do usuário.")
 
     @app.get("/api/gestao/usuarios/<usuario_id>/auditoria")
     def api_gestao_usuarios_auditoria(usuario_id):
         denied = _require_admin_json()
         if denied: return denied
-        data, _ = gestao_op_auditoria_usuario(usuario_id); return jsonify(data)
+        try:
+            data, _ = gestao_op_auditoria_usuario(usuario_id)
+            return jsonify(data)
+        except Exception as exc:
+            return _gestao_error_response(exc, code="USUARIOS_AUDITORIA_ERROR", message="Não foi possível carregar auditoria do usuário.")
 
     @app.get("/api/gestao/perfis")
     def api_gestao_perfis():
