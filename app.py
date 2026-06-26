@@ -97,6 +97,9 @@ from services.gestao_operacional import (
     get_lead_timeline as gestao_op_get_lead_timeline,
     get_lead_lotes as gestao_op_get_lead_lotes,
     get_lead_eventos as gestao_op_get_lead_eventos,
+    get_consultor_momento as gestao_op_get_consultor_momento,
+    get_lote_atual_leads as gestao_op_get_lote_atual_leads,
+    atualizar_lead_lote as gestao_op_atualizar_lead_lote,
     listar_usuarios as gestao_op_listar_usuarios,
     salvar_usuario as gestao_op_salvar_usuario,
     alterar_status_usuario as gestao_op_alterar_status_usuario,
@@ -873,6 +876,26 @@ def create_app() -> Flask:
     @app.get("/api/gestao/operacional/fila-leads")
     def api_gestao_operacional_fila_leads():
         return _gestao_operacional_endpoint(gestao_op_get_leads_disponiveis)
+
+    @app.get("/api/gestao/operacional/consultores")
+    def api_gestao_operacional_consultores():
+        return _gestao_operacional_endpoint(gestao_op_get_consultor_momento)
+
+    @app.get("/api/gestao/operacional/lote-atual/leads")
+    def api_gestao_operacional_lote_atual_leads():
+        return _gestao_operacional_endpoint(gestao_op_get_lote_atual_leads)
+
+    @app.post("/api/gestao/lotes/<lote_id>/leads/<sk_pessoa>/atualizar")
+    def api_gestao_lote_lead_atualizar(lote_id, sk_pessoa):
+        try:
+            payload = request.get_json(silent=True) or {}
+            usuario = payload.get("usuario") or getattr(g, "current_user", None) or "sistema"
+            data, cached = gestao_op_atualizar_lead_lote(lote_id, sk_pessoa, payload, usuario)
+            return _gestao_success(data, {"lote_id": lote_id, "sk_pessoa": sk_pessoa}, cached=cached)
+        except ValueError as exc:
+            return jsonify({"ok": False, "error": {"code": "GESTAO_OPERACIONAL_INVALID", "message": str(exc)}}), 400
+        except Exception as exc:
+            return _gestao_error_response(exc, code="GESTAO_OPERACIONAL_ATUALIZAR_LEAD_ERROR", message="Não foi possível atualizar o lead no lote.")
 
     @app.get("/api/gestao/operacional/logs")
     def api_gestao_operacional_logs():

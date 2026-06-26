@@ -175,7 +175,7 @@ def _extract_lote_row(rows: List[Dict[str, Any]], fallback: Mapping[str, Any]) -
 
 
 def _filters_meta(source: Mapping[str, Any]) -> Tuple[Dict[str, str], Dict[str, int]]:
-    filters = {k: str(source.get(k) or "").strip() for k in ["campanha", "curso", "polo", "origem", "nivel_prioridade", "status_lote", "consultor_disparo", "status_atendimento", "lote_id"] if str(source.get(k) or "").strip()}
+    filters = {k: str(source.get(k) or "").strip() for k in ["campanha", "curso", "polo", "origem", "nivel_prioridade", "status_lote", "consultor_disparo", "status_atendimento", "lote_id", "q", "busca", "somente_pendentes"] if str(source.get(k) or "").strip()}
     meta = {"limit": _int(source.get("limit"), 100, 1, 5000), "offset": _int(source.get("offset"), 0, 0, 1_000_000)}
     return filters, meta
 
@@ -198,46 +198,34 @@ def create_operational_tables() -> Dict[str, Any]:
     return {"created": ["op_lotes_disparo", "op_lote_leads", "op_lead_eventos", "op_bigquery_sync", "op_regras_distribuicao", "op_config_operacional"]}
 
 
+DASHBOARD_CARD_FIELDS = [
+    "leads_novos_disponiveis", "leads_redisparo_disponiveis", "leads_em_lotes",
+    "leads_pendentes", "leads_em_atendimento", "total_lotes", "lotes_abertos",
+    "lotes_em_andamento", "lotes_importados", "lotes_concluidos", "lotes_cancelados",
+    "retornos", "positivos", "negativos", "matriculas", "taxa_retorno_pct",
+    "taxa_matricula_pct",
+]
+
 def get_dashboard() -> Tuple[Dict[str, Any], bool]:
-    missing = _missing_operational_tables()
-    if missing:
-        return _zero_operational_indicators(missing), False
-    active = _active_status_sql()
-    final = _final_status_sql()
-    available = _available_leads_predicate("l")
     data = _single(f"""
-    SELECT
-      (SELECT COUNT(*) FROM {_lead_source_ref()} l
-       WHERE {available}
-         AND NOT EXISTS (
-           SELECT 1 FROM {_ref('op_lote_leads')} op
-           WHERE op.sk_pessoa = l.sk_pessoa
-             AND op.status_atendimento IN ({active})
-         )) AS leads_disponiveis,
-      (SELECT COUNT(*) FROM {_lead_source_ref()} l
-       WHERE COALESCE(l.flag_matriculado,FALSE)=FALSE
-         AND (COALESCE(l.nunca_disparado,FALSE)=FALSE OR TRIM(COALESCE(l.consultor_disparo,'')) != '' OR l.data_disparo IS NOT NULL)
-         AND NOT EXISTS (
-           SELECT 1 FROM {_ref('op_lote_leads')} op
-           WHERE op.sk_pessoa = l.sk_pessoa
-             AND op.status_atendimento IN ({active}, {final})
-         )) AS leads_redisparo,
-      (SELECT COUNT(*) FROM {_ref('op_lote_leads')} WHERE status_atendimento IN ({active})) AS leads_em_lote,
-      (SELECT COUNT(*) FROM {_ref('op_lote_leads')} WHERE status_atendimento='PENDENTE') AS leads_pendentes_em_lote,
-      (SELECT COUNT(*) FROM {_ref('op_lote_leads')} WHERE status_atendimento IN ('EM_ATENDIMENTO','AC','EC','NT','IF','NI','COU')) AS leads_em_atendimento,
-      (SELECT COUNT(*) FROM {_ref('op_lote_leads')} WHERE status_atendimento IN ({final})) AS leads_finalizados,
-      (SELECT COUNT(*) FROM {_ref('op_lote_leads')} WHERE matriculado OR status_atendimento='MAT') AS leads_matriculados,
-      COUNTIF(status_lote='ABERTO') AS lotes_abertos,
-      COUNTIF(status_lote='EM_ANDAMENTO') AS lotes_em_andamento,
-      COUNTIF(status_lote='CONCLUIDO') AS lotes_concluidos,
-      COALESCE(SUM(total_retorno),0) AS retornos,
-      COALESCE(SUM(total_positivo),0) AS positivos,
-      COALESCE(SUM(total_negativo),0) AS negativos,
-      COALESCE(SUM(total_matriculas),0) AS matriculas,
-      COALESCE(AVG(taxa_retorno),0) AS taxa_retorno,
-      COALESCE(AVG(taxa_matricula),0) AS taxa_matricula
-    FROM {_ref('op_lotes_disparo')}
-    """, operation="operacional_dashboard")
+    SELECT {", ".join(DASHBOARD_CARD_FIELDS)}
+    FROM {_ref('vw_op_dashboard_cards')}
+    LIMIT 1
+    """, operation="operacional_dashboard_cards")
+    missing = [field for field in DASHBOARD_CARD_FIELDS if field not in data]
+    if missing:
+        data["missing_fields"] = missing
+    # Backward-compatible aliases for older front-end/tests; keep None when absent so UI can show — instead of 0.
+    aliases = {
+        "leads_disponiveis": "leads_novos_disponiveis",
+        "leads_redisparo": "leads_redisparo_disponiveis",
+        "leads_em_lote": "leads_em_lotes",
+        "leads_pendentes_em_lote": "leads_pendentes",
+        "taxa_retorno": "taxa_retorno_pct",
+        "taxa_matricula": "taxa_matricula_pct",
+    }
+    for old, canonical in aliases.items():
+        data.setdefault(old, data.get(canonical))
     return data, False
 
 def get_leads_disponiveis(filters: Mapping[str, Any], meta: Mapping[str, Any]) -> Tuple[Dict[str, Any], bool]:
@@ -550,9 +538,11 @@ def executar_regras_distribuicao() -> Tuple[Dict[str, Any], bool]:
 
 
 EXPORT_COLUMNS_OPERACIONAL = [
-    "lote_id", "sk_pessoa", "nome", "cpf", "celular", "email", "curso", "modalidade", "turno",
-    "polo", "origem", "campanha", "canal", "acao_comercial", "tipo_disparo", "consultor_disparo",
-    "data_inscricao", "score_prioridade", "nivel_prioridade", "etapa_operacional", "status_atendimento",
+    "status_inscricao", "data_inscricao", "origem", "unidade", "tipo_negocio", "curso",
+    "modalidade", "turno", "nome", "cpf", "celular", "email", "data_ultima_acao",
+    "qtd_acionamentos", "status", "data_disparo", "peca_disparo", "texto_disparo",
+    "consultor_disparo", "tipo_disparo", "campanha", "observacao", "data_matricula",
+    "matriculado", "canal", "acao_comercial", "consultor_comercial",
 ]
 
 
@@ -615,7 +605,10 @@ def get_lote_csv(lote_id: str) -> Tuple[str, bytes, int]:
         raise ValueError("lote_id é obrigatório.")
     params = [bigquery.ScalarQueryParameter("lote_id", "STRING", lote_id)]
     rows = _run(
-        f"SELECT * FROM {_ref('vw_op_export_lote_csv')} WHERE lote_id=@lote_id",
+        f"""SELECT {", ".join(EXPORT_COLUMNS_OPERACIONAL)}, nome_arquivo_exportado, nome_lote
+        FROM {_ref('vw_op_export_lote_csv')}
+        WHERE lote_id=@lote_id
+        ORDER BY data_inscricao DESC, score_prioridade DESC""",
         params,
         "operacional_export_lote_csv",
     )
@@ -628,8 +621,7 @@ def get_lote_csv(lote_id: str) -> Tuple[str, bytes, int]:
     if not filename.lower().endswith(".csv"):
         filename = f"{filename}.csv"
 
-    metadata_cols = {"nome_arquivo_exportado"}
-    headers = [key for key in rows[0].keys() if key not in metadata_cols]
+    headers = EXPORT_COLUMNS_OPERACIONAL
     out = io.StringIO()
     writer = csv.DictWriter(out, fieldnames=headers, extrasaction="ignore", delimiter=";")
     writer.writeheader()
@@ -723,6 +715,66 @@ def importar_novos_leads(file: Any, metadata: Mapping[str, Any]) -> Tuple[Dict[s
         raise ValueError("Colunas mínimas ausentes: " + ", ".join(missing))
     return {"linhas_lidas": len(rows), "linhas_validas": len(rows), "linhas_rejeitadas": 0, "mensagem": "Arquivo validado. Use POST /api/upload para a carga oficial com dt_upload preenchido pelo backend.", "erros": [], "metadata": dict(metadata or {})}, False
 
+
+
+def get_consultor_momento(filters: Mapping[str, Any], meta: Mapping[str, Any]) -> Tuple[Dict[str, Any], bool]:
+    where, params = ["1=1"], []
+    _add_eq(where, params, "c", filters, ["consultor_disparo"])
+    params.append(bigquery.ScalarQueryParameter("limit", "INT64", _int(meta.get("limit"), 500, 1, 1000)))
+    rows = _run(f"""
+    SELECT consultor_disparo,total_leads_em_lote,total_lotes,leads_em_lotes_abertos,leads_em_disparo,
+           leads_com_retorno_importado,leads_finalizados,pendentes,em_atendimento,retornos,positivos,
+           negativos,matriculas,ultima_movimentacao
+    FROM {_ref('vw_op_consultor_momento')} c
+    WHERE {' AND '.join(where)}
+    ORDER BY ultima_movimentacao DESC NULLS LAST, consultor_disparo
+    LIMIT @limit
+    """, params, "operacional_consultor_momento")
+    return {"items": rows, "count": len(rows)}, False
+
+
+def get_lote_atual_leads(filters: Mapping[str, Any], meta: Mapping[str, Any]) -> Tuple[Dict[str, Any], bool]:
+    where, params = ["1=1"], []
+    _add_eq(where, params, "l", filters, ["lote_id", "consultor_disparo", "status_atendimento", "curso", "campanha"])
+    if str(filters.get("somente_pendentes") or "").lower() in {"1", "true", "sim", "s"}:
+        where.append("UPPER(COALESCE(l.status_atendimento,''))='PENDENTE'")
+    q = _clean_text(filters.get("q") or filters.get("busca"))
+    if q:
+        params.append(bigquery.ScalarQueryParameter("q", "STRING", q))
+        params.append(bigquery.ScalarQueryParameter("digits", "STRING", "".join(ch for ch in q if ch.isdigit())))
+        where.append("""(UPPER(COALESCE(l.nome,'')) LIKE CONCAT('%', UPPER(@q), '%')
+          OR REGEXP_REPLACE(COALESCE(l.cpf,''), r'[^0-9]', '') = @digits
+          OR REGEXP_REPLACE(COALESCE(l.celular,''), r'[^0-9]', '') = @digits)""")
+    params += [bigquery.ScalarQueryParameter("limit", "INT64", _int(meta.get("limit"), 100, 1, 500)), bigquery.ScalarQueryParameter("offset", "INT64", _int(meta.get("offset"), 0))]
+    cols = "lote_id,sk_pessoa,nome,cpf,celular,email,curso,polo,campanha,status_atendimento,retorno,positivo,negativo,matriculado,observacao,data_inscricao,data_disparo,ultimo_evento,ultimo_evento_em,ultimo_evento_por,consultor_disparo,data_matricula"
+    rows = _run(f"SELECT {cols} FROM {_ref('vw_op_lote_atual_leads')} l WHERE {' AND '.join(where)} ORDER BY data_inscricao DESC LIMIT @limit OFFSET @offset", params, "operacional_lote_atual_leads")
+    total = _to_int(_single(f"SELECT COUNT(1) AS total FROM {_ref('vw_op_lote_atual_leads')} l WHERE {' AND '.join(where)}", params[:-2], "operacional_lote_atual_total").get("total"))
+    return {"items": rows, "count": len(rows), "pagination": {"total": total, "limit": _int(meta.get("limit"), 100), "offset": _int(meta.get("offset"), 0)}}, False
+
+
+def atualizar_lead_lote(lote_id: str, sk_pessoa: str, payload: Mapping[str, Any], usuario: str) -> Tuple[Dict[str, Any], bool]:
+    lote_id = _clean_text(lote_id)
+    if not lote_id or not sk_pessoa:
+        raise ValueError("lote_id e sk_pessoa são obrigatórios.")
+    status = _clean_text(payload.get("status_atendimento")).upper()
+    if status and status not in STATUS_ATENDIMENTO_MAP:
+        raise ValueError("status_atendimento inválido.")
+    params = [
+        bigquery.ScalarQueryParameter("lote_id", "STRING", lote_id),
+        bigquery.ScalarQueryParameter("sk_pessoa", "INT64", int(sk_pessoa)),
+        bigquery.ScalarQueryParameter("usuario", "STRING", _clean_text(usuario) or "sistema"),
+        bigquery.ScalarQueryParameter("status_atendimento", "STRING", status),
+        bigquery.ScalarQueryParameter("observacao", "STRING", _clean_text(payload.get("observacao"))),
+        bigquery.ScalarQueryParameter("matriculado", "BOOL", bool(payload.get("matriculado", False))),
+        bigquery.ScalarQueryParameter("data_matricula", "DATE", payload.get("data_matricula") or None),
+        bigquery.ScalarQueryParameter("consultor_disparo", "STRING", _clean_text(payload.get("consultor_disparo"))),
+    ]
+    _run(f"""CALL {_ref('sp_op_atualizar_lead_lote')}(
+      @lote_id,@sk_pessoa,@usuario,@status_atendimento,@observacao,@matriculado,@data_matricula,@consultor_disparo
+    )""", params, "operacional_sp_atualizar_lead_lote")
+    invalidate_gestao_cache()
+    updated, _ = get_lote_atual_leads({"lote_id": lote_id, "busca": str(sk_pessoa)}, {"limit": 1, "offset": 0})
+    return {"success": True, "lote_id": lote_id, "sk_pessoa": int(sk_pessoa), "lead": (updated.get("items") or [{}])[0]}, False
 
 def get_fila_leads(filters: Mapping[str, Any]) -> Tuple[Dict[str, Any], bool]:
     f, m = _filters_meta(filters)
