@@ -748,3 +748,194 @@ def get_operacao_logs(filters: Mapping[str, Any]) -> Tuple[Dict[str, Any], bool]
     eventos = _run(f"SELECT 'evento' AS origem, created_at, tipo_evento AS tipo, lote_id, sk_pessoa, descricao, usuario FROM {_ref('op_lead_eventos')} ORDER BY created_at DESC LIMIT @limit", params, "operacional_logs_eventos")
     sync = _run(f"SELECT 'bigquery_sync' AS origem, created_at, status_sync AS tipo, lote_id, NULL AS sk_pessoa, erro AS descricao, NULL AS usuario FROM {_ref('op_bigquery_sync')} ORDER BY created_at DESC LIMIT @limit", params, "operacional_logs_sync")
     return {"items": sorted(eventos + sync, key=lambda r: str(r.get("created_at") or ""), reverse=True)[:limit], "count": min(len(eventos) + len(sync), limit)}, False
+
+
+RETORNO_ALIASES = {
+    "status": "status_retorno",
+    "retorno_status": "status_retorno",
+    "status_atendimento": "status_retorno",
+    "obs": "observacao",
+    "telefone": "celular",
+}
+RETORNO_COLUMNS = ["sk_pessoa", "cpf", "celular", "nome", "status_retorno", "observacao", "data_contato"]
+VALID_RETORNO_STATUS = {"AC", "EC", "NT", "IF", "MAT", "NI", "COU"}
+
+
+def _normalize_return_row(row: Mapping[str, Any]) -> Dict[str, Any]:
+    normalized: Dict[str, Any] = {}
+    for key, value in (row or {}).items():
+        col = str(key or "").strip().lower()
+        col = RETORNO_ALIASES.get(col, col)
+        if col in RETORNO_COLUMNS and col not in normalized:
+            normalized[col] = "" if value is None else str(value).strip()
+    status = str(normalized.get("status_retorno") or "").strip().upper()
+    normalized["status_retorno"] = status
+    return {col: normalized.get(col, "") for col in RETORNO_COLUMNS}
+
+
+def importar_retorno_lote(file: Any, lote_id: str, usuario: str = "") -> Tuple[Dict[str, Any], bool]:
+    lote_id = _clean_text(lote_id)
+    if not lote_id:
+        raise ValueError("O usuário deve selecionar um lote.")
+    rows = _read_upload_rows(file)
+    if not rows:
+        raise ValueError("Arquivo vazio.")
+    lote = _single(
+        f"SELECT lote_id, nome_lote FROM {_ref('op_lotes_disparo')} WHERE lote_id=@lote_id",
+        [bigquery.ScalarQueryParameter("lote_id", "STRING", lote_id)],
+        "retorno_lote_exists",
+    )
+    if not lote:
+        raise ValueError("Lote não encontrado.")
+
+    import_batch_id = str(uuid.uuid4())
+    staging_rows: List[Dict[str, Any]] = []
+    errors: List[str] = []
+    for idx, raw in enumerate(rows, start=2):
+        row = _normalize_return_row(raw)
+        if row["status_retorno"] not in VALID_RETORNO_STATUS:
+            errors.append(f"Linha {idx}: status_retorno inválido.")
+            continue
+        if not (row.get("sk_pessoa") or row.get("cpf") or row.get("celular")):
+            errors.append(f"Linha {idx}: informe sk_pessoa, cpf ou celular.")
+            continue
+        staging_rows.append({
+            "lote_id": lote_id,
+            "import_batch_id": import_batch_id,
+            "usuario": _clean_text(usuario) or "sistema",
+            **row,
+        })
+    if errors:
+        raise ValueError("; ".join(errors[:10]))
+
+    client = bq.get_bq_client()
+    table_id = f"{PROJECT_ID}.{DATASET}.op_lote_retorno_staging"
+    insert_errors = client.insert_rows_json(table_id, staging_rows, ignore_unknown_values=True)
+    if insert_errors:
+        raise RuntimeError(f"Falha ao inserir retorno na staging: {insert_errors}")
+
+    proc_rows = _run(
+        f"""CALL `{PROJECT_ID}.{DATASET}.sp_op_processar_retorno_lote`(@lote_id, @import_batch_id, @usuario)""",
+        [
+            bigquery.ScalarQueryParameter("lote_id", "STRING", lote_id),
+            bigquery.ScalarQueryParameter("import_batch_id", "STRING", import_batch_id),
+            bigquery.ScalarQueryParameter("usuario", "STRING", _clean_text(usuario) or "sistema"),
+        ],
+        "retorno_lote_processar",
+    )
+    summary = dict(proc_rows[0] if proc_rows else {})
+    data = {
+        "success": True,
+        "lote_id": lote_id,
+        "nome_lote": summary.get("nome_lote") or lote.get("nome_lote"),
+        "import_batch_id": import_batch_id,
+        "linhas_recebidas": len(staging_rows),
+        "leads_atualizados": _to_int(summary.get("leads_atualizados")),
+        "total_retorno": _to_int(summary.get("total_retorno")),
+        "total_positivo": _to_int(summary.get("total_positivo")),
+        "total_negativo": _to_int(summary.get("total_negativo")),
+        "total_matriculas": _to_int(summary.get("total_matriculas")),
+    }
+    invalidate_gestao_cache()
+    return data, False
+
+
+def buscar_leads(q: str, limit: int = 20) -> Tuple[Dict[str, Any], bool]:
+    term = _clean_text(q)
+    if not term:
+        return {"items": []}, False
+    digits = "".join(ch for ch in term if ch.isdigit())
+    params = [bigquery.ScalarQueryParameter("q", "STRING", term), bigquery.ScalarQueryParameter("digits", "STRING", digits), bigquery.ScalarQueryParameter("limit", "INT64", _int(limit, 20, 1, 50))]
+    rows = _run(f"""
+    SELECT l.*
+    FROM {_ref('vw_leads_painel_lite')} l
+    WHERE UPPER(COALESCE(l.nome,'')) LIKE CONCAT('%', UPPER(@q), '%')
+       OR REGEXP_REPLACE(COALESCE(l.cpf,''), r'[^0-9]', '') = @digits
+       OR REGEXP_REPLACE(COALESCE(l.celular,''), r'[^0-9]', '') = @digits
+       OR UPPER(COALESCE(l.email,'')) = UPPER(@q)
+       OR CAST(l.sk_pessoa AS STRING) = @q
+       OR EXISTS (SELECT 1 FROM {_ref('op_lote_leads')} ol WHERE ol.sk_pessoa=l.sk_pessoa AND CAST(ol.lote_id AS STRING)=@q)
+    QUALIFY ROW_NUMBER() OVER(PARTITION BY l.sk_pessoa ORDER BY l.data_inscricao DESC)=1
+    ORDER BY l.data_inscricao DESC
+    LIMIT @limit
+    """, params, "leads_buscar")
+    return {"items": rows}, False
+
+
+def get_lead_lotes(sk_pessoa: str) -> Tuple[Dict[str, Any], bool]:
+    p = [bigquery.ScalarQueryParameter("sk_pessoa", "INT64", int(sk_pessoa))]
+    rows = _run(f"""
+    SELECT ol.lote_id, ld.nome_lote, ol.status_atendimento, ol.retorno, ol.positivo, ol.negativo, ol.matriculado,
+           ld.exportado_em AS data_exportacao, ol.data_disparo, ld.importado_em AS data_importacao_retorno,
+           ol.ultimo_evento, ol.ultimo_evento_em, ol.ultimo_evento_por
+    FROM {_ref('op_lote_leads')} ol
+    LEFT JOIN {_ref('op_lotes_disparo')} ld ON ld.lote_id=ol.lote_id
+    WHERE ol.sk_pessoa=@sk_pessoa
+    QUALIFY ROW_NUMBER() OVER(PARTITION BY ol.lote_id ORDER BY ol.updated_at DESC)=1
+    ORDER BY COALESCE(ol.updated_at, ld.updated_at) DESC
+    """, p, "lead_lotes")
+    return {"items": rows}, False
+
+
+def get_lead_timeline(sk_pessoa: str) -> Tuple[Dict[str, Any], bool]:
+    p = [bigquery.ScalarQueryParameter("sk_pessoa", "INT64", int(sk_pessoa))]
+    return {"items": _run(f"SELECT * FROM {_ref('op_lead_timeline')} WHERE sk_pessoa=@sk_pessoa ORDER BY created_at DESC LIMIT 500", p, "lead_timeline")}, False
+
+
+def get_lead_eventos(sk_pessoa: str) -> Tuple[Dict[str, Any], bool]:
+    p = [bigquery.ScalarQueryParameter("sk_pessoa", "INT64", int(sk_pessoa))]
+    return {"items": _run(f"SELECT * FROM {_ref('op_lead_eventos')} WHERE sk_pessoa=@sk_pessoa ORDER BY created_at DESC LIMIT 500", p, "lead_eventos")}, False
+
+
+def _api_response(data=None, message="OK", success=True):
+    return {"success": success, "message": message, "data": data}
+
+
+def listar_perfis() -> Tuple[Dict[str, Any], bool]:
+    rows = _run(f"SELECT * FROM {_ref('op_perfis_painel')} WHERE UPPER(COALESCE(codigo_perfil, perfil, nome, '')) IN ('ADMIN','GESTOR','OPERADOR','LEITURA') ORDER BY nome", operation="usuarios_perfis")
+    if not rows:
+        rows = [{"perfil_id": p, "codigo_perfil": p, "nome": p} for p in ["ADMIN", "GESTOR", "OPERADOR", "LEITURA"]]
+    return _api_response(rows), False
+
+
+def listar_usuarios() -> Tuple[Dict[str, Any], bool]:
+    return _api_response(_run(f"SELECT * FROM {_ref('vw_op_usuarios_painel')} ORDER BY nome LIMIT 500", operation="usuarios_listar")), False
+
+
+def auditoria_usuario(usuario_id: str) -> Tuple[Dict[str, Any], bool]:
+    p=[bigquery.ScalarQueryParameter("usuario_id","STRING",usuario_id)]
+    return _api_response(_run(f"SELECT * FROM {_ref('op_auditoria_painel')} WHERE usuario_id=@usuario_id OR entidade_id=@usuario_id ORDER BY created_at DESC LIMIT 200", p, "usuarios_auditoria")), False
+
+
+def registrar_auditoria(acao: str, usuario_id: str, autor: str, detalhes: Mapping[str, Any] | None = None) -> None:
+    p=[bigquery.ScalarQueryParameter("auditoria_id","STRING",str(uuid.uuid4())), bigquery.ScalarQueryParameter("usuario_id","STRING",usuario_id), bigquery.ScalarQueryParameter("acao","STRING",acao), bigquery.ScalarQueryParameter("autor","STRING",autor or "sistema"), bigquery.ScalarQueryParameter("detalhes","STRING",json.dumps(detalhes or {}, ensure_ascii=False, default=str))]
+    _run(f"INSERT INTO {_ref('op_auditoria_painel')} (auditoria_id, usuario_id, entidade_id, acao, usuario, detalhes, created_at) VALUES (@auditoria_id, @usuario_id, @usuario_id, @acao, @autor, @detalhes, CURRENT_TIMESTAMP())", p, "usuarios_auditoria_insert")
+
+
+def salvar_usuario(payload: Mapping[str, Any], autor: str, usuario_id: str | None = None) -> Tuple[Dict[str, Any], bool]:
+    nome=_clean_text(payload.get("nome")); email=_clean_text(payload.get("email")).lower(); perfil_id=_clean_text(payload.get("perfil_id")); ativo=bool(payload.get("ativo", True)); status=_clean_text(payload.get("status_usuario")) or ("ATIVO" if ativo else "INATIVO")
+    if not nome or not email or not perfil_id: raise ValueError("nome, email e perfil_id são obrigatórios.")
+    if usuario_id:
+        p=[bigquery.ScalarQueryParameter("usuario_id","STRING",usuario_id), bigquery.ScalarQueryParameter("nome","STRING",nome), bigquery.ScalarQueryParameter("email","STRING",email), bigquery.ScalarQueryParameter("perfil_id","STRING",perfil_id), bigquery.ScalarQueryParameter("ativo","BOOL",ativo), bigquery.ScalarQueryParameter("status_usuario","STRING",status)]
+        _run(f"UPDATE {_ref('op_usuarios_painel')} SET nome=@nome,email=@email,perfil_id=@perfil_id,ativo=@ativo,status_usuario=@status_usuario,updated_at=CURRENT_TIMESTAMP() WHERE usuario_id=@usuario_id", p, "usuarios_update")
+        registrar_auditoria("EDICAO_USUARIO", usuario_id, autor, {"email": email, "perfil_id": perfil_id})
+    else:
+        usuario_id=str(uuid.uuid4()); password_hash=_clean_text(payload.get("password_hash"))
+        p=[bigquery.ScalarQueryParameter("usuario_id","STRING",usuario_id), bigquery.ScalarQueryParameter("nome","STRING",nome), bigquery.ScalarQueryParameter("email","STRING",email), bigquery.ScalarQueryParameter("perfil_id","STRING",perfil_id), bigquery.ScalarQueryParameter("ativo","BOOL",ativo), bigquery.ScalarQueryParameter("status_usuario","STRING",status), bigquery.ScalarQueryParameter("primeiro_acesso","BOOL",True), bigquery.ScalarQueryParameter("password_hash","STRING",password_hash)]
+        _run(f"INSERT INTO {_ref('op_usuarios_painel')} (usuario_id,nome,email,perfil_id,ativo,status_usuario,primeiro_acesso,password_hash,created_at,updated_at) VALUES (@usuario_id,@nome,@email,@perfil_id,@ativo,@status_usuario,@primeiro_acesso,@password_hash,CURRENT_TIMESTAMP(),CURRENT_TIMESTAMP())", p, "usuarios_insert")
+        registrar_auditoria("CRIACAO_USUARIO", usuario_id, autor, {"email": email, "perfil_id": perfil_id})
+    return _api_response({"usuario_id": usuario_id}, "Usuário salvo."), False
+
+
+def alterar_status_usuario(usuario_id: str, ativo: bool, autor: str) -> Tuple[Dict[str, Any], bool]:
+    p=[bigquery.ScalarQueryParameter("usuario_id","STRING",usuario_id), bigquery.ScalarQueryParameter("ativo","BOOL",ativo), bigquery.ScalarQueryParameter("status_usuario","STRING","ATIVO" if ativo else "INATIVO")]
+    _run(f"UPDATE {_ref('op_usuarios_painel')} SET ativo=@ativo,status_usuario=@status_usuario,updated_at=CURRENT_TIMESTAMP() WHERE usuario_id=@usuario_id", p, "usuarios_status")
+    registrar_auditoria("ATIVACAO_USUARIO" if ativo else "DESATIVACAO_USUARIO", usuario_id, autor)
+    return _api_response({"usuario_id": usuario_id, "ativo": ativo}, "Status atualizado."), False
+
+
+def resetar_senha_usuario(usuario_id: str, password_hash: str, autor: str) -> Tuple[Dict[str, Any], bool]:
+    p=[bigquery.ScalarQueryParameter("usuario_id","STRING",usuario_id), bigquery.ScalarQueryParameter("password_hash","STRING",password_hash)]
+    _run(f"UPDATE {_ref('op_usuarios_painel')} SET password_hash=@password_hash,primeiro_acesso=TRUE,updated_at=CURRENT_TIMESTAMP() WHERE usuario_id=@usuario_id", p, "usuarios_reset_senha")
+    registrar_auditoria("RESET_SENHA", usuario_id, autor)
+    return _api_response({"usuario_id": usuario_id}, "Senha resetada."), False
