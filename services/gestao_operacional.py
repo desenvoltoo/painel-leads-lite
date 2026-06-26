@@ -1041,7 +1041,7 @@ def listar_perfis() -> Tuple[Dict[str, Any], bool]:
 
 
 USER_TABLE_COLUMNS = ["usuario_id", "nome", "email", "password_hash", "perfil_id", "status_usuario", "ativo", "primeiro_acesso", "ultimo_login_em", "ultimo_login_ip", "criado_por", "created_at", "updated_at"]
-USER_VIEW_COLUMNS = ["usuario_id", "nome", "email", "perfil_id", "status_usuario", "ativo", "primeiro_acesso"]
+USER_VIEW_COLUMNS = ["usuario_id", "nome", "email", "perfil_id", "nome_perfil", "status_usuario", "ativo", "primeiro_acesso", "ultimo_login_em", "criado_por", "created_at", "updated_at", "pode_importar", "pode_exportar_lote", "pode_importar_retorno", "pode_finalizar_lote", "pode_cancelar_lote", "pode_ver_logs", "pode_gerenciar_usuarios"]
 
 
 def validate_user_schema() -> None:
@@ -1052,7 +1052,7 @@ def validate_user_schema() -> None:
 
 def listar_usuarios() -> Tuple[Dict[str, Any], bool]:
     validate_user_schema()
-    cols = "usuario_id,nome,email,perfil_id,status_usuario,ativo,primeiro_acesso,ultimo_login_em,created_at,updated_at"
+    cols = "usuario_id,nome,email,perfil_id,nome_perfil,status_usuario,ativo,primeiro_acesso,ultimo_login_em,criado_por,created_at,updated_at,pode_importar,pode_exportar_lote,pode_importar_retorno,pode_finalizar_lote,pode_cancelar_lote,pode_ver_logs,pode_gerenciar_usuarios"
     return _api_response(_run(f"SELECT {cols} FROM {_ref('vw_op_usuarios_painel')} ORDER BY nome LIMIT 500", operation="usuarios_listar")), False
 
 
@@ -1130,12 +1130,17 @@ def salvar_usuario(payload: Mapping[str, Any], autor: str, usuario_id: str | Non
     LIMIT 1
     """, dup_params, "usuarios_email_duplicado")
     if duplicate:
-        raise ValueError("Já existe usuário cadastrado com este e-mail.")
+        raise ValueError("Já existe um usuário com este e-mail.")
     if usuario_id:
+        password_hash = _clean_text(payload.get("password_hash"))
         p=[bigquery.ScalarQueryParameter("usuario_id","STRING",usuario_id), bigquery.ScalarQueryParameter("nome","STRING",nome), bigquery.ScalarQueryParameter("email","STRING",email), bigquery.ScalarQueryParameter("perfil_id","STRING",perfil_id), bigquery.ScalarQueryParameter("ativo","BOOL",ativo), bigquery.ScalarQueryParameter("status_usuario","STRING",status)]
-        _run(f"UPDATE {_ref('op_usuarios_painel')} SET nome=@nome,email=@email,perfil_id=@perfil_id,ativo=@ativo,status_usuario=@status_usuario,updated_at=CURRENT_TIMESTAMP() WHERE usuario_id=@usuario_id", p, "usuarios_update")
+        if password_hash:
+            p.append(bigquery.ScalarQueryParameter("password_hash", "STRING", password_hash))
+            _run(f"UPDATE {_ref('op_usuarios_painel')} SET nome=@nome,email=@email,perfil_id=@perfil_id,ativo=@ativo,status_usuario=@status_usuario,password_hash=@password_hash,primeiro_acesso=TRUE,updated_at=CURRENT_TIMESTAMP() WHERE usuario_id=@usuario_id", p, "usuarios_update")
+        else:
+            _run(f"UPDATE {_ref('op_usuarios_painel')} SET nome=@nome,email=@email,perfil_id=@perfil_id,ativo=@ativo,status_usuario=@status_usuario,updated_at=CURRENT_TIMESTAMP() WHERE usuario_id=@usuario_id", p, "usuarios_update")
         registrar_auditoria("EDICAO_USUARIO", usuario_id, autor, {"email": email, "perfil_id": perfil_id})
-        message = "Usuário atualizado com sucesso."
+        message = "Usuário salvo."
     else:
         usuario_id=str(uuid.uuid4()); password_hash=_clean_text(payload.get("password_hash"))
         if not password_hash:
@@ -1145,8 +1150,8 @@ def salvar_usuario(payload: Mapping[str, Any], autor: str, usuario_id: str | Non
         p=[bigquery.ScalarQueryParameter("usuario_id","STRING",usuario_id), bigquery.ScalarQueryParameter("nome","STRING",nome), bigquery.ScalarQueryParameter("email","STRING",email), bigquery.ScalarQueryParameter("password_hash","STRING",password_hash), bigquery.ScalarQueryParameter("perfil_id","STRING",perfil_id), bigquery.ScalarQueryParameter("status_usuario","STRING",status), bigquery.ScalarQueryParameter("ativo","BOOL",ativo), bigquery.ScalarQueryParameter("primeiro_acesso","BOOL",True), bigquery.ScalarQueryParameter("ultimo_login_em","TIMESTAMP",None), bigquery.ScalarQueryParameter("ultimo_login_ip","STRING",None), bigquery.ScalarQueryParameter("criado_por","STRING",criado_por)]
         _run(f"INSERT INTO {_ref('op_usuarios_painel')} (usuario_id,nome,email,password_hash,perfil_id,status_usuario,ativo,primeiro_acesso,ultimo_login_em,ultimo_login_ip,criado_por,created_at,updated_at) VALUES (@usuario_id,@nome,@email,@password_hash,@perfil_id,@status_usuario,@ativo,@primeiro_acesso,@ultimo_login_em,@ultimo_login_ip,@criado_por,CURRENT_TIMESTAMP(),CURRENT_TIMESTAMP())", p, "usuarios_insert")
         registrar_auditoria("CRIACAO_USUARIO", usuario_id, autor, {"email": email, "perfil_id": perfil_id})
-        message = "Usuário criado com sucesso."
-    return _api_response({"usuario_id": usuario_id, "nome": nome, "email": email, "perfil_id": perfil_id}, message), False
+        message = "Usuário salvo."
+    return _api_response({"usuario_id": usuario_id, "nome": nome, "email": email, "perfil_id": perfil_id, "status_usuario": status, "ativo": ativo}, message), False
 
 
 def alterar_status_usuario(usuario_id: str, ativo: bool, autor: str) -> Tuple[Dict[str, Any], bool]:

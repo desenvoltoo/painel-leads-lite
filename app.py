@@ -661,7 +661,7 @@ def create_app() -> Flask:
         logger.exception(
             "gestao_api_error route=%s endpoint=%s params=%s user=%s exception_type=%s bigquery_error_type=%s bigquery_full_error=%r",
             request.path,
-            request.endpoint,
+            f"{request.method} {request.endpoint}",
             _safe_request_params(),
             getattr(g, "current_user", None) or session.get("user_email"),
             exc.__class__.__name__,
@@ -1268,32 +1268,50 @@ def create_app() -> Flask:
         if denied: return denied
         try:
             payload = request.get_json(silent=True) or {}
-            payload["password_hash"] = _hash_password(str(payload.get("senha_temporaria") or payload.get("senha") or payload.get("password") or uuid.uuid4().hex[:10]))
-            data, _ = gestao_op_salvar_usuario(payload, getattr(g, "current_user", None) or "sistema")
+            raw_password = str(payload.get("senha_temporaria") or payload.get("senha") or payload.get("password") or "").strip()
+            if not raw_password:
+                raise ValueError("Senha inicial é obrigatória para criar usuário.")
+            payload["password_hash"] = _hash_password(raw_password)
+            data, _ = gestao_op_salvar_usuario(payload, getattr(g, "current_user", None) or "SISTEMA")
             return jsonify(data), 201
         except ValueError as exc:
             return jsonify({"success": False, "message": str(exc), "data": None}), 400
         except Exception as exc:
             logger.exception(
-                "usuarios_criar_error endpoint=%s payload_sem_senha=%s usuario_logado=%s bigquery_full_error=%r",
+                "usuarios_criar_error endpoint=%s metodo=%s payload_sem_senha=%s usuario_logado=%s bigquery_full_error=%r",
                 request.path,
+                request.method,
                 _safe_request_params(),
                 getattr(g, "current_user", None) or session.get("user_email"),
                 exc,
             )
-            return _gestao_error_response(exc, code="USUARIOS_CRIAR_ERROR", message="Não foi possível criar usuário.")
+            return _gestao_error_response(exc, code="USUARIOS_CRIAR_ERROR", message="Não foi possível salvar usuário.")
 
     @app.put("/api/gestao/usuarios/<usuario_id>")
     def api_gestao_usuarios_editar(usuario_id):
         denied = _require_admin_json()
         if denied: return denied
         try:
-            data, _ = gestao_op_salvar_usuario(request.get_json(silent=True) or {}, getattr(g, "current_user", None) or "sistema", usuario_id)
+            payload = request.get_json(silent=True) or {}
+            raw_password = str(payload.get("senha_temporaria") or payload.get("senha") or payload.get("password") or "").strip()
+            if raw_password:
+                payload["password_hash"] = _hash_password(raw_password)
+            else:
+                payload.pop("password_hash", None)
+            data, _ = gestao_op_salvar_usuario(payload, getattr(g, "current_user", None) or "SISTEMA", usuario_id)
             return jsonify(data)
         except ValueError as exc:
             return jsonify({"success": False, "message": str(exc), "data": None}), 400
         except Exception as exc:
-            return _gestao_error_response(exc, code="USUARIOS_EDITAR_ERROR", message="Não foi possível editar usuário.")
+            logger.exception(
+                "usuarios_editar_error endpoint=%s metodo=%s payload_sem_senha=%s usuario_logado=%s bigquery_full_error=%r",
+                request.path,
+                request.method,
+                _safe_request_params(),
+                getattr(g, "current_user", None) or session.get("user_email"),
+                exc,
+            )
+            return _gestao_error_response(exc, code="USUARIOS_EDITAR_ERROR", message="Não foi possível salvar usuário.")
 
     @app.post("/api/gestao/usuarios/<usuario_id>/ativar")
     def api_gestao_usuarios_ativar(usuario_id):
