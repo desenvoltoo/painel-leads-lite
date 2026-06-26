@@ -3,8 +3,10 @@ from __future__ import annotations
 import base64
 import csv
 import io
+import json
 import os
 import uuid
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Tuple
 
@@ -128,6 +130,50 @@ def _int(value: Any, default: int, min_value: int = 0, max_value: int = 5000) ->
     return max(min_value, min(parsed, max_value))
 
 
+def _clean_text(value: Any) -> str:
+    return str(value or "").strip()
+
+
+def _build_lote_nome(usuario: str, mes_leads: str = "") -> str:
+    safe_usuario = "_".join(_clean_text(usuario).upper().split()) or "SISTEMA"
+    safe_mes = "_".join(_clean_text(mes_leads).upper().split()) or datetime.utcnow().strftime("%Y%m")
+    return f"LOTE_{datetime.utcnow().strftime('%Y%m%d')}_LEADS_{safe_mes}_EXPORTADO_POR_{safe_usuario}"
+
+
+def _to_int(value: Any, default: int = 0) -> int:
+    try:
+        return int(value)
+    except Exception:
+        try:
+            return int(float(value))
+        except Exception:
+            return default
+
+
+def _extract_lote_row(rows: List[Dict[str, Any]], fallback: Mapping[str, Any]) -> Dict[str, Any]:
+    if not rows:
+        raise ValueError("A procedure oficial não retornou dados do lote criado.")
+    row = dict(rows[0] or {})
+    lote_id = _clean_text(row.get("lote_id") or row.get("id_lote"))
+    if not lote_id:
+        raise ValueError("A procedure oficial não retornou lote_id.")
+    usuario = _clean_text(fallback.get("usuario") or fallback.get("criado_por") or fallback.get("consultor_disparo"))
+    mes_leads = _clean_text(row.get("mes_leads") or row.get("mes_dos_leads") or fallback.get("mes_leads"))
+    nome_lote = _clean_text(row.get("nome_lote")) or _build_lote_nome(usuario, mes_leads)
+    nome_arquivo = _clean_text(row.get("nome_arquivo_exportado")) or f"{nome_lote}.csv"
+    if not nome_arquivo.lower().endswith(".csv"):
+        nome_arquivo = f"{nome_arquivo}.csv"
+    return {
+        **row,
+        "lote_id": lote_id,
+        "nome_lote": nome_lote,
+        "nome_arquivo_exportado": nome_arquivo,
+        "mes_leads": mes_leads,
+        "quantidade_solicitada": _to_int(row.get("quantidade_solicitada") or fallback.get("quantidade")),
+        "quantidade_liberada": _to_int(row.get("quantidade_liberada") or row.get("quantidade_leads") or row.get("total_leads")),
+    }
+
+
 def _filters_meta(source: Mapping[str, Any]) -> Tuple[Dict[str, str], Dict[str, int]]:
     filters = {k: str(source.get(k) or "").strip() for k in ["campanha", "curso", "polo", "origem", "nivel_prioridade", "status_lote", "consultor_disparo", "status_atendimento", "lote_id"] if str(source.get(k) or "").strip()}
     meta = {"limit": _int(source.get("limit"), 100, 1, 5000), "offset": _int(source.get("offset"), 0, 0, 1_000_000)}
@@ -234,52 +280,49 @@ def criar_lote(payload: Mapping[str, Any]) -> Tuple[Dict[str, Any], bool]:
     tipo = str(payload.get("tipo_disparo") or "").strip().upper()
     if tipo not in TIPOS_DISPARO:
         raise ValueError("tipo_disparo deve ser ROBO, URA ou MANUAL.")
+    modo = str(payload.get("modo") or "NOVO").strip().upper()
+    usuario = _clean_text(payload.get("usuario") or payload.get("criado_por") or payload.get("consultor_disparo") or "sistema")
     filtros = dict(payload.get("filtros") or {})
     for k in ["campanha", "curso", "polo", "origem", "nivel_prioridade"]:
         if payload.get(k) and k not in filtros:
             filtros[k] = payload.get(k)
+    mes_leads = _clean_text(payload.get("mes_leads") or filtros.get("mes_leads"))
+    nome_lote = _clean_text(payload.get("nome_lote")) or _build_lote_nome(usuario, mes_leads)
+    filtros_json = dict(filtros)
+    filtros_json.setdefault("nome_lote", nome_lote)
 
-    where = ["op.sk_pessoa IS NULL", _available_leads_predicate("l")]
-    params: List[Any] = []
-    _add_eq(where, params, "l", filtros, ["campanha", "curso", "polo", "origem", "nivel_prioridade"])
-    elegiveis_sql = f"""
-      FROM {_lead_source_ref()} l
-      LEFT JOIN {_ref('op_lote_leads')} op
-        ON l.sk_pessoa = op.sk_pessoa
-       AND op.status_atendimento IN ('PENDENTE','EM_ATENDIMENTO','AC','EC','NT','IF','NI','COU')
-      WHERE {' AND '.join(where)}
-    """
-    qtd_liberada = int((_single(f"SELECT COUNT(1) AS total {elegiveis_sql}", params, "operacional_criar_lote_total").get("total") or 0))
-    if qtd_liberada <= 0:
-        raise ValueError("Nenhum lead disponível para os filtros informados.")
-    lote_id = str(uuid.uuid4())
-    selected = min(quantidade, qtd_liberada)
-    base_params = params + [
-        bigquery.ScalarQueryParameter("lote_id", "STRING", lote_id),
-        bigquery.ScalarQueryParameter("nome_lote", "STRING", str(payload.get("nome_lote") or "").strip()),
-        bigquery.ScalarQueryParameter("campanha_lote", "STRING", str(payload.get("campanha") or filtros.get("campanha") or "").strip()),
-        bigquery.ScalarQueryParameter("tipo_disparo", "STRING", tipo),
-        bigquery.ScalarQueryParameter("consultor_disparo", "STRING", str(payload.get("consultor_disparo") or "").strip()),
+    params = [
+        bigquery.ScalarQueryParameter("usuario", "STRING", usuario),
         bigquery.ScalarQueryParameter("quantidade", "INT64", quantidade),
-        bigquery.ScalarQueryParameter("quantidade_leads", "INT64", selected),
-        bigquery.ScalarQueryParameter("criado_por", "STRING", str(payload.get("criado_por") or "").strip()),
+        bigquery.ScalarQueryParameter("tipo_disparo", "STRING", tipo),
+        bigquery.ScalarQueryParameter("consultor_disparo", "STRING", _clean_text(payload.get("consultor_disparo"))),
+        bigquery.ScalarQueryParameter("campanha", "STRING", _clean_text(payload.get("campanha") or filtros.get("campanha"))),
+        bigquery.ScalarQueryParameter("modo", "STRING", modo),
+        bigquery.ScalarQueryParameter("filtros_json", "STRING", json.dumps(filtros_json, ensure_ascii=False, default=str)),
     ]
-    _run(f"""INSERT INTO {_ref('op_lotes_disparo')}
-    (lote_id,nome_lote,campanha,tipo_disparo,consultor_disparo,quantidade_leads,status_lote,total_retorno,total_positivo,total_negativo,total_matriculas,taxa_retorno,taxa_matricula,criado_por,created_at,updated_at)
-    VALUES (@lote_id,@nome_lote,@campanha_lote,@tipo_disparo,@consultor_disparo,@quantidade_leads,'ABERTO',0,0,0,0,0,0,@criado_por,CURRENT_TIMESTAMP(),CURRENT_TIMESTAMP())""", base_params, "operacional_criar_lote")
-    # Regras de prioridade: data mais recente, score maior, nível ALTA/MÉDIA/NORMAL, maior inatividade e sk_pessoa como desempate.
-    _run(f"""INSERT INTO {_ref('op_lote_leads')}
-    (lote_id,sk_pessoa,cpf,nome,celular,email,curso,modalidade,turno,polo,origem,tipo_negocio,campanha,canal,acao_comercial,tipo_disparo,consultor_disparo,status_atendimento,retorno,positivo,negativo,matriculado,observacao,data_inscricao,data_matricula,data_disparo,score_prioridade,nivel_prioridade,etapa_operacional,created_at,updated_at)
-    SELECT @lote_id,l.sk_pessoa,l.cpf,l.nome,l.celular,l.email,l.curso,l.modalidade,l.turno,l.polo,l.origem,l.tipo_negocio,l.campanha,l.canal,l.acao_comercial,@tipo_disparo,@consultor_disparo,'PENDENTE',FALSE,FALSE,FALSE,FALSE,NULL,l.data_inscricao,l.data_matricula,NULL,l.score_prioridade,l.nivel_prioridade,l.etapa_operacional,CURRENT_TIMESTAMP(),CURRENT_TIMESTAMP()
-    {elegiveis_sql}
-    ORDER BY l.data_inscricao DESC NULLS LAST, l.score_prioridade DESC,
-      CASE UPPER(COALESCE(l.nivel_prioridade,'')) WHEN 'ALTA' THEN 1 WHEN 'MÉDIA' THEN 2 WHEN 'MEDIA' THEN 2 WHEN 'NORMAL' THEN 3 ELSE 4 END,
-      COALESCE(l.dias_sem_acao,0) DESC, l.sk_pessoa DESC
-    LIMIT @quantidade""", base_params, "operacional_criar_lote_leads_select")
-    _evento(lote_id, None, None, "LOTE_CRIADO", None, "PENDENTE", f"Lote criado com {selected} leads", payload.get("criado_por"))
+    rows = _run(f"""
+    CALL {_ref('sp_op_criar_lote')}(
+      @usuario,
+      @quantidade,
+      @tipo_disparo,
+      @consultor_disparo,
+      @campanha,
+      @modo,
+      @filtros_json
+    )
+    """, params, "operacional_sp_criar_lote")
+    data = _extract_lote_row(rows, {**dict(payload or {}), "usuario": usuario, "quantidade": quantidade, "nome_lote": nome_lote, "mes_leads": mes_leads})
     invalidate_gestao_cache()
-    aviso = None if selected >= quantidade else f"Lote criado com {selected} leads disponíveis de {quantidade} solicitados."
-    return {"lote_id": lote_id, "quantidade_solicitada": quantidade, "quantidade_leads": selected, "quantidade_liberada": selected, "status_lote": "ABERTO", "aviso": aviso}, False
+    return {
+        "success": True,
+        "lote_id": data["lote_id"],
+        "nome_lote": data["nome_lote"],
+        "nome_arquivo_exportado": data["nome_arquivo_exportado"],
+        "mes_leads": data.get("mes_leads") or mes_leads,
+        "quantidade_solicitada": data["quantidade_solicitada"],
+        "quantidade_liberada": data["quantidade_liberada"],
+        "download_url": f"/api/gestao/lotes/{data['lote_id']}/csv",
+    }, False
 
 def get_lotes(filters: Mapping[str, Any], meta: Mapping[str, Any]) -> Tuple[Dict[str, Any], bool]:
     where, params = ["1=1"], []
@@ -511,20 +554,45 @@ def _rows_to_xlsx_b64(rows: List[Dict[str, Any]]) -> str:
     return base64.b64encode(out.getvalue()).decode("ascii")
 
 
+def get_lote_csv(lote_id: str) -> Tuple[str, bytes, int]:
+    lote_id = _clean_text(lote_id)
+    if not lote_id:
+        raise ValueError("lote_id é obrigatório.")
+    params = [bigquery.ScalarQueryParameter("lote_id", "STRING", lote_id)]
+    rows = _run(
+        f"SELECT * FROM {_ref('vw_op_export_lote_csv')} WHERE lote_id=@lote_id",
+        params,
+        "operacional_export_lote_csv",
+    )
+    if not rows:
+        raise ValueError("Nenhum registro encontrado para exportação do lote informado.")
+
+    first = rows[0]
+    nome_lote = _clean_text(first.get("nome_lote")) or f"lote_{lote_id}"
+    filename = _clean_text(first.get("nome_arquivo_exportado")) or f"{nome_lote}.csv"
+    if not filename.lower().endswith(".csv"):
+        filename = f"{filename}.csv"
+
+    metadata_cols = {"nome_arquivo_exportado"}
+    headers = [key for key in rows[0].keys() if key not in metadata_cols]
+    out = io.StringIO()
+    writer = csv.DictWriter(out, fieldnames=headers, extrasaction="ignore", delimiter=";")
+    writer.writeheader()
+    for row in rows:
+        writer.writerow({key: row.get(key) for key in headers})
+    return filename, out.getvalue().encode("utf-8-sig"), len(rows)
+
+
 def exportar_proximo_lote(payload: Mapping[str, Any]) -> Tuple[Dict[str, Any], bool]:
     lote, cached = criar_lote(payload)
-    detalhe, _ = get_lote_detalhe(lote["lote_id"])
-    rows = []
-    for lead in detalhe.get("leads", []):
-        enriched = {**lead, "lote_id": lote["lote_id"], "status_atendimento": lead.get("status_atendimento") or "PENDENTE"}
-        rows.append(enriched)
-    _evento(lote["lote_id"], None, None, "LOTE_EXPORTADO", None, "PENDENTE", "Lote criado e exportado", payload.get("criado_por"))
-    formato = str(payload.get("formato") or "csv").strip().lower()
-    data_tag = __import__("datetime").datetime.utcnow().strftime("%Y%m%d")
-    tipo = str(payload.get("tipo_disparo") or "LOTE").strip().upper()
-    if formato == "xlsx":
-        return {**lote, "filename": f"lote_{lote['lote_id']}_{tipo}_{data_tag}.xlsx", "content_type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "base64": _rows_to_xlsx_b64(rows), "items": rows}, cached
-    return {**lote, "filename": f"lote_{lote['lote_id']}_{tipo}_{data_tag}.csv", "content_type": "text/csv; charset=utf-8", "base64": _rows_to_csv_b64(rows), "items": rows}, cached
+    filename, content, rows_count = get_lote_csv(lote["lote_id"])
+    return {
+        **lote,
+        "filename": filename,
+        "content_type": "text/csv; charset=utf-8",
+        "base64": base64.b64encode(content).decode("ascii"),
+        "rows_count": rows_count,
+    }, cached
 
 
 def _read_upload_rows(file: Any) -> List[Dict[str, Any]]:
