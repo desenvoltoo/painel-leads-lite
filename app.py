@@ -72,6 +72,7 @@ from services.gestao_operacional import (
     get_lotes as gestao_op_get_lotes,
     get_lote_detalhe as gestao_op_get_lote_detalhe,
     start_lote as gestao_op_start_lote,
+    marcar_lote_disparado as gestao_op_marcar_lote_disparado,
     finish_lote as gestao_op_finish_lote,
     get_meus_leads as gestao_op_get_meus_leads,
     update_lead_status as gestao_op_update_lead_status,
@@ -86,6 +87,7 @@ from services.gestao_operacional import (
     get_lotes_select as gestao_op_get_lotes_select,
     preview_proximo_lote as gestao_op_preview_proximo_lote,
     exportar_proximo_lote as gestao_op_exportar_proximo_lote,
+    get_lote_csv as gestao_op_get_lote_csv,
     importar_lote_disparado as gestao_op_importar_lote_disparado,
     importar_novos_leads as gestao_op_importar_novos_leads,
     get_operacao_logs as gestao_op_get_logs,
@@ -719,6 +721,51 @@ def create_app() -> Flask:
     def api_gestao_opcoes():
         return _gestao_endpoint(gestao_get_opcoes)
 
+
+    @app.post("/api/gestao/lotes/criar-exportar")
+    def api_gestao_lotes_criar_exportar():
+        try:
+            payload = request.get_json(silent=True) or {}
+            if "usuario" not in payload:
+                payload["usuario"] = getattr(g, "current_user", None) or payload.get("criado_por") or "sistema"
+            data, cached = gestao_op_criar_lote(payload)
+            return jsonify({**data, "success": True, "ok": True, "cached": bool(cached)}), 201
+        except ValueError as exc:
+            return jsonify({"success": False, "ok": False, "error": {"code": "GESTAO_LOTE_INVALID", "message": str(exc)}}), 400
+        except Exception as exc:
+            return _gestao_error_response(exc, code="GESTAO_LOTE_CRIAR_EXPORTAR_ERROR", message="Não foi possível gerar o lote pela procedure oficial.")
+
+    @app.get("/api/gestao/lotes/<lote_id>/csv")
+    def api_gestao_lote_csv(lote_id):
+        try:
+            filename, content, rows_count = gestao_op_get_lote_csv(lote_id)
+            logger.info(
+                "gestao_lote_csv lote_id=%s rows=%s filename=%s user=%s",
+                lote_id,
+                rows_count,
+                filename,
+                getattr(g, "current_user", None),
+            )
+            response = make_response(content)
+            response.headers["Content-Type"] = "text/csv; charset=utf-8-sig"
+            response.headers["Content-Disposition"] = f"attachment; filename={filename}"
+            return response
+        except ValueError as exc:
+            return jsonify({"success": False, "ok": False, "error": {"code": "GESTAO_LOTE_CSV_INVALID", "message": str(exc)}}), 404
+        except Exception as exc:
+            return _gestao_error_response(exc, code="GESTAO_LOTE_CSV_ERROR", message="Não foi possível baixar o CSV do lote.")
+
+    @app.post("/api/gestao/lotes/<lote_id>/marcar-disparado")
+    def api_gestao_lote_marcar_disparado(lote_id):
+        try:
+            payload = request.get_json(silent=True) or {}
+            usuario = payload.get("usuario") or getattr(g, "current_user", None) or "sistema"
+            data, cached = gestao_op_marcar_lote_disparado(lote_id, usuario)
+            return jsonify({**data, "success": True, "ok": True, "cached": bool(cached)})
+        except ValueError as exc:
+            return jsonify({"success": False, "ok": False, "error": {"code": "GESTAO_LOTE_MARCAR_DISPARADO_INVALID", "message": str(exc)}}), 400
+        except Exception as exc:
+            return _gestao_error_response(exc, code="GESTAO_LOTE_MARCAR_DISPARADO_ERROR", message="Não foi possível marcar o lote como disparado.")
 
 
     def _gestao_operacional_endpoint(loader):

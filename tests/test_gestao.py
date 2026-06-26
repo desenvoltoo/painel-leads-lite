@@ -605,14 +605,13 @@ def test_operacional_preview_proximo_lote_shape_and_order(monkeypatch):
 
 def test_operacional_exportar_proximo_lote_csv(monkeypatch):
     from services import gestao_operacional as op
-    monkeypatch.setattr(op, "criar_lote", lambda payload: ({"lote_id": "L1", "quantidade_leads": 1}, False))
-    monkeypatch.setattr(op, "get_lote_detalhe", lambda lote_id: ({"leads": [{"sk_pessoa": 10, "nome": "Ana", "status_atendimento": "PENDENTE"}]}, False))
-    monkeypatch.setattr(op, "_evento", lambda *a, **k: None)
-    data, _ = op.exportar_proximo_lote({"tipo_disparo": "ROBO", "formato": "csv"})
-    assert data["filename"].startswith("lote_L1_ROBO_")
-    assert data["filename"].endswith(".csv")
+    monkeypatch.setattr(op, "criar_lote", lambda payload: ({"lote_id": "L1", "quantidade_liberada": 1, "download_url": "/api/gestao/lotes/L1/csv"}, False))
+    monkeypatch.setattr(op, "get_lote_csv", lambda lote_id: ("LOTE_20260626_LEADS_202606_EXPORTADO_POR_TESTE.csv", b"lote_id;nome\nL1;Ana\n", 1))
+    data, _ = op.exportar_proximo_lote({"tipo_disparo": "ROBO"})
+    assert data["filename"] == "LOTE_20260626_LEADS_202606_EXPORTADO_POR_TESTE.csv"
     assert data["content_type"].startswith("text/csv")
     assert data["base64"]
+    assert data["rows_count"] == 1
 
 
 def test_operacional_importar_novos_leads_validates_columns():
@@ -633,7 +632,13 @@ def test_gestao_operacional_page_has_no_critical_duplicate_forms(client):
     assert html.count('id="opExportarForm"') == 1
     assert html.count('id="opImportarDisparadoForm"') == 1
     assert html.count('id="opImportarNovosForm"') == 1
-    assert "Exportar Próximo Lote" in html
+    assert "Gerar lote e baixar CSV" in html
+    assert "Criar lote manual" not in html
+    assert "Liberar próximos leads" not in html
+    assert "Exportar próximo lote" not in html
+    js = Path("static/js/gestao.js").read_text(encoding="utf-8")
+    assert "Marcar como disparado" in js
+    assert "marcar-disparado" in js
 
 
 def test_operacional_download_csv_endpoint(client, monkeypatch):
@@ -649,6 +654,30 @@ def test_operacional_download_csv_endpoint(client, monkeypatch):
     assert b"lote_id" in resp.data
 
 
+
+def test_gestao_lotes_criar_exportar_endpoint(client, monkeypatch):
+    login(client)
+    def fake(payload):
+        assert payload["tipo_disparo"] == "ROBO"
+        assert payload["usuario"]
+        return {"success": True, "lote_id": "L1", "nome_lote": "LOTE_20260626_LEADS_202606_EXPORTADO_POR_TESTE", "nome_arquivo_exportado": "arquivo.csv", "mes_leads": "202606", "quantidade_solicitada": 1, "quantidade_liberada": 1, "download_url": "/api/gestao/lotes/L1/csv"}, False
+    monkeypatch.setattr("app.gestao_op_criar_lote", fake)
+    resp = client.post("/api/gestao/lotes/criar-exportar", json={"tipo_disparo": "ROBO", "quantidade": 1, "filtros": {}})
+    body = resp.get_json()
+    assert resp.status_code == 201
+    assert body["success"] is True
+    assert body["download_url"] == "/api/gestao/lotes/L1/csv"
+
+
+def test_gestao_lote_csv_endpoint(client, monkeypatch):
+    login(client)
+    monkeypatch.setattr("app.gestao_op_get_lote_csv", lambda lote_id: ("arquivo.csv", b"lote_id;nome\nL1;Ana\n", 1))
+    resp = client.get("/api/gestao/lotes/L1/csv")
+    assert resp.status_code == 200
+    assert resp.headers["Content-Type"].startswith("text/csv")
+    assert "arquivo.csv" in resp.headers["Content-Disposition"]
+    assert b"lote_id" in resp.data
+
 def test_operacional_table_missing_error_is_safe(client, monkeypatch):
     login(client)
     def fake():
@@ -660,6 +689,53 @@ def test_operacional_table_missing_error_is_safe(client, monkeypatch):
     assert body["ok"] is True
     assert "op_lotes_disparo" in body["data"]["missing_tables"]
 
+
+
+def test_gestao_lote_marcar_disparado_endpoint(client, monkeypatch):
+    login(client)
+    def fake(lote_id, usuario):
+        assert lote_id == "L1"
+        assert usuario
+        return {"success": True, "lote_id": lote_id, "status_lote": "EM_ANDAMENTO", "etapa_fluxo": "DISPARO_EM_ANDAMENTO"}, False
+    monkeypatch.setattr("app.gestao_op_marcar_lote_disparado", fake)
+    resp = client.post("/api/gestao/lotes/L1/marcar-disparado", json={})
+    body = resp.get_json()
+    assert resp.status_code == 200
+    assert body["success"] is True
+    assert body["status_lote"] == "EM_ANDAMENTO"
+    assert body["etapa_fluxo"] == "DISPARO_EM_ANDAMENTO"
+
+
+def test_operacional_marcar_lote_disparado_usa_procedure(monkeypatch):
+    from services import gestao_operacional as op
+    calls = []
+    monkeypatch.setattr(op, "_ref", lambda t: f"`p.d.{t}`")
+    def fake_run(sql, params=None, operation=""):
+        calls.append((operation, sql, {p.name: p.value for p in (params or [])}))
+        return [{"lote_id": "L1", "status_lote": "EM_ANDAMENTO", "etapa_fluxo": "DISPARO_EM_ANDAMENTO"}]
+    monkeypatch.setattr(op, "_run", fake_run)
+    monkeypatch.setattr(op, "invalidate_gestao_cache", lambda: None)
+    data, _ = op.marcar_lote_disparado("L1", "teste")
+    assert calls[0][0] == "operacional_sp_marcar_lote_disparado"
+    assert "CALL `p.d.sp_op_marcar_lote_disparado`" in calls[0][1]
+    assert calls[0][2]["lote_id"] == "L1"
+    assert calls[0][2]["usuario"] == "teste"
+    assert data["status_lote"] == "EM_ANDAMENTO"
+    assert data["etapa_fluxo"] == "DISPARO_EM_ANDAMENTO"
+
+
+def test_operacional_lotes_usa_views_oficiais(monkeypatch):
+    from services import gestao_operacional as op
+    calls = []
+    monkeypatch.setattr(op, "_ref", lambda t: f"`p.d.{t}`")
+    monkeypatch.setattr(op, "_run", lambda sql, params=None, operation="": calls.append((operation, sql, {p.name: p.value for p in (params or [])})) or [])
+    data, _ = op.get_lotes({"status_lote": "ABERTO"}, {"limit": 10, "offset": 0})
+    assert data["items"] == []
+    sql = calls[0][1]
+    assert "vw_op_lotes_resumo" in sql
+    assert "vw_op_fluxo_lotes" in sql
+    assert "etapa_fluxo" in sql
+    assert "proxima_acao" in sql
 
 def test_operacional_importar_lote_disparado_endpoint(client, monkeypatch):
     login(client)
@@ -685,20 +761,21 @@ def test_operacional_fila_nao_filtra_tipo_disparo(monkeypatch):
     assert "l.data_disparo IS NULL" in sql
 
 
-def test_operacional_criar_lote_insert_select_preserva_datas(monkeypatch):
+def test_operacional_criar_lote_usa_procedure_oficial(monkeypatch):
     from services import gestao_operacional as op
     calls = []
-    monkeypatch.setattr(op, "_lead_source_ref", lambda: "`p.d.vw_leads_priorizados`")
     monkeypatch.setattr(op, "_ref", lambda t: f"`p.d.{t}`")
-    monkeypatch.setattr(op, "_single", lambda sql, params=None, operation="": {"total": 2})
-    monkeypatch.setattr(op, "_run", lambda sql, params=None, operation="": calls.append((operation, sql, {p.name: p.value for p in (params or [])})) or [])
-    monkeypatch.setattr(op, "_evento", lambda *a, **k: None)
+    def fake_run(sql, params=None, operation=""):
+        calls.append((operation, sql, {p.name: p.value for p in (params or [])}))
+        return [{"lote_id": "L1", "nome_lote": "LOTE_20260626_LEADS_202606_EXPORTADO_POR_TESTE", "nome_arquivo_exportado": "arquivo.csv", "quantidade_solicitada": 2, "quantidade_liberada": 2, "mes_leads": "202606"}]
+    monkeypatch.setattr(op, "_run", fake_run)
     monkeypatch.setattr(op, "invalidate_gestao_cache", lambda: None)
-    data, _ = op.criar_lote({"tipo_disparo": "ROBO", "quantidade": 2})
-    insert_select = next(sql for operation, sql, params in calls if operation == "operacional_criar_lote_leads_select")
-    assert "INSERT INTO" in insert_select and "SELECT @lote_id,l.sk_pessoa" in insert_select
-    assert "l.data_inscricao,l.data_matricula,NULL" in insert_select
-    assert "CURRENT_TIMESTAMP(),@score_prioridade" not in insert_select
+    data, _ = op.criar_lote({"tipo_disparo": "ROBO", "quantidade": 2, "usuario": "teste"})
+    assert calls[0][0] == "operacional_sp_criar_lote"
+    assert "CALL `p.d.sp_op_criar_lote`" in calls[0][1]
+    assert "INSERT INTO" not in calls[0][1]
+    assert calls[0][2]["usuario"] == "teste"
+    assert data["download_url"] == "/api/gestao/lotes/L1/csv"
     assert data["quantidade_solicitada"] == 2
 
 
