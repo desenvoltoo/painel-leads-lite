@@ -177,3 +177,8 @@ button, a, input, select { min-height: 40px; }
 .is-loading { cursor: wait; opacity: .7; }
 @media (max-width: 1200px) { .op-flow { grid-template-columns: repeat(3, minmax(140px, 1fr)); } }
 @media (max-width: 767.98px) { .op-flow { grid-template-columns: 1fr; } .op-flow span::after { display: none; } .global-lote { width: 100%; } }
+.badge[class*="status-"] { border-radius: 999px; font-weight: 800; padding: .35rem .65rem; }
+.status-aberto { background: #dbeafe; color: #1e40af; }
+.status-em_andamento { background: #fef3c7; color: #92400e; }
+.status-concluido { background: #dcfce7; color: #166534; }
+.status-cancelado { background: #fee2e2; color: #991b1b; }

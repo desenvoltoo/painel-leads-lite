@@ -1,5 +1,6 @@
 from datetime import date, datetime, timezone
 from io import BytesIO
+from pathlib import Path
 
 import pytest
 
@@ -668,3 +669,43 @@ def test_operacional_importar_lote_disparado_endpoint(client, monkeypatch):
     resp = client.post("/api/gestao/operacional/importar-lote-disparado", data={"lote_id": "L1", "usuario": "u", "file": (BytesIO(b"sk_pessoa,status\n1,AC\n"), "ret.csv")}, content_type="multipart/form-data")
     assert resp.status_code == 200
     assert resp.get_json()["linhas_atualizadas"] == 1
+
+
+def test_operacional_fila_nao_filtra_tipo_disparo(monkeypatch):
+    from services import gestao_operacional as op
+    calls = []
+    monkeypatch.setattr(op, "_lead_source_ref", lambda: "`p.d.vw_leads_priorizados`")
+    monkeypatch.setattr(op, "_ref", lambda t: f"`p.d.{t}`")
+    monkeypatch.setattr(op, "_single", lambda sql, params=None, operation="": calls.append((operation, sql)) or {"total": 0})
+    monkeypatch.setattr(op, "_run", lambda sql, params=None, operation="": calls.append((operation, sql)) or [])
+    op.get_leads_disponiveis({}, {"limit": 10, "offset": 0})
+    sql = "\n".join(c[1] for c in calls)
+    assert "tipo_disparo IS NULL" not in sql
+    assert "TRIM(l.tipo_disparo)" not in sql
+    assert "l.data_disparo IS NULL" in sql
+
+
+def test_operacional_criar_lote_insert_select_preserva_datas(monkeypatch):
+    from services import gestao_operacional as op
+    calls = []
+    monkeypatch.setattr(op, "_lead_source_ref", lambda: "`p.d.vw_leads_priorizados`")
+    monkeypatch.setattr(op, "_ref", lambda t: f"`p.d.{t}`")
+    monkeypatch.setattr(op, "_single", lambda sql, params=None, operation="": {"total": 2})
+    monkeypatch.setattr(op, "_run", lambda sql, params=None, operation="": calls.append((operation, sql, {p.name: p.value for p in (params or [])})) or [])
+    monkeypatch.setattr(op, "_evento", lambda *a, **k: None)
+    monkeypatch.setattr(op, "invalidate_gestao_cache", lambda: None)
+    data, _ = op.criar_lote({"tipo_disparo": "ROBO", "quantidade": 2})
+    insert_select = next(sql for operation, sql, params in calls if operation == "operacional_criar_lote_leads_select")
+    assert "INSERT INTO" in insert_select and "SELECT @lote_id,l.sk_pessoa" in insert_select
+    assert "l.data_inscricao,l.data_matricula,NULL" in insert_select
+    assert "CURRENT_TIMESTAMP(),@score_prioridade" not in insert_select
+    assert data["quantidade_solicitada"] == 2
+
+
+def test_sql_view_usa_flag_matriculado_e_campos_operacionais():
+    sql = Path("sql/gestao_views.sql").read_text(encoding="utf-8")
+    assert "flag_matriculado" in sql
+    assert "CAST(matriculado" not in sql
+    for col in ["score_prioridade", "nivel_prioridade", "etapa_operacional", "nunca_disparado", "dias_sem_acao"]:
+        assert col in sql
+    assert "data_inscricao_normalizada AS data_inscricao" in sql

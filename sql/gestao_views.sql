@@ -22,7 +22,20 @@ WITH base AS (
         NULL,
         TIMESTAMP(DATE_ADD(DATE '1899-12-30', INTERVAL SAFE_CAST(TRIM(CAST(v.data_inscricao AS STRING)) AS INT64) DAY))
       )
-    ) AS data_inscricao_normalizada
+    ) AS data_inscricao_ts,
+    DATE(COALESCE(
+      SAFE_CAST(v.data_inscricao AS TIMESTAMP),
+      TIMESTAMP(SAFE_CAST(v.data_inscricao AS DATE)),
+      TIMESTAMP(SAFE.PARSE_DATE('%Y-%m-%d', SUBSTR(TRIM(CAST(v.data_inscricao AS STRING)), 1, 10))),
+      TIMESTAMP(SAFE.PARSE_DATE('%d/%m/%Y', SUBSTR(TRIM(CAST(v.data_inscricao AS STRING)), 1, 10))),
+      SAFE.PARSE_TIMESTAMP('%Y-%m-%d %H:%M:%S', SUBSTR(TRIM(CAST(v.data_inscricao AS STRING)), 1, 19)),
+      SAFE.PARSE_TIMESTAMP('%d/%m/%Y %H:%M:%S', SUBSTR(TRIM(CAST(v.data_inscricao AS STRING)), 1, 19)),
+      IF(
+        SAFE_CAST(TRIM(CAST(v.data_inscricao AS STRING)) AS INT64) IS NULL,
+        NULL,
+        TIMESTAMP(DATE_ADD(DATE '1899-12-30', INTERVAL SAFE_CAST(TRIM(CAST(v.data_inscricao AS STRING)) AS INT64) DAY))
+      )
+    )) AS data_inscricao_normalizada
   FROM `painel-universidade.modelo_estrela.vw_leads_painel_lite` v
 ), regras AS (
   SELECT
@@ -31,7 +44,6 @@ WITH base AS (
       status_normalizado IN ('MAT', 'MATRICULADO')
       OR status_inscricao_normalizado IN ('MAT', 'MATRICULADO')
       OR COALESCE(SAFE_CAST(flag_matriculado AS BOOL), FALSE)
-      OR UPPER(TRIM(COALESCE(CAST(matriculado AS STRING), ''))) IN ('SIM', 'S', 'TRUE', '1', 'MATRICULADO', 'MAT')
     ) AS regra_matriculado,
     (
       NULLIF(TRIM(CAST(status AS STRING)), '') IS NULL
@@ -50,7 +62,8 @@ WITH base AS (
   FROM base
 )
 SELECT
-  regras.*,
+  regras.* EXCEPT(data_inscricao),
+  data_inscricao_normalizada AS data_inscricao,
   CASE
     WHEN regra_matriculado THEN 99
     WHEN regra_sem_status THEN 1
@@ -78,5 +91,7 @@ SELECT
     WHEN regra_ec THEN 'EC'
     WHEN NOT regra_excluido THEN 'ELEGIVEL'
     ELSE 'NAO_ELEGIVEL'
-  END AS etapa_operacional
+  END AS etapa_operacional,
+  COALESCE(SAFE_CAST(data_disparo AS TIMESTAMP) IS NULL, TRUE) AS nunca_disparado,
+  DATE_DIFF(CURRENT_DATE(), COALESCE(DATE(SAFE_CAST(data_ultima_acao AS TIMESTAMP)), data_inscricao_normalizada, CURRENT_DATE()), DAY) AS dias_sem_acao
 FROM regras;
