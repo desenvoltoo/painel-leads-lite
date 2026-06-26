@@ -106,6 +106,8 @@ from services.gestao_operacional import (
     resetar_senha_usuario as gestao_op_resetar_senha_usuario,
     listar_perfis as gestao_op_listar_perfis,
     auditoria_usuario as gestao_op_auditoria_usuario,
+    buscar_usuario_login as gestao_op_buscar_usuario_login,
+    registrar_login_usuario as gestao_op_registrar_login_usuario,
 )
 
 logger = logging.getLogger(__name__)
@@ -448,10 +450,17 @@ def create_app() -> Flask:
         PERMANENT_SESSION_LIFETIME=session_ttl_seconds,
     )
 
-    # Usuários iniciais com senha hasheada (senha padrão: 123456)
+    # Fallback local apenas para desenvolvimento/testes quando o BigQuery não estiver disponível.
     users = {
         "matheus": "pbkdf2:sha256:1000000$Ij5ppE2yYdLvAKlF$0d441b0096771e07525df01b224faf57cabedc83b444375cad21e44f9d6b5282",
         "miguel": "pbkdf2:sha256:1000000$rxyvycWVM3tJCDF0$36a69c69fd09385c4e39fd2c67549f60c9dccc1a68f7a56d0f8e8f00716fc49d",
+    }
+
+    PROFILE_PERMISSIONS = {
+        "ADMIN": {"dashboard:view", "usuarios:manage", "leads:import", "lotes:create", "lotes:export", "lotes:mark_sent", "retorno:import", "lote_atual:edit", "lotes:finish", "lotes:cancel", "logs:view", "lotes:view", "rastreabilidade:view", "meus_leads:view", "lead_status:edit"},
+        "GESTOR": {"dashboard:view", "leads:import", "lotes:create", "lotes:export", "lotes:mark_sent", "retorno:import", "lote_atual:edit", "lotes:finish", "lotes:cancel", "logs:view", "lotes:view", "rastreabilidade:view", "meus_leads:view", "lead_status:edit"},
+        "OPERADOR": {"dashboard:view", "meus_leads:view", "lote_atual:view", "lote_atual:edit", "lead_status:edit", "retorno:import"},
+        "LEITURA": {"dashboard:view", "lotes:view", "rastreabilidade:view"},
     }
  
     # pastas locais (mantém XLSX)
@@ -465,14 +474,40 @@ def create_app() -> Flask:
             return True
         return path in ("/login", "/logout", "/health", "/api/auth/login")
 
-    def _current_user() -> str | None:
-        username = session.get("username")
-        if not username:
+    def _current_user_context() -> dict | None:
+        email = session.get("email") or session.get("username")
+        if not email:
             return None
-        # renova TTL da sessão em uso normal do painel
+        perfil = str(session.get("nome_perfil") or session.get("perfil") or ("ADMIN" if str(email).lower() in users else "LEITURA")).upper()
+        permissions = session.get("permissions") or sorted(PROFILE_PERMISSIONS.get(perfil, PROFILE_PERMISSIONS["LEITURA"]))
         session.permanent = True
         session.modified = True
-        return str(username)
+        return {
+            "usuario_id": session.get("usuario_id") or str(email),
+            "nome": session.get("nome") or str(email),
+            "email": str(email),
+            "perfil_id": session.get("perfil_id") or perfil,
+            "nome_perfil": perfil,
+            "permissions": list(permissions),
+        }
+
+    def _current_user() -> str | None:
+        user = _current_user_context()
+        return user["email"] if user else None
+
+    def _has_permission(permission: str) -> bool:
+        user = getattr(g, "user", None) or _current_user_context()
+        if not user:
+            return False
+        return user.get("nome_perfil") == "ADMIN" or permission in set(user.get("permissions") or [])
+
+    def _permission_denied(permission: str):
+        return jsonify({"ok": False, "success": False, "error": {"code": "FORBIDDEN", "message": "Você não tem permissão para executar esta ação.", "permission": permission}}), 403
+
+    def _require_permission(permission: str):
+        if not _has_permission(permission):
+            return _permission_denied(permission)
+        return None
 
     def _destroy_session():
         session.clear()
@@ -486,8 +521,9 @@ def create_app() -> Flask:
         if _is_public_path(request.path):
             return None
 
-        user = _current_user()
-        g.current_user = user
+        user = _current_user_context()
+        g.user = user
+        g.current_user = user.get("email") if user else None
         if user:
             return None
 
@@ -531,6 +567,7 @@ def create_app() -> Flask:
             asset_version=asset_version,
             ui_version=ui_version,
             current_user=getattr(g, "current_user", None),
+            current_user_context=getattr(g, "user", None),
             gestao_data=None,
             gestao_error=None,
         )
@@ -542,9 +579,48 @@ def create_app() -> Flask:
             asset_version=asset_version,
             ui_version=ui_version,
             current_user=getattr(g, "current_user", None),
+            current_user_context=getattr(g, "user", None),
             gestao_data=None,
             gestao_error=None,
         )
+
+    def _real_user_email() -> str:
+        return str(getattr(g, "current_user", None) or session.get("email") or session.get("username") or "sistema")
+
+    @app.before_request
+    def _permission_guard():
+        if _is_public_path(request.path) or not getattr(g, "current_user", None):
+            return None
+        checks = [
+            ("/api/gestao/usuarios", "usuarios:manage"),
+            ("/api/gestao/perfis", "usuarios:manage"),
+            ("/api/gestao/operacional/logs", "logs:view"),
+        ]
+        mutating_checks = [
+            ("/api/gestao/lotes/criar-exportar", "lotes:create"),
+            ("/api/gestao/operacional/exportar-proximo-lote", "lotes:export"),
+            ("/api/gestao/operacional/lotes", "lotes:create"),
+            ("/api/gestao/operacional/importar-lote-disparado", "retorno:import"),
+            ("/api/gestao/operacional/importar-novos-leads", "leads:import"),
+        ]
+        for prefix, permission in checks:
+            if request.path.startswith(prefix):
+                return _require_permission(permission)
+        if request.method != "GET":
+            if "/marcar-disparado" in request.path:
+                return _require_permission("lotes:mark_sent")
+            if request.path.endswith("/cancel"):
+                return _require_permission("lotes:cancel")
+            if request.path.endswith("/finish"):
+                return _require_permission("lotes:finish")
+            if "/leads/" in request.path and (request.path.endswith("/status") or request.path.endswith("/atualizar")):
+                return _require_permission("lead_status:edit")
+            if request.path.endswith("/importar-retorno"):
+                return _require_permission("retorno:import")
+            for prefix, permission in mutating_checks:
+                if request.path.startswith(prefix):
+                    return _require_permission(permission)
+        return None
 
     def _gestao_success(data, filters, *, cached=False, status=200):
         return jsonify({
@@ -751,8 +827,8 @@ def create_app() -> Flask:
     def api_gestao_lotes_criar_exportar():
         try:
             payload = request.get_json(silent=True) or {}
-            if "usuario" not in payload:
-                payload["usuario"] = getattr(g, "current_user", None) or payload.get("criado_por") or "sistema"
+            payload["usuario"] = _real_user_email()
+            payload["criado_por"] = _real_user_email()
             data, cached = gestao_op_criar_lote(payload)
             return jsonify({**data, "success": True, "ok": True, "cached": bool(cached)}), 201
         except ValueError as exc:
@@ -765,7 +841,7 @@ def create_app() -> Flask:
     def api_gestao_lote_marcar_disparado(lote_id):
         try:
             payload = request.get_json(silent=True) or {}
-            usuario = payload.get("usuario") or getattr(g, "current_user", None) or "sistema"
+            usuario = _real_user_email()
             data, cached = gestao_op_marcar_lote_disparado(lote_id, usuario)
             return _gestao_success(data, {"lote_id": lote_id}, cached=cached)
         except ValueError as exc:
@@ -853,7 +929,7 @@ def create_app() -> Flask:
             file = request.files.get("file")
             if not file:
                 return jsonify({"ok": False, "error": {"code": "GESTAO_OPERACIONAL_INVALID", "message": "Arquivo é obrigatório."}}), 400
-            data, cached = gestao_op_importar_lote_disparado(file, request.form.get("lote_id", ""), request.form.get("usuario", ""))
+            data, cached = gestao_op_importar_lote_disparado(file, request.form.get("lote_id", ""), _real_user_email())
             return jsonify({"ok": True, **data})
         except ValueError as exc:
             return jsonify({"ok": False, "error": {"code": "GESTAO_OPERACIONAL_INVALID", "message": str(exc)}}), 400
@@ -889,7 +965,7 @@ def create_app() -> Flask:
     def api_gestao_lote_lead_atualizar(lote_id, sk_pessoa):
         try:
             payload = request.get_json(silent=True) or {}
-            usuario = payload.get("usuario") or getattr(g, "current_user", None) or "sistema"
+            usuario = _real_user_email()
             data, cached = gestao_op_atualizar_lead_lote(lote_id, sk_pessoa, payload, usuario)
             return _gestao_success(data, {"lote_id": lote_id, "sk_pessoa": sk_pessoa}, cached=cached)
         except ValueError as exc:
@@ -968,7 +1044,10 @@ def create_app() -> Flask:
     @app.post("/api/gestao/operacional/lotes")
     def api_gestao_operacional_criar_lote():
         try:
-            data, cached = gestao_op_criar_lote(request.get_json(silent=True) or {})
+            payload = request.get_json(silent=True) or {}
+            payload["usuario"] = _real_user_email()
+            payload["criado_por"] = _real_user_email()
+            data, cached = gestao_op_criar_lote(payload)
             return _gestao_success(data, {}, cached=cached), 201
         except ValueError as exc:
             return jsonify({"ok": False, "error": {"code": "GESTAO_OPERACIONAL_INVALID", "message": str(exc)}}), 400
@@ -1029,7 +1108,9 @@ def create_app() -> Flask:
     @app.patch("/api/gestao/operacional/leads/<int:sk_pessoa>/status")
     def api_gestao_operacional_lead_status(sk_pessoa):
         try:
-            data, cached = gestao_op_update_lead_status(sk_pessoa, request.get_json(silent=True) or {})
+            payload = request.get_json(silent=True) or {}
+            payload["usuario"] = _real_user_email()
+            data, cached = gestao_op_update_lead_status(sk_pessoa, payload)
             return _gestao_success(data, {"sk_pessoa": sk_pessoa}, cached=cached)
         except ValueError as exc:
             return jsonify({"ok": False, "error": {"code": "GESTAO_OPERACIONAL_INVALID", "message": str(exc)}}), 400
@@ -1043,7 +1124,7 @@ def create_app() -> Flask:
             file = request.files.get("file")
             if not file or not _validate_upload_filename(file.filename):
                 return jsonify({"success": False, "ok": False, "error": {"message": "Envie um arquivo CSV/XLSX válido."}}), 400
-            usuario = request.form.get("usuario") or getattr(g, "current_user", None) or "sistema"
+            usuario = _real_user_email()
             data, _cached = gestao_op_importar_retorno_lote(file, lote_id, usuario)
             return jsonify({**data, "ok": True})
         except ValueError as exc:
@@ -1084,12 +1165,10 @@ def create_app() -> Flask:
             return _gestao_error_response(exc, code="GESTAO_LEAD_EVENTOS_ERROR", message="Não foi possível carregar eventos técnicos.")
 
     def _is_admin_user() -> bool:
-        return str(getattr(g, "current_user", "") or "").lower() in {"matheus", "admin"} or str(session.get("perfil") or "").upper() == "ADMIN"
+        return _has_permission("usuarios:manage")
 
     def _require_admin_json():
-        if not _is_admin_user():
-            return jsonify({"success": False, "message": "Apenas ADMIN pode gerenciar usuários.", "data": None}), 403
-        return None
+        return _require_permission("usuarios:manage")
 
     def _hash_password(password: str) -> str:
         try:
@@ -1113,7 +1192,7 @@ def create_app() -> Flask:
         if denied: return denied
         try:
             payload = request.get_json(silent=True) or {}
-            payload["password_hash"] = _hash_password(str(payload.get("senha") or payload.get("password") or uuid.uuid4().hex[:10]))
+            payload["password_hash"] = _hash_password(str(payload.get("senha_temporaria") or payload.get("senha") or payload.get("password") or uuid.uuid4().hex[:10]))
             data, _ = gestao_op_salvar_usuario(payload, getattr(g, "current_user", None) or "sistema")
             return jsonify(data), 201
         except ValueError as exc:
@@ -1149,7 +1228,7 @@ def create_app() -> Flask:
     def api_gestao_usuarios_resetar(usuario_id):
         denied = _require_admin_json()
         if denied: return denied
-        payload=request.get_json(silent=True) or {}; senha=str(payload.get("senha") or payload.get("password") or uuid.uuid4().hex[:10])
+        payload=request.get_json(silent=True) or {}; senha=str(payload.get("senha_temporaria") or payload.get("senha") or payload.get("password") or uuid.uuid4().hex[:10])
         data, _ = gestao_op_resetar_senha_usuario(usuario_id, _hash_password(senha), getattr(g, "current_user", None) or "sistema"); return jsonify(data)
 
     @app.get("/api/gestao/usuarios/<usuario_id>/auditoria")
@@ -1193,17 +1272,46 @@ def create_app() -> Flask:
     @app.post("/api/auth/login")
     def api_auth_login():
         payload = request.get_json(silent=True) or {}
-        username = str(payload.get("username") or "").strip().lower()
+        email = str(payload.get("email") or payload.get("username") or "").strip().lower()
         password = str(payload.get("password") or "")
 
-        user_hash = users.get(username)
-        if not user_hash or not check_password_hash(user_hash, password):
-            return jsonify({"ok": False, "error": "Usuário ou senha incorretos. Tente novamente."}), 401
+        user = None
+        try:
+            user = gestao_op_buscar_usuario_login(email)
+        except Exception:
+            user = None
+        user_hash = (user or {}).get("password_hash") or users.get(email)
 
+        def _check_hash(stored_hash: str, raw_password: str) -> bool:
+            if not stored_hash:
+                return False
+            if stored_hash.startswith(("$2a$", "$2b$", "$2y$")):
+                import bcrypt
+                return bcrypt.checkpw(raw_password.encode("utf-8"), stored_hash.encode("utf-8"))
+            return check_password_hash(stored_hash, raw_password)
+
+        active = bool((user or {}).get("ativo", True)) and str((user or {}).get("status_usuario") or "ATIVO").upper() == "ATIVO"
+        if not user_hash or not active or not _check_hash(str(user_hash), password):
+            return jsonify({"ok": False, "error": "E-mail ou senha inválidos. Tente novamente."}), 401
+
+        perfil = str((user or {}).get("nome_perfil") or (user or {}).get("codigo_perfil") or (user or {}).get("perfil_id") or ("ADMIN" if email in users else "LEITURA")).upper()
+        permissions = sorted(PROFILE_PERMISSIONS.get(perfil, PROFILE_PERMISSIONS["LEITURA"]))
         session.clear()
         session.permanent = True
-        session["username"] = username
-        resp = make_response(jsonify({"ok": True, "redirect_to": "/"}))
+        session["usuario_id"] = (user or {}).get("usuario_id") or email
+        session["nome"] = (user or {}).get("nome") or email
+        session["email"] = email
+        session["username"] = email
+        session["perfil_id"] = (user or {}).get("perfil_id") or perfil
+        session["nome_perfil"] = perfil
+        session["perfil"] = perfil
+        session["permissions"] = permissions
+        session["session_id"] = str(uuid.uuid4())
+        try:
+            gestao_op_registrar_login_usuario(dict(session), request.remote_addr or "", request.headers.get("User-Agent", ""))
+        except Exception:
+            logger.exception("auth_login_audit_failed user=%s", email)
+        resp = make_response(jsonify({"ok": True, "redirect_to": "/", "user": {"email": email, "nome": session["nome"], "nome_perfil": perfil, "permissions": permissions}}))
         return resp
 
     @app.post("/logout")
