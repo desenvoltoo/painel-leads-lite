@@ -656,7 +656,7 @@ def create_app() -> Flask:
             response_status = 400
         elif bq_error["error_type"] == "BIGQUERY_TIMEOUT":
             response_status = 504
-        friendly = bq_error["message"] if bq_error["error_type"].startswith("BIGQUERY") else message
+        friendly = message or bq_error["message"]
         logger.exception(
             "gestao_api_error route=%s endpoint=%s params=%s user=%s exception_type=%s bigquery_error_type=%s bigquery_full_error=%r",
             request.path,
@@ -906,6 +906,11 @@ def create_app() -> Flask:
     def _gestao_operacional_endpoint(loader):
         try:
             filters, meta = gestao_op_parse_request(request.args)
+            user_ctx = getattr(g, "user", None) or _current_user_context() or {}
+            filters.setdefault("usuario", user_ctx.get("nome") or user_ctx.get("email") or _real_user_email())
+            filters.setdefault("current_user", user_ctx.get("nome") or user_ctx.get("email") or _real_user_email())
+            filters.setdefault("current_user_email", user_ctx.get("email") or _real_user_email())
+            filters.setdefault("current_user_profile", user_ctx.get("nome_perfil") or user_ctx.get("perfil_id") or "")
             data, cached = loader(filters, meta)
             return _gestao_success(data, filters, cached=cached)
         except ValueError as exc:
@@ -1272,6 +1277,13 @@ def create_app() -> Flask:
         except ValueError as exc:
             return jsonify({"success": False, "message": str(exc), "data": None}), 400
         except Exception as exc:
+            logger.exception(
+                "usuarios_criar_error endpoint=%s payload_sem_senha=%s usuario_logado=%s bigquery_full_error=%r",
+                request.path,
+                _safe_request_params(),
+                getattr(g, "current_user", None) or session.get("user_email"),
+                exc,
+            )
             return _gestao_error_response(exc, code="USUARIOS_CRIAR_ERROR", message="Não foi possível criar usuário.")
 
     @app.put("/api/gestao/usuarios/<usuario_id>")

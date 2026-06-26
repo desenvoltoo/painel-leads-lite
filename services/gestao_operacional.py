@@ -759,11 +759,17 @@ def importar_novos_leads(file: Any, metadata: Mapping[str, Any]) -> Tuple[Dict[s
 def get_consultor_momento(filters: Mapping[str, Any], meta: Mapping[str, Any]) -> Tuple[Dict[str, Any], bool]:
     where, params = ["1=1"], []
     _add_eq(where, params, "c", filters, ["consultor_disparo"])
+    perfil = _clean_text(filters.get("current_user_profile")).upper()
+    if perfil not in {"ADMIN", "GESTOR"} and not _clean_text(filters.get("consultor_disparo")):
+        usuario = _clean_text(filters.get("usuario") or filters.get("current_user"))
+        if usuario:
+            where.append("UPPER(TRIM(CAST(c.consultor_disparo AS STRING))) = UPPER(TRIM(@consultor_logado))")
+            params.append(bigquery.ScalarQueryParameter("consultor_logado", "STRING", usuario))
     params.append(bigquery.ScalarQueryParameter("limit", "INT64", _int(meta.get("limit"), 500, 1, 1000)))
     rows = _run(f"""
     SELECT consultor_disparo,total_leads_em_lote,total_lotes,leads_em_lotes_abertos,leads_em_disparo,
            leads_com_retorno_importado,leads_finalizados,pendentes,em_atendimento,retornos,positivos,
-           negativos,matriculas,ultima_movimentacao
+           negativos,matriculas,taxa_retorno_pct,taxa_matricula_pct,trabalhados,percentual_trabalhado,ultima_movimentacao
     FROM {_ref('vw_op_consultor_momento')} c
     WHERE {' AND '.join(where)}
     ORDER BY ultima_movimentacao DESC NULLS LAST, consultor_disparo
@@ -780,7 +786,7 @@ LOTE_ATUAL_COLUMNS = [
     "retorno_observacao", "retorno_status_raw", "data_inscricao", "data_matricula", "data_disparo",
     "data_exportacao", "data_importacao_retorno", "score_prioridade", "nivel_prioridade",
     "etapa_operacional", "ultimo_evento", "ultimo_evento_em", "ultimo_evento_por", "lote_criado_em",
-    "exportado_em", "started_at", "importado_em", "finished_at",
+    "exportado_em", "started_at", "importado_em", "finished_at", "flag_pendente", "flag_trabalhado",
 ]
 
 
@@ -1062,20 +1068,38 @@ def registrar_auditoria(acao: str, usuario_id: str, autor: str, detalhes: Mappin
 
 def salvar_usuario(payload: Mapping[str, Any], autor: str, usuario_id: str | None = None) -> Tuple[Dict[str, Any], bool]:
     validate_user_schema()
-    nome=_clean_text(payload.get("nome")); email=_clean_text(payload.get("email")).lower(); perfil_id=_clean_text(payload.get("perfil_id")); ativo=bool(payload.get("ativo", True)); status=_clean_text(payload.get("status_usuario")) or ("ATIVO" if ativo else "INATIVO")
-    if not nome or not email or not perfil_id: raise ValueError("nome, email e perfil_id são obrigatórios.")
+    nome = _clean_text(payload.get("nome"))
+    email = _clean_text(payload.get("email")).lower()
+    perfil_id = _clean_text(payload.get("perfil_id"))
+    ativo = bool(payload.get("ativo", True))
+    status = _clean_text(payload.get("status_usuario")) or ("ATIVO" if ativo else "INATIVO")
+    if not nome or not email or not perfil_id:
+        raise ValueError("nome, email e perfil_id são obrigatórios.")
+    dup_params = [bigquery.ScalarQueryParameter("email", "STRING", email), bigquery.ScalarQueryParameter("usuario_id", "STRING", usuario_id or "")]
+    duplicate = _single(f"""
+    SELECT usuario_id
+    FROM {_ref('op_usuarios_painel')}
+    WHERE LOWER(TRIM(email))=@email AND (@usuario_id='' OR usuario_id<>@usuario_id)
+    LIMIT 1
+    """, dup_params, "usuarios_email_duplicado")
+    if duplicate:
+        raise ValueError("Já existe usuário cadastrado com este e-mail.")
     if usuario_id:
         p=[bigquery.ScalarQueryParameter("usuario_id","STRING",usuario_id), bigquery.ScalarQueryParameter("nome","STRING",nome), bigquery.ScalarQueryParameter("email","STRING",email), bigquery.ScalarQueryParameter("perfil_id","STRING",perfil_id), bigquery.ScalarQueryParameter("ativo","BOOL",ativo), bigquery.ScalarQueryParameter("status_usuario","STRING",status)]
         _run(f"UPDATE {_ref('op_usuarios_painel')} SET nome=@nome,email=@email,perfil_id=@perfil_id,ativo=@ativo,status_usuario=@status_usuario,updated_at=CURRENT_TIMESTAMP() WHERE usuario_id=@usuario_id", p, "usuarios_update")
         registrar_auditoria("EDICAO_USUARIO", usuario_id, autor, {"email": email, "perfil_id": perfil_id})
+        message = "Usuário atualizado com sucesso."
     else:
         usuario_id=str(uuid.uuid4()); password_hash=_clean_text(payload.get("password_hash"))
         if not password_hash:
             raise ValueError("Senha inicial é obrigatória para criar usuário.")
-        p=[bigquery.ScalarQueryParameter("usuario_id","STRING",usuario_id), bigquery.ScalarQueryParameter("nome","STRING",nome), bigquery.ScalarQueryParameter("email","STRING",email), bigquery.ScalarQueryParameter("password_hash","STRING",password_hash), bigquery.ScalarQueryParameter("perfil_id","STRING",perfil_id), bigquery.ScalarQueryParameter("status_usuario","STRING",status), bigquery.ScalarQueryParameter("ativo","BOOL",ativo), bigquery.ScalarQueryParameter("primeiro_acesso","BOOL",True), bigquery.ScalarQueryParameter("ultimo_login_em","TIMESTAMP",None), bigquery.ScalarQueryParameter("ultimo_login_ip","STRING",None), bigquery.ScalarQueryParameter("criado_por","STRING",_clean_text(autor) or "sistema")]
+        status = "ATIVO"; ativo = True
+        criado_por = _clean_text(autor) or "SISTEMA"
+        p=[bigquery.ScalarQueryParameter("usuario_id","STRING",usuario_id), bigquery.ScalarQueryParameter("nome","STRING",nome), bigquery.ScalarQueryParameter("email","STRING",email), bigquery.ScalarQueryParameter("password_hash","STRING",password_hash), bigquery.ScalarQueryParameter("perfil_id","STRING",perfil_id), bigquery.ScalarQueryParameter("status_usuario","STRING",status), bigquery.ScalarQueryParameter("ativo","BOOL",ativo), bigquery.ScalarQueryParameter("primeiro_acesso","BOOL",True), bigquery.ScalarQueryParameter("ultimo_login_em","TIMESTAMP",None), bigquery.ScalarQueryParameter("ultimo_login_ip","STRING",None), bigquery.ScalarQueryParameter("criado_por","STRING",criado_por)]
         _run(f"INSERT INTO {_ref('op_usuarios_painel')} (usuario_id,nome,email,password_hash,perfil_id,status_usuario,ativo,primeiro_acesso,ultimo_login_em,ultimo_login_ip,criado_por,created_at,updated_at) VALUES (@usuario_id,@nome,@email,@password_hash,@perfil_id,@status_usuario,@ativo,@primeiro_acesso,@ultimo_login_em,@ultimo_login_ip,@criado_por,CURRENT_TIMESTAMP(),CURRENT_TIMESTAMP())", p, "usuarios_insert")
         registrar_auditoria("CRIACAO_USUARIO", usuario_id, autor, {"email": email, "perfil_id": perfil_id})
-    return _api_response({"usuario_id": usuario_id}, "Usuário salvo."), False
+        message = "Usuário criado com sucesso."
+    return _api_response({"usuario_id": usuario_id, "nome": nome, "email": email, "perfil_id": perfil_id}, message), False
 
 
 def alterar_status_usuario(usuario_id: str, ativo: bool, autor: str) -> Tuple[Dict[str, Any], bool]:
@@ -1098,7 +1122,7 @@ def buscar_usuario_login(email: str) -> Dict[str, Any]:
         return {}
     params = [bigquery.ScalarQueryParameter("email", "STRING", email)]
     rows = _run(f"""
-    SELECT usuario_id,nome,email,perfil_id,nome_perfil,codigo_perfil,ativo,status_usuario,primeiro_acesso,password_hash,ultimo_login
+    SELECT usuario_id,nome,email,perfil_id,nome_perfil,codigo_perfil,ativo,status_usuario,primeiro_acesso,password_hash,ultimo_login_em
     FROM {_ref('vw_op_usuarios_painel')}
     WHERE LOWER(TRIM(email))=@email
     LIMIT 1
@@ -1111,7 +1135,7 @@ def registrar_login_usuario(session_data: Mapping[str, Any], ip: str = "", user_
     email = _clean_text(session_data.get("email") or session_data.get("username")).lower()
     sessao_id = _clean_text(session_data.get("session_id")) or str(uuid.uuid4())
     params_update = [bigquery.ScalarQueryParameter("usuario_id", "STRING", usuario_id), bigquery.ScalarQueryParameter("email", "STRING", email)]
-    _run(f"UPDATE {_ref('op_usuarios_painel')} SET ultimo_login=CURRENT_TIMESTAMP(), updated_at=CURRENT_TIMESTAMP() WHERE usuario_id=@usuario_id OR LOWER(TRIM(email))=@email", params_update, "usuarios_ultimo_login")
+    _run(f"UPDATE {_ref('op_usuarios_painel')} SET ultimo_login_em=CURRENT_TIMESTAMP(), updated_at=CURRENT_TIMESTAMP() WHERE usuario_id=@usuario_id OR LOWER(TRIM(email))=@email", params_update, "usuarios_ultimo_login")
     params_sessao = [
         bigquery.ScalarQueryParameter("sessao_id", "STRING", sessao_id),
         bigquery.ScalarQueryParameter("usuario_id", "STRING", usuario_id),
