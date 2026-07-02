@@ -3,7 +3,7 @@
 
 Este arquivo não importa ``app`` no topo de propósito. Se um import ou a
 criação do Flask falhar, o Gunicorn ainda consegue subir um WSGI mínimo que
-mostra o tipo do erro no navegador/API em vez do Cloud Run exibir apenas
+mostra o tipo do erro no navegador/API em vez de o servidor WSGI exibir apenas
 "Service Unavailable".
 """
 
@@ -78,7 +78,7 @@ def _startup_error_wsgi_app(payload: Dict[str, Any]) -> Callable:
   <main>
     <h1>Falha ao inicializar aplicação</h1>
     <p><span class="badge">{html.escape(str(public_payload['error_type']))}</span><span class="badge">{html.escape(str(public_payload['error_category']))}</span></p>
-    <p>O Cloud Run chegou até o container, mas o Flask não conseguiu inicializar. Abaixo está o diagnóstico retornado pelo entrypoint WSGI.</p>
+    <p>O servidor WSGI iniciou, mas o Flask não conseguiu inicializar. Abaixo está o diagnóstico retornado pelo entrypoint WSGI.</p>
     <pre>{escaped_json}</pre>
   </main>
 </body>

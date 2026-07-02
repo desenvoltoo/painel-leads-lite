@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-Painel de Chips (Flask + PostgreSQL)
+Painel de Leads Lite (Flask + PostgreSQL)
 Versão: 4.2 - Fix encoding CSV (chardet)
 """
  
@@ -688,17 +688,17 @@ def create_app() -> Flask:
         return {}
 
     def _gestao_error_response(exc, *, status=500, code="GESTAO_QUERY_ERROR", message="Não foi possível carregar os dados."):
-        bq_error = gestao_op_classify_database_error(exc)
+        db_error = gestao_op_classify_database_error(exc)
         response_status = status
-        if bq_error["error_type"] == "BIGQUERY_PERMISSION_ERROR":
+        if db_error["error_type"] == "DATABASE_PERMISSION_ERROR":
             response_status = 403
-        elif bq_error["error_type"] == "BIGQUERY_SCHEMA_ERROR":
+        elif db_error["error_type"] == "DATABASE_SCHEMA_ERROR":
             response_status = 500
-        elif bq_error["error_type"] == "BIGQUERY_INVALID_REQUEST":
+        elif db_error["error_type"] == "DATABASE_INVALID_REQUEST":
             response_status = 400
-        elif bq_error["error_type"] == "BIGQUERY_TIMEOUT":
+        elif db_error["error_type"] == "DATABASE_TIMEOUT":
             response_status = 504
-        friendly = message or bq_error["message"]
+        friendly = message or db_error["message"]
         logger.exception(
             "gestao_api_error route=%s endpoint=%s params=%s user=%s exception_type=%s database_error_type=%s database_full_error=%r",
             request.path,
@@ -706,15 +706,15 @@ def create_app() -> Flask:
             _safe_request_params(),
             getattr(g, "current_user", None) or session.get("user_email"),
             exc.__class__.__name__,
-            bq_error["error_type"],
+            db_error["error_type"],
             exc,
         )
         payload = {
             "ok": False, "success": False,
-            "error_type": bq_error["error_type"],
+            "error_type": db_error["error_type"],
             "message": friendly,
-            "details": bq_error["details"],
-            "error": {"code": bq_error["error_type"] or code, "message": friendly, "details": bq_error["details"], "correlationId": getattr(g, "correlation_id", None)},
+            "details": db_error["details"],
+            "error": {"code": db_error["error_type"] or code, "message": friendly, "details": db_error["details"], "correlationId": getattr(g, "correlation_id", None)},
         }
         return jsonify(payload), response_status
 
@@ -769,11 +769,11 @@ def create_app() -> Flask:
             data, _cached = gestao_get_qualidade_dados({}, {})
             return jsonify({"success": True, "data": data})
         except NotFound as exc:
-            return _gestao_error_response(exc, status=404, code="BIGQUERY_OBJECT_NOT_FOUND", message="Objeto PostgreSQL de qualidade dos dados não encontrado.")
+            return _gestao_error_response(exc, status=404, code="DATABASE_OBJECT_NOT_FOUND", message="Objeto PostgreSQL de qualidade dos dados não encontrado.")
         except Forbidden as exc:
-            return _gestao_error_response(exc, status=403, code="BIGQUERY_PERMISSION_DENIED", message="Sem permissão para consultar a qualidade dos dados.")
+            return _gestao_error_response(exc, status=403, code="DATABASE_PERMISSION_DENIED", message="Sem permissão para consultar a qualidade dos dados.")
         except TimeoutError as exc:
-            return _gestao_error_response(exc, status=504, code="BIGQUERY_TIMEOUT", message="Tempo esgotado ao consultar a qualidade dos dados.")
+            return _gestao_error_response(exc, status=504, code="DATABASE_TIMEOUT", message="Tempo esgotado ao consultar a qualidade dos dados.")
         except Exception as exc:
             return _gestao_error_response(exc, code="QUALIDADE_DADOS_ERROR", message="Não foi possível carregar a qualidade dos dados.")
 
@@ -790,11 +790,11 @@ def create_app() -> Flask:
         except GestaoValidationError as exc:
             return jsonify({"success": False, "error": {"code": "IMPORTACOES_INVALID_FILTER", "message": str(exc), "correlationId": getattr(g, "correlation_id", None)}}), 400
         except NotFound as exc:
-            return _gestao_error_response(exc, status=404, code="BIGQUERY_OBJECT_NOT_FOUND", message="Objeto PostgreSQL de histórico de importações não encontrado.")
+            return _gestao_error_response(exc, status=404, code="DATABASE_OBJECT_NOT_FOUND", message="Objeto PostgreSQL de histórico de importações não encontrado.")
         except Forbidden as exc:
-            return _gestao_error_response(exc, status=403, code="BIGQUERY_PERMISSION_DENIED", message="Sem permissão para consultar o histórico de importações.")
+            return _gestao_error_response(exc, status=403, code="DATABASE_PERMISSION_DENIED", message="Sem permissão para consultar o histórico de importações.")
         except TimeoutError as exc:
-            return _gestao_error_response(exc, status=504, code="BIGQUERY_TIMEOUT", message="Tempo esgotado ao consultar o histórico de importações.")
+            return _gestao_error_response(exc, status=504, code="DATABASE_TIMEOUT", message="Tempo esgotado ao consultar o histórico de importações.")
         except Exception as exc:
             return _gestao_error_response(exc, code="IMPORTACOES_HISTORICO_ERROR", message="Não foi possível carregar o histórico de importações.")
 
@@ -856,9 +856,9 @@ def create_app() -> Flask:
         except GestaoValidationError as exc:
             return jsonify({"success": False, "error": {"code": "IMPORTACOES_INVALID_FILTER", "message": str(exc), "correlationId": getattr(g, "correlation_id", None)}}), 400
         except NotFound as exc:
-            return _gestao_error_response(exc, status=404, code="BIGQUERY_OBJECT_NOT_FOUND", message="Objeto PostgreSQL de exportação do histórico não encontrado.")
+            return _gestao_error_response(exc, status=404, code="DATABASE_OBJECT_NOT_FOUND", message="Objeto PostgreSQL de exportação do histórico não encontrado.")
         except Forbidden as exc:
-            return _gestao_error_response(exc, status=403, code="BIGQUERY_PERMISSION_DENIED", message="Sem permissão para exportar o histórico de importações.")
+            return _gestao_error_response(exc, status=403, code="DATABASE_PERMISSION_DENIED", message="Sem permissão para exportar o histórico de importações.")
         except Exception as exc:
             return _gestao_error_response(exc, code="IMPORTACOES_EXPORT_ERROR", message="Não foi possível exportar o histórico de importações.")
 
@@ -1949,7 +1949,8 @@ def create_app() -> Flask:
     return app
  
  
+app = create_app()
+
 if __name__ == "__main__":
-    app = create_app()
-    port = int(_env("PORT", "8080"))
+    port = int(_env("PORT", "8000"))
     app.run(host="0.0.0.0", port=port, debug=True)

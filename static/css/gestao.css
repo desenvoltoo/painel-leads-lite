@@ -53,7 +53,7 @@ button, a, input, select { min-height: 40px; }
 .filter-search { grid-column: span 2; }
 .filter-actions { align-items: end; display: flex; gap: .6rem; grid-column: span 2; }
 .filter-actions .btn { flex: 1; }
-.chips { align-items: center; display: flex; flex-wrap: wrap; gap: .5rem; margin-top: .9rem; min-height: 32px; }
+.filter-tags { align-items: center; display: flex; flex-wrap: wrap; gap: .5rem; margin-top: .9rem; min-height: 32px; }
 .chip { background: #eff6ff; border: 1px solid #bfdbfe; border-radius: 999px; color: #1d4ed8; font-size: .82rem; font-weight: 750; padding: .35rem .7rem; }
 
 .kpi-grid { display: grid; gap: 1rem; grid-template-columns: repeat(6, minmax(0, 1fr)); margin-bottom: 1.25rem; }
