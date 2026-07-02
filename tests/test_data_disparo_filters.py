@@ -3,7 +3,7 @@ from datetime import date
 import pytest
 
 from app import InvalidDataDisparoFilter, _get_filters_from_payload
-from services import bigquery as bq
+from services import database as bq
 
 
 def test_get_filters_from_payload_accepts_data_disparo_filters():
@@ -33,7 +33,7 @@ def _param_map(params):
 @pytest.fixture(autouse=True)
 def data_disparo_columns(monkeypatch):
     monkeypatch.setattr(bq, "_has_view_col", lambda col: col in {"data_disparo", "data_inscricao"})
-    monkeypatch.setattr(bq, "_view_table_id", lambda: "painel-universidade.modelo_estrela.vw_leads_painel_lite")
+    monkeypatch.setattr(bq, "_view_table_id", lambda: "chips.vw_chips_painel")
 
 
 def test_apply_filters_data_disparo_month_generates_date_range_params():

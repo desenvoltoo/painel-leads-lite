@@ -6,7 +6,7 @@ import pytest
 
 from app import create_app
 from services import gestao
-from services import bigquery as bq
+from services import database as bq
 
 
 @pytest.fixture()
@@ -183,7 +183,7 @@ def test_resumo_endpoint_success_and_meta(client, monkeypatch):
     assert body["meta"]["filters"]["curso"] == ["Direito"]
 
 
-def test_bigquery_error_is_safe(client, monkeypatch):
+def test_database_error_is_safe(client, monkeypatch):
     login(client)
 
     def fake(filters, meta):
@@ -283,7 +283,7 @@ def test_upload_empty_csv(client):
 def test_dt_upload_injection(monkeypatch):
     import pandas as pd
 
-    schema = [bq.bigquery.SchemaField("nome", "STRING"), bq.bigquery.SchemaField("celular", "STRING"), bq.bigquery.SchemaField("dt_upload", "TIMESTAMP")]
+    schema = [bq.database.SchemaField("nome", "STRING"), bq.database.SchemaField("celular", "STRING"), bq.database.SchemaField("dt_upload", "TIMESTAMP")]
     upload_ts = datetime(2026, 6, 10, 12, tzinfo=timezone.utc)
     df = pd.DataFrame([{"nome": "Ana", "celular": "11999999999"}])
     out = bq._coerce_df_to_staging_schema(df, staging_schema=schema, upload_ts=upload_ts)
@@ -307,7 +307,7 @@ def test_masks_personal_data():
     assert "payload" not in masked
 
 
-def test_json_safe_bigquery_values():
+def test_json_safe_database_values():
     from decimal import Decimal
 
     now = datetime(2026, 6, 10, 12, 0, tzinfo=timezone.utc)
@@ -488,8 +488,8 @@ def test_fila_sem_status_recency_before_ec_regardless_previous_action():
 
 def test_bq_param_logging_redacts_personal_values():
     params = [
-        bq.bigquery.ScalarQueryParameter("email", "STRING", "ana@example.com"),
-        bq.bigquery.ScalarQueryParameter("status", "STRING", "CONCLUIDO"),
+        bq.database.ScalarQueryParameter("email", "STRING", "ana@example.com"),
+        bq.database.ScalarQueryParameter("status", "STRING", "CONCLUIDO"),
     ]
     formatted = bq._format_bq_params_for_log(params)
     assert formatted[0]["value"] == "[REDACTED]"

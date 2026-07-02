@@ -727,7 +727,7 @@ function deleteSavedFilterView() {
 async function loadLeadsAndKpis() {
   if (isLoadingLeads) return;
   isLoadingLeads = true;
-  setStatus("Consultando BigQuery...", "ok");
+  setStatus("Consultando PostgreSQL...", "ok");
   renderTable([], { loading: true });
   setSearchLoading(true);
 
@@ -784,7 +784,7 @@ function renderTable(rows, { loading = false } = {}) {
   if (!tbody) return;
 
   if (loading) {
-    tbody.innerHTML = `<tr><td colspan="${TABLE_COLS}" class="table-feedback"><div class="spinner" aria-hidden="true"></div><strong>Carregando dados...</strong><span>Consultando leads consolidados no BigQuery.</span></td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="${TABLE_COLS}" class="table-feedback"><div class="spinner" aria-hidden="true"></div><strong>Carregando dados...</strong><span>Consultando leads consolidados no PostgreSQL.</span></td></tr>`;
     return;
   }
 
@@ -891,7 +891,7 @@ async function pollUploadStatus(jobId) {
       return;
     }
 
-    setUploadStatus(`Dados carregados. Executando procedure no BigQuery... (${attempt}/${maxAttempts})`, "info");
+    setUploadStatus(`Dados carregados. Executando procedure no PostgreSQL... (${attempt}/${maxAttempts})`, "info");
     await new Promise((resolve) => setTimeout(resolve, 1500));
   }
 
@@ -920,7 +920,7 @@ async function doUpload() {
     const resp = await uploadDirectToServer(file, source);
     const jobId = resp?.job_id;
     const reportText = formatImportReport(resp?.report);
-    const jobText = jobId ? ` Job BigQuery: ${jobId}.` : "";
+    const jobText = jobId ? ` Job PostgreSQL: ${jobId}.` : "";
     setUploadStatus(reportText ? `${reportText}${jobText}` : (resp?.message || `Arquivo enviado com sucesso. Processamento iniciado.${jobText}`), "success");
     await pollUploadStatus(jobId);
     if (!jobId) notifyGestaoUploadConcluido();
