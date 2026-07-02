@@ -1,0 +1,15 @@
+[Unit]
+Description=Painel Leads Lite
+After=network.target
+
+[Service]
+User=www-data
+Group=www-data
+WorkingDirectory=/var/www/painel-leads-lite
+EnvironmentFile=/var/www/painel-leads-lite/.env
+ExecStart=/var/www/painel-leads-lite/.venv/bin/gunicorn -c gunicorn.conf.py app:app
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

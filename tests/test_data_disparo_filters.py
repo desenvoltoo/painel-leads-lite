@@ -33,7 +33,7 @@ def _param_map(params):
 @pytest.fixture(autouse=True)
 def data_disparo_columns(monkeypatch):
     monkeypatch.setattr(bq, "_has_view_col", lambda col: col in {"data_disparo", "data_inscricao"})
-    monkeypatch.setattr(bq, "_view_table_id", lambda: "chips.vw_chips_painel")
+    monkeypatch.setattr(bq, "_view_table_id", lambda: "public.vw_leads_painel_lite")
 
 
 def test_apply_filters_data_disparo_month_generates_date_range_params():
