@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-Painel Leads Lite (Flask + BigQuery)
+Painel de Chips (Flask + PostgreSQL)
 Versão: 4.2 - Fix encoding CSV (chardet)
 """
  
@@ -19,10 +19,12 @@ from typing import Dict, Any, Tuple
  
 from flask import Flask, render_template, request, jsonify, send_file, redirect, url_for, make_response, g, session, Response, stream_with_context
 from werkzeug.security import check_password_hash, generate_password_hash
-from google.api_core.exceptions import Forbidden, NotFound
+
+class Forbidden(Exception): pass
+class NotFound(Exception): pass
 from startup_diagnostics import build_error_payload, env_bool, env_int
  
-from services.bigquery import (
+from services.database import (
     EXPORT_MAX_ROWS,
     query_leads,
     query_leads_iter,
@@ -111,7 +113,7 @@ from services.gestao_operacional import (
     registrar_login_usuario as gestao_op_registrar_login_usuario,
     atualizar_password_hash_usuario as gestao_op_atualizar_password_hash_usuario,
     get_logs_auditoria as gestao_op_get_logs_auditoria,
-    classify_bigquery_error as gestao_op_classify_bigquery_error,
+    classify_database_error as gestao_op_classify_database_error,
 )
 
 logger = logging.getLogger(__name__)
@@ -173,13 +175,9 @@ def _env(name: str, default: str = "") -> str:
     return v.strip() if isinstance(v, str) else v if v else default
  
 def _required_envs_ok():
-    # BigQuery has coherent defaults in services.bigquery; accept both legacy and canonical env names.
     missing = []
-    checks = (("BIGQUERY_PROJECT_ID", "GCP_PROJECT_ID"), ("BIGQUERY_DATASET", "BQ_DATASET"))
-    for canonical, legacy in checks:
-        if not (_env(canonical) or _env(legacy)):
-            # Defaults are intentionally valid for this project, so this is informational only.
-            continue
+    if not _env("DATABASE_URL"):
+        missing.append("DATABASE_URL")
     return (len(missing) == 0, missing)
  
 def _get_filters_from_request() -> Tuple[Dict[str, Any], Dict[str, Any]]:
@@ -496,7 +494,7 @@ def create_app() -> Flask:
         PERMANENT_SESSION_LIFETIME=session_ttl_seconds,
     )
 
-    # Fallback local apenas para desenvolvimento/testes quando o BigQuery não estiver disponível.
+    # Fallback local apenas para desenvolvimento/testes quando o PostgreSQL não estiver disponível.
     users = {
         "matheus": "pbkdf2:sha256:1000000$Ij5ppE2yYdLvAKlF$0d441b0096771e07525df01b224faf57cabedc83b444375cad21e44f9d6b5282",
         "miguel": "pbkdf2:sha256:1000000$rxyvycWVM3tJCDF0$36a69c69fd09385c4e39fd2c67549f60c9dccc1a68f7a56d0f8e8f00716fc49d",
@@ -690,7 +688,7 @@ def create_app() -> Flask:
         return {}
 
     def _gestao_error_response(exc, *, status=500, code="GESTAO_QUERY_ERROR", message="Não foi possível carregar os dados."):
-        bq_error = gestao_op_classify_bigquery_error(exc)
+        bq_error = gestao_op_classify_database_error(exc)
         response_status = status
         if bq_error["error_type"] == "BIGQUERY_PERMISSION_ERROR":
             response_status = 403
@@ -702,7 +700,7 @@ def create_app() -> Flask:
             response_status = 504
         friendly = message or bq_error["message"]
         logger.exception(
-            "gestao_api_error route=%s endpoint=%s params=%s user=%s exception_type=%s bigquery_error_type=%s bigquery_full_error=%r",
+            "gestao_api_error route=%s endpoint=%s params=%s user=%s exception_type=%s database_error_type=%s database_full_error=%r",
             request.path,
             f"{request.method} {request.endpoint}",
             _safe_request_params(),
@@ -771,7 +769,7 @@ def create_app() -> Flask:
             data, _cached = gestao_get_qualidade_dados({}, {})
             return jsonify({"success": True, "data": data})
         except NotFound as exc:
-            return _gestao_error_response(exc, status=404, code="BIGQUERY_OBJECT_NOT_FOUND", message="Objeto BigQuery de qualidade dos dados não encontrado.")
+            return _gestao_error_response(exc, status=404, code="BIGQUERY_OBJECT_NOT_FOUND", message="Objeto PostgreSQL de qualidade dos dados não encontrado.")
         except Forbidden as exc:
             return _gestao_error_response(exc, status=403, code="BIGQUERY_PERMISSION_DENIED", message="Sem permissão para consultar a qualidade dos dados.")
         except TimeoutError as exc:
@@ -792,7 +790,7 @@ def create_app() -> Flask:
         except GestaoValidationError as exc:
             return jsonify({"success": False, "error": {"code": "IMPORTACOES_INVALID_FILTER", "message": str(exc), "correlationId": getattr(g, "correlation_id", None)}}), 400
         except NotFound as exc:
-            return _gestao_error_response(exc, status=404, code="BIGQUERY_OBJECT_NOT_FOUND", message="Objeto BigQuery de histórico de importações não encontrado.")
+            return _gestao_error_response(exc, status=404, code="BIGQUERY_OBJECT_NOT_FOUND", message="Objeto PostgreSQL de histórico de importações não encontrado.")
         except Forbidden as exc:
             return _gestao_error_response(exc, status=403, code="BIGQUERY_PERMISSION_DENIED", message="Sem permissão para consultar o histórico de importações.")
         except TimeoutError as exc:
@@ -858,7 +856,7 @@ def create_app() -> Flask:
         except GestaoValidationError as exc:
             return jsonify({"success": False, "error": {"code": "IMPORTACOES_INVALID_FILTER", "message": str(exc), "correlationId": getattr(g, "correlation_id", None)}}), 400
         except NotFound as exc:
-            return _gestao_error_response(exc, status=404, code="BIGQUERY_OBJECT_NOT_FOUND", message="Objeto BigQuery de exportação do histórico não encontrado.")
+            return _gestao_error_response(exc, status=404, code="BIGQUERY_OBJECT_NOT_FOUND", message="Objeto PostgreSQL de exportação do histórico não encontrado.")
         except Forbidden as exc:
             return _gestao_error_response(exc, status=403, code="BIGQUERY_PERMISSION_DENIED", message="Sem permissão para exportar o histórico de importações.")
         except Exception as exc:
@@ -1100,9 +1098,9 @@ def create_app() -> Flask:
     def api_gestao_logs_debug_fila():
         return _gestao_logs_endpoint("debug_fila")
 
-    @app.get("/api/gestao/logs/bigquery-sync")
-    def api_gestao_logs_bigquery_sync():
-        return _gestao_logs_endpoint("bigquery_sync")
+    @app.get("/api/gestao/logs/database-sync")
+    def api_gestao_logs_database_sync():
+        return _gestao_logs_endpoint("database_sync")
 
     @app.post("/api/gestao/operacional/liberar-proximos-leads")
     def api_gestao_operacional_liberar_proximos_leads():
@@ -1321,7 +1319,7 @@ def create_app() -> Flask:
             return jsonify({"success": False, "message": str(exc), "data": None}), 400
         except Exception as exc:
             logger.exception(
-                "usuarios_criar_error endpoint=%s metodo=%s payload_sem_senha=%s usuario_logado=%s bigquery_full_error=%r",
+                "usuarios_criar_error endpoint=%s metodo=%s payload_sem_senha=%s usuario_logado=%s database_full_error=%r",
                 request.path,
                 request.method,
                 _safe_request_params(),
@@ -1347,7 +1345,7 @@ def create_app() -> Flask:
             return jsonify({"success": False, "message": str(exc), "data": None}), 400
         except Exception as exc:
             logger.exception(
-                "usuarios_editar_error endpoint=%s metodo=%s payload_sem_senha=%s usuario_logado=%s bigquery_full_error=%r",
+                "usuarios_editar_error endpoint=%s metodo=%s payload_sem_senha=%s usuario_logado=%s database_full_error=%r",
                 request.path,
                 request.method,
                 _safe_request_params(),
@@ -1516,15 +1514,13 @@ def create_app() -> Flask:
  
     @app.get("/health")
     def health():
-        ok, missing = _required_envs_ok()
-        return jsonify(
-            {
-                "status": "ok" if ok else "unhealthy",
-                "missing": missing,
-                "ui_version": ui_version,
-                "asset_version": asset_version,
-            }
-        )
+        from services.database import healthcheck
+        try:
+            healthcheck()
+            return jsonify({"ok": True, "db": "connected"})
+        except Exception as exc:
+            logger.exception("healthcheck_error route=/health")
+            return jsonify({"ok": False, "db": "error", "error": str(exc)}), 500
  
     @app.get("/api/leads")
     def api_leads():
@@ -1552,7 +1548,7 @@ def create_app() -> Flask:
         except TimeoutError as e:
             return jsonify(_error_payload(e, "Timeout ao buscar leads. Tente reduzir filtros/volume ou usar stream=true.")), 504
         except Exception as e:
-            return jsonify(_error_payload(e, "Erro ao buscar leads no BigQuery.")), 500
+            return jsonify(_error_payload(e, "Erro ao buscar leads no PostgreSQL.")), 500
 
     @app.post("/api/leads/search")
     def api_leads_search():
@@ -1581,7 +1577,7 @@ def create_app() -> Flask:
         except TimeoutError as e:
             return jsonify(_error_payload(e, "Timeout ao buscar leads. Tente reduzir filtros/volume ou usar stream=true.")), 504
         except Exception as e:
-            return jsonify(_error_payload(e, "Erro ao buscar leads no BigQuery.")), 500
+            return jsonify(_error_payload(e, "Erro ao buscar leads no PostgreSQL.")), 500
  
     @app.get("/api/kpis")
     def api_kpis():
