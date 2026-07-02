@@ -11,7 +11,7 @@
 // filtros: #fStatus #fCurso #fModalidade #fTurno #fPolo #fOrigem
 //          #fConsultorDisparo #fConsultorComercial #fCanal #fCampanha
 //          #fTipoDisparo #fTipoNegocio
-//          #fIni #fFim #fMatriculado #fLimit #fBusca
+//          #fIni #fFim #fMesDisparo #fDataDisparoSituacao #fMatriculado #fLimit #fBusca
 // ações: #btnApply #btnClear #btnReload #btnExport
 // kpis: #kpiCount #kpiTopStatus
 // tabela: #tbl tbody
@@ -23,7 +23,7 @@ let tsStatus, tsCurso, tsModalidade, tsTurno, tsPolo, tsOrigem;
 let tsConsultorDisparo, tsConsultorComercial, tsCanal, tsCampanha;
 let tsTipoDisparo, tsTipoNegocio;
 
-const TABLE_COLS = 13;
+const TABLE_COLS = 14;
 const EMPTY_FILTER_TOKEN = "__EMPTY__";
 const EMPTY_FILTER_LABEL = "(Sem preenchimento)";
 const SAVED_FILTERS_STORAGE_KEY = "painel_leads_saved_filters_v1";
@@ -82,8 +82,13 @@ function formatImportReport(report) {
 
 function setSearchLoading(loading) {
   const row = $("#searchLoading");
-  if (!row) return;
-  row.hidden = !loading;
+  if (row) row.hidden = !loading;
+  ["#btnApply", "#btnExport"].forEach((selector) => {
+    const btn = $(selector);
+    if (!btn) return;
+    btn.disabled = loading;
+    btn.classList.toggle("is-loading", loading);
+  });
 }
 
 function setExportProgress({ visible, text = "", progress = 0 }) {
@@ -112,9 +117,22 @@ function fmtDate(d) {
   const s = String(d);
   const datePart = s.slice(0, 10);
   if (/^\d{4}-\d{2}-\d{2}$/.test(datePart)) {
-    return datePart.split("-").reverse().join("/");
+    const formattedDate = datePart.split("-").reverse().join("/");
+    const timeMatch = s.match(/T?(\d{2}:\d{2})/);
+    return timeMatch ? `${formattedDate} ${timeMatch[1]}` : formattedDate;
   }
   return s;
+}
+
+function fmtMonthYear(monthValue) {
+  const s = String(monthValue || "").trim();
+  if (!/^\d{4}-\d{2}$/.test(s)) return s;
+  const [year, month] = s.split("-");
+  return `${month}/${year}`;
+}
+
+function fmtDataDisparo(value) {
+  return value ? fmtDate(value) : "Sem disparo";
 }
 
 function fmtBool(b) {
@@ -477,6 +495,8 @@ function buildLeadsParams() {
   const data_ini = safeDate($("#fIni")?.value || "");
   const data_fim = safeDate($("#fFim")?.value || "");
   const matriculado = ($("#fMatriculado")?.value || "").trim(); // "" | "true" | "false"
+  const data_disparo_mes = ($("#fMesDisparo")?.value || "").trim();
+  const data_disparo_situacao = ($("#fDataDisparoSituacao")?.value || "").trim();
   const limit = Number($("#fLimit")?.value || 500) || 500;
   const offset = Math.max(0, (currentPage - 1) * limit);
 
@@ -498,6 +518,8 @@ function buildLeadsParams() {
     matriculado,
     data_ini,
     data_fim,
+    data_disparo_mes,
+    data_disparo_situacao,
     limit,
     offset,
     order_by: "data_disparo",
@@ -522,6 +544,8 @@ function getCurrentFilterState() {
     tipo_negocio: getMulti(tsTipoNegocio),
     data_ini: safeDate($("#fIni")?.value || ""),
     data_fim: safeDate($("#fFim")?.value || ""),
+    data_disparo_mes: ($("#fMesDisparo")?.value || "").trim(),
+    data_disparo_situacao: ($("#fDataDisparoSituacao")?.value || "").trim(),
     matriculado: ($("#fMatriculado")?.value || "").trim(),
     limit: Number($("#fLimit")?.value || 500) || 500,
     busca_rapida: ($("#fBusca")?.value || "").trim(),
@@ -544,9 +568,37 @@ function applyFilterState(state = {}) {
 
   if ($("#fIni")) $("#fIni").value = state.data_ini || "";
   if ($("#fFim")) $("#fFim").value = state.data_fim || "";
+  if ($("#fMesDisparo")) $("#fMesDisparo").value = state.data_disparo_mes || "";
+  if ($("#fDataDisparoSituacao")) $("#fDataDisparoSituacao").value = state.data_disparo_situacao || "";
+  updateDataDisparoMonthState();
   if ($("#fMatriculado")) $("#fMatriculado").value = state.matriculado || "";
   if ($("#fLimit")) $("#fLimit").value = String(state.limit || 500);
   if ($("#fBusca")) $("#fBusca").value = state.busca_rapida || "";
+}
+
+function getActiveFilterSummary() {
+  const parts = [];
+  const mesDisparo = ($("#fMesDisparo")?.value || "").trim();
+  const situacaoDisparo = ($("#fDataDisparoSituacao")?.value || "").trim();
+  if (mesDisparo) parts.push(`mês disparo ${fmtMonthYear(mesDisparo)}`);
+  if (situacaoDisparo === "vazias") parts.push("sem data de disparo");
+  if (situacaoDisparo === "preenchidas") parts.push("com data de disparo");
+  if (($("#fIni")?.value || "").trim()) parts.push(`inscrição inicial ${fmtDate($("#fIni").value)}`);
+  if (($("#fFim")?.value || "").trim()) parts.push(`inscrição final ${fmtDate($("#fFim").value)}`);
+  return parts.length ? ` Filtros ativos: ${parts.join(", ")}.` : "";
+}
+
+function updateDataDisparoMonthState() {
+  const situacao = ($("#fDataDisparoSituacao")?.value || "").trim();
+  const mes = $("#fMesDisparo");
+  if (!mes) return;
+  if (situacao === "vazias") {
+    // Sem data de disparo prevalece sobre mês: não há data para comparar no SQL.
+    mes.value = "";
+    mes.disabled = true;
+  } else {
+    mes.disabled = false;
+  }
 }
 
 function readSavedFilters() {
@@ -695,10 +747,10 @@ async function loadLeadsAndKpis() {
     renderTotals(total, rows.length);
     renderKpis(kpisResp);
 
-    setStatus(`${rows.length} registros carregados.`, "ok");
+    setStatus(`${rows.length} registros carregados.${getActiveFilterSummary()}`, "ok");
   } catch (e) {
     console.error(e);
-    setStatus(e.message || "Erro ao consultar leads.", "err");
+    setStatus("Não foi possível buscar os leads. Verifique os filtros e tente novamente.", "err");
     renderTable([]);
     renderTotals(0, 0);
   } finally {
@@ -721,7 +773,7 @@ function renderTotals(total, shown) {
   const limit = Number($("#fLimit")?.value || 500) || 500;
   const start = total > 0 ? ((currentPage - 1) * limit) + 1 : 0;
   const end = total > 0 ? start + shown - 1 : 0;
-  if ($("#lblRange")) $("#lblRange").textContent = `Mostrando ${start}-${Math.max(end, 0)} de ${total ?? 0} leads`;
+  if ($("#lblRange")) $("#lblRange").textContent = `Mostrando ${start}-${Math.max(end, 0)} de ${total ?? 0} leads${getActiveFilterSummary()}`;
   if ($("#lblPage")) $("#lblPage").textContent = `Página ${currentPage}`;
   if ($("#btnPrevPage")) $("#btnPrevPage").disabled = currentPage <= 1;
   if ($("#btnNextPage")) $("#btnNextPage").disabled = end >= (total ?? 0);
@@ -741,27 +793,47 @@ function renderTable(rows, { loading = false } = {}) {
     return;
   }
 
-  tbody.innerHTML = rows
-    .map(
-      (r) => `
-    <tr>
-      <td>${tableCell(fmtDate(r.data_inscricao), "cell-muted")}</td>
-      <td>${tableCell(r.nome || "-", "lead-name")}</td>
-      <td>${tableCell(r.cpf || "-", "cell-muted")}</td>
-      <td>${tableCell(r.celular || "-", "cell-muted")}</td>
-      <td>${tableCell(r.origem || "-")}</td>
-      <td>${tableCell(r.polo || "-")}</td>
-      <td>${tableCell(r.curso || "-")}</td>
-      <td>${tableCell(r.modalidade || "-")}</td>
-      <td><span class="badge ${badgeClass(r.status || "LEAD")}" title="${escapeHtml(r.status || "LEAD")}">${escapeHtml(r.status || "LEAD")}</span></td>
-      <td><span class="badge ${badgeClass(fmtBool(r.flag_matriculado), "matriculado")}">${escapeHtml(fmtBool(r.flag_matriculado))}</span></td>
-      <td>${tableCell(r.consultor_disparo || "-")}</td>
-      <td>${tableCell(r.campanha || "-")}</td>
-      <td>${tableCell(r.canal || "-")}</td>
-    </tr>
-  `
-    )
-    .join("");
+  tbody.textContent = "";
+  rows.forEach((r) => {
+    const tr = document.createElement("tr");
+
+    const addTextCell = (value, extraClass = "") => {
+      const td = document.createElement("td");
+      const span = document.createElement("span");
+      span.className = extraClass;
+      span.textContent = value || "-";
+      span.title = span.textContent;
+      td.appendChild(span);
+      tr.appendChild(td);
+    };
+
+    const addBadgeCell = (value, kind = "status") => {
+      const td = document.createElement("td");
+      const span = document.createElement("span");
+      span.className = `badge ${badgeClass(value, kind)}`;
+      span.textContent = value || "-";
+      span.title = span.textContent;
+      td.appendChild(span);
+      tr.appendChild(td);
+    };
+
+    addTextCell(fmtDate(r.data_inscricao), "cell-muted");
+    addTextCell(r.nome || "-", "lead-name");
+    addTextCell(r.cpf || "-", "cell-muted");
+    addTextCell(r.celular || "-", "cell-muted");
+    addTextCell(r.origem || "-");
+    addTextCell(r.polo || "-");
+    addTextCell(r.curso || "-");
+    addTextCell(r.modalidade || "-");
+    addBadgeCell(r.status || "LEAD");
+    addBadgeCell(fmtBool(r.flag_matriculado), "matriculado");
+    addTextCell(r.consultor_disparo || "-");
+    addTextCell(fmtDataDisparo(r.data_disparo), r.data_disparo ? "cell-muted" : "cell-warning");
+    addTextCell(r.campanha || "-");
+    addTextCell(r.canal || "-");
+
+    tbody.appendChild(tr);
+  });
 }
 
 function renderKpis(k) {
@@ -1000,6 +1072,9 @@ function clearFilters() {
 
   if ($("#fIni")) $("#fIni").value = "";
   if ($("#fFim")) $("#fFim").value = "";
+  if ($("#fMesDisparo")) $("#fMesDisparo").value = "";
+  if ($("#fDataDisparoSituacao")) $("#fDataDisparoSituacao").value = "";
+  updateDataDisparoMonthState();
   if ($("#fMatriculado")) $("#fMatriculado").value = "";
   if ($("#fLimit")) $("#fLimit").value = "500";
   if ($("#fBusca")) $("#fBusca").value = "";
@@ -1045,6 +1120,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   initUploadInteractions();
 
   refreshSavedFiltersSelect();
+  updateDataDisparoMonthState();
 
   $("#btnApply")?.addEventListener("click", () => {
     currentPage = 1;
@@ -1084,6 +1160,15 @@ document.addEventListener("DOMContentLoaded", async () => {
     loadLeadsAndKpisDebounced();
   });
   $("#fFim")?.addEventListener("change", () => {
+    currentPage = 1;
+    loadLeadsAndKpisDebounced();
+  });
+  $("#fMesDisparo")?.addEventListener("change", () => {
+    currentPage = 1;
+    loadLeadsAndKpisDebounced();
+  });
+  $("#fDataDisparoSituacao")?.addEventListener("change", () => {
+    updateDataDisparoMonthState();
     currentPage = 1;
     loadLeadsAndKpisDebounced();
   });

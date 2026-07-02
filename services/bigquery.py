@@ -11,7 +11,7 @@ import re
 import unicodedata
 from concurrent.futures import TimeoutError as FuturesTimeoutError
 from decimal import Decimal, InvalidOperation
-from datetime import timedelta, datetime, timezone
+from datetime import date, timedelta, datetime, timezone
 from io import StringIO
 from pathlib import Path
 from time import perf_counter
@@ -1167,6 +1167,28 @@ def _apply_filters(sql: str, filters: Dict[str, Any], params: List[Any]) -> str:
         sql += " AND v.data_inscricao <= @data_fim"
         params.append(bigquery.ScalarQueryParameter("data_fim", "DATE", filters["data_fim"]))
 
+    situacao_disparo = str(filters.get("data_disparo_situacao") or "").strip().lower()
+    mes_disparo = str(filters.get("data_disparo_mes") or "").strip()
+    has_data_disparo = _has_view_col("data_disparo")
+
+    if (situacao_disparo or mes_disparo) and not has_data_disparo:
+        logger.warning("Filtro de data_disparo ignorado: coluna 'data_disparo' não existe em %s.", _view_table_id())
+    elif situacao_disparo == "vazias":
+        # Regra operacional: ao filtrar vazias, o mês é ignorado porque não há data para comparar.
+        sql += " AND v.data_disparo IS NULL"
+    elif has_data_disparo:
+        if situacao_disparo == "preenchidas":
+            sql += " AND v.data_disparo IS NOT NULL"
+
+        if mes_disparo:
+            year, month = [int(part) for part in mes_disparo.split("-", 1)]
+            data_disparo_ini = date(year, month, 1)
+            data_disparo_fim = date(year + (1 if month == 12 else 0), 1 if month == 12 else month + 1, 1)
+            sql += " AND DATE(v.data_disparo) >= @data_disparo_ini"
+            sql += " AND DATE(v.data_disparo) < @data_disparo_fim"
+            params.append(bigquery.ScalarQueryParameter("data_disparo_ini", "DATE", data_disparo_ini))
+            params.append(bigquery.ScalarQueryParameter("data_disparo_fim", "DATE", data_disparo_fim))
+
     return sql
 
 
@@ -1672,6 +1694,7 @@ def query_leads_iter(
         _select_col("flag_matriculado", bq_type="BOOL"),
         _select_col("consultor_comercial"),
         _select_col("consultor_disparo"),
+        _select_col("data_disparo", bq_type="TIMESTAMP"),
         _select_col("canal"),
         _select_col("campanha"),
     ])
@@ -1822,9 +1845,10 @@ def export_leads_rows(
 
     order_expr = _order_expr_for(order_by)
     bool_cols = {"flag_matriculado"}
-    date_cols = {"data_inscricao", "data_ultima_acao", "data_disparo", "data_matricula"}
+    date_cols = {"data_inscricao", "data_ultima_acao", "data_matricula"}
+    timestamp_cols = {"data_disparo"}
     select_cols = ",\n      ".join([
-        _select_export_col(c, bq_type=("BOOL" if c in bool_cols else "DATE" if c in date_cols else "STRING"))
+        _select_export_col(c, bq_type=("BOOL" if c in bool_cols else "TIMESTAMP" if c in timestamp_cols else "DATE" if c in date_cols else "STRING"))
         for c, _ in EXPORT_COLUMNS
     ])
 

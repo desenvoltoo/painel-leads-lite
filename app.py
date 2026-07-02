@@ -11,6 +11,7 @@ import json
 import logging
 import csv
 import threading
+import re
 from time import perf_counter
 from datetime import datetime
 from pathlib import Path
@@ -114,6 +115,29 @@ from services.gestao_operacional import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+class InvalidDataDisparoFilter(ValueError):
+    pass
+
+
+def _validate_data_disparo_filters(filters: Dict[str, Any]) -> None:
+    mes = filters.get("data_disparo_mes")
+    situacao = filters.get("data_disparo_situacao")
+    if mes and not re.fullmatch(r"\d{4}-\d{2}", str(mes)):
+        raise InvalidDataDisparoFilter("Filtro de data de disparo inválido.")
+    if mes:
+        month = int(str(mes).split("-", 1)[1])
+        if month < 1 or month > 12:
+            raise InvalidDataDisparoFilter("Filtro de data de disparo inválido.")
+    if situacao and str(situacao).strip().lower() not in {"vazias", "preenchidas"}:
+        raise InvalidDataDisparoFilter("Filtro de data de disparo inválido.")
+    if situacao:
+        filters["data_disparo_situacao"] = str(situacao).strip().lower()
+
+
+def _invalid_data_disparo_response():
+    return jsonify({"ok": False, "error": {"message": "Filtro de data de disparo inválido."}}), 400
  
 
 
@@ -184,8 +208,11 @@ def _get_filters_from_request() -> Tuple[Dict[str, Any], Dict[str, Any]]:
         "matriculado": n(request.args.get("matriculado")),
         "data_ini": n(request.args.get("data_ini")),
         "data_fim": n(request.args.get("data_fim")),
+        "data_disparo_mes": n(request.args.get("data_disparo_mes")),
+        "data_disparo_situacao": n(request.args.get("data_disparo_situacao")),
     }
     filters = {k: v for k, v in filters.items() if v is not None and str(v).strip() != ""}
+    _validate_data_disparo_filters(filters)
  
     requested_limit = int(request.args.get("limit") or 500)
     meta = {
@@ -231,8 +258,11 @@ def _get_filters_from_payload(payload: Dict[str, Any]) -> Tuple[Dict[str, Any], 
         "matriculado": n(payload.get("matriculado")),
         "data_ini": n(payload.get("data_ini")),
         "data_fim": n(payload.get("data_fim")),
+        "data_disparo_mes": n(payload.get("data_disparo_mes")),
+        "data_disparo_situacao": n(payload.get("data_disparo_situacao")),
     }
     filters = {k: v for k, v in filters.items() if v is not None and str(v).strip() != ""}
+    _validate_data_disparo_filters(filters)
 
     limit_raw = payload.get("limit", 500)
     offset_raw = payload.get("offset", 0)
@@ -1517,6 +1547,8 @@ def create_app() -> Flask:
                 meta.get("offset"),
             )
             return jsonify({"ok": True, "total": total, "data": rows})
+        except InvalidDataDisparoFilter:
+            return _invalid_data_disparo_response()
         except TimeoutError as e:
             return jsonify(_error_payload(e, "Timeout ao buscar leads. Tente reduzir filtros/volume ou usar stream=true.")), 504
         except Exception as e:
@@ -1544,6 +1576,8 @@ def create_app() -> Flask:
                 meta.get("offset"),
             )
             return jsonify({"ok": True, "total": total, "data": rows})
+        except InvalidDataDisparoFilter:
+            return _invalid_data_disparo_response()
         except TimeoutError as e:
             return jsonify(_error_payload(e, "Timeout ao buscar leads. Tente reduzir filtros/volume ou usar stream=true.")), 504
         except Exception as e:
@@ -1571,6 +1605,8 @@ def create_app() -> Flask:
                 top_status = {"status": best, "cnt": status_counts[best]}
  
             return jsonify({"ok": True, "total": total, "top_status": top_status})
+        except InvalidDataDisparoFilter:
+            return _invalid_data_disparo_response()
         except Exception as e:
             return jsonify(_error_payload(e, "Erro ao calcular KPIs.")), 500
 
@@ -1632,6 +1668,8 @@ def create_app() -> Flask:
                 download_name="leads_export.xlsx",
                 mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             )
+        except InvalidDataDisparoFilter:
+            return _invalid_data_disparo_response()
         except Exception as e:
             return jsonify(_error_payload(e, "Erro ao exportar XLSX.")), 500
 
@@ -1726,6 +1764,8 @@ def create_app() -> Flask:
             worker.start()
 
             return jsonify({"ok": True, "job_id": job_id, "status": "queued"}), 202
+        except InvalidDataDisparoFilter:
+            return _invalid_data_disparo_response()
         except Exception as e:
             return jsonify(_error_payload(e, "Erro ao iniciar exportação em lote.")), 500
 
