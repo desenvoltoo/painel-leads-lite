@@ -197,6 +197,20 @@
         </div>
 
         <div class="field col-1">
+          <label for="fMesDisparo">Mês do disparo</label>
+          <input id="fMesDisparo" type="month" />
+        </div>
+
+        <div class="field col-1">
+          <label for="fDataDisparoSituacao">Data disparo</label>
+          <select id="fDataDisparoSituacao">
+            <option value="">Todos</option>
+            <option value="vazias">Sem data</option>
+            <option value="preenchidas">Com data</option>
+          </select>
+        </div>
+
+        <div class="field col-1">
           <label for="fMatriculado">Matriculado</label>
           <select id="fMatriculado">
             <option value="">Todos</option>
@@ -255,6 +269,7 @@
               <th>Status</th>
               <th>Matriculado</th>
               <th>Consultor Disparo</th>
+              <th>Data Disparo</th>
               <th>Campanha</th>
               <th>Canal</th>
             </tr>
