@@ -125,29 +125,158 @@ def _first_existing_col(*cols: str) -> str: return next((c for c in cols if _has
 def _add_param(params: list, name: str, type_: str, value: Any):
     params.append(ScalarQueryParameter(name, type_, value))
 
+
+def _as_filter_list(value: Any) -> List[str]:
+    """
+    Aceita:
+    - string simples
+    - lista vinda do POST JSON
+    - string vinda do GET juntada por " || "
+    Remove vazios.
+    """
+    if value in (None, "", []):
+        return []
+    if isinstance(value, list):
+        raw = value
+    else:
+        raw = str(value).split(" || ")
+    return [str(v).strip() for v in raw if str(v).strip()]
+
+
+def _apply_text_multi_filter(sql: str, params: list, column: str, value: Any, param_name: str) -> str:
+    """
+    Aplica filtro multi-select compatível com PostgreSQL.
+    Também aceita o token __EMPTY__ para buscar campo vazio/nulo.
+    """
+    values = _as_filter_list(value)
+    if not values:
+        return sql
+
+    wants_empty = EMPTY_FILTER_TOKEN in values
+    real_values = [v for v in values if v != EMPTY_FILTER_TOKEN]
+
+    clauses = []
+    if real_values:
+        pname = f"f_{param_name}"
+        clauses.append(f"v.{column}::text = ANY(@{pname})")
+        _add_param(params, pname, "ARRAY", real_values)
+
+    if wants_empty:
+        clauses.append(f"(v.{column} IS NULL OR NULLIF(TRIM(v.{column}::text), '') IS NULL)")
+
+    if clauses:
+        sql += " AND (" + " OR ".join(clauses) + ")"
+
+    return sql
+
+
+EMPTY_FILTER_TOKEN = "__EMPTY__"
+
+
 def _apply_filters(sql: str, filters: Optional[Dict[str, Any]], params: list) -> str:
     filters = filters or {}
-    mapping = {"data_inicio":"data_inscricao", "data_ini":"data_inscricao", "data_fim":"data_inscricao", "busca":"busca"}
-    for key in ["status","curso","modalidade","turno","polo","origem","consultor_disparo","consultor_comercial","canal","campanha","tipo_disparo","tipo_negocio"]:
-        val = filters.get(key)
-        if val not in (None, "", []):
-            pname = f"f_{key}"; sql += f" AND v.{key} = @{pname}"; _add_param(params, pname, "STRING", val)
-    if filters.get("busca"):
-        sql += " AND (unaccent(coalesce(v.nome,'')) ILIKE unaccent(@busca) OR regexp_replace(coalesce(v.cpf::text,''),'[^0-9]','','g') LIKE @busca_num OR regexp_replace(coalesce(v.celular::text,''),'[^0-9]','','g') LIKE @busca_num OR coalesce(v.email,'') ILIKE @busca)"
-        _add_param(params,"busca","STRING",f"%{filters['busca']}%"); _add_param(params,"busca_num","STRING",f"%{re.sub(r'[^0-9]','',str(filters['busca']))}%")
+
+    # Compatibilidade: filtro antigo "consultor" deve cair em consultor_disparo
+    if filters.get("consultor") and not filters.get("consultor_disparo"):
+        filters["consultor_disparo"] = filters.get("consultor")
+
+    # Filtros dos dropdowns
+    filter_cols = [
+        "status",
+        "curso",
+        "modalidade",
+        "turno",
+        "polo",
+        "origem",
+        "consultor_disparo",
+        "consultor_comercial",
+        "canal",
+        "campanha",
+        "tipo_disparo",
+        "tipo_negocio",
+    ]
+
+    for key in filter_cols:
+        if not _has_view_col(key):
+            logger.warning("Filtro ignorado: coluna não existe na view col=%s view=%s", key, _view_table_id())
+            continue
+        sql = _apply_text_multi_filter(sql, params, key, filters.get(key), key)
+
+    # Busca rápida geral
+    busca = str(filters.get("busca") or "").strip()
+    if busca:
+        busca_num = re.sub(r"[^0-9]", "", busca)
+        clauses = []
+        if _has_view_col("nome"):
+            clauses.append("COALESCE(v.nome::text, '') ILIKE @busca")
+        if _has_view_col("email"):
+            clauses.append("COALESCE(v.email::text, '') ILIKE @busca")
+        if busca_num and _has_view_col("cpf"):
+            clauses.append("regexp_replace(COALESCE(v.cpf::text, ''), '[^0-9]', '', 'g') LIKE @busca_num")
+        if busca_num and _has_view_col("celular"):
+            clauses.append("regexp_replace(COALESCE(v.celular::text, ''), '[^0-9]', '', 'g') LIKE @busca_num")
+        if clauses:
+            sql += " AND (" + " OR ".join(clauses) + ")"
+            _add_param(params, "busca", "STRING", f"%{busca}%")
+            _add_param(params, "busca_num", "STRING", f"%{busca_num}%")
+
+    # Busca rápida específica enviada pelo front
+    nome = str(filters.get("nome") or "").strip()
+    if nome and _has_view_col("nome"):
+        sql += " AND COALESCE(v.nome::text, '') ILIKE @nome"
+        _add_param(params, "nome", "STRING", f"%{nome}%")
+
+    email = str(filters.get("email") or "").strip()
+    if email and _has_view_col("email"):
+        sql += " AND COALESCE(v.email::text, '') ILIKE @email"
+        _add_param(params, "email", "STRING", f"%{email}%")
+
+    cpf = re.sub(r"[^0-9]", "", str(filters.get("cpf") or ""))
+    if cpf and _has_view_col("cpf"):
+        sql += " AND regexp_replace(COALESCE(v.cpf::text, ''), '[^0-9]', '', 'g') LIKE @cpf"
+        _add_param(params, "cpf", "STRING", f"%{cpf}%")
+
+    celular = re.sub(r"[^0-9]", "", str(filters.get("celular") or ""))
+    if celular and _has_view_col("celular"):
+        sql += " AND regexp_replace(COALESCE(v.celular::text, ''), '[^0-9]', '', 'g') LIKE @celular"
+        _add_param(params, "celular", "STRING", f"%{celular}%")
+
+    matriculado = str(filters.get("matriculado") or "").strip().lower()
+    if matriculado and _has_view_col("flag_matriculado"):
+        if matriculado in ("true", "1", "sim", "s", "yes"):
+            sql += " AND v.flag_matriculado IS TRUE"
+        elif matriculado in ("false", "0", "nao", "não", "n", "no"):
+            sql += " AND (v.flag_matriculado IS FALSE OR v.flag_matriculado IS NULL)"
+
+    # Datas de inscrição
     if filters.get("data_inicio") or filters.get("data_ini"):
-        _add_param(params,"data_inicio","DATE",date.fromisoformat(str(filters.get("data_inicio") or filters.get("data_ini")))); sql += " AND DATE(v.data_inscricao) >= @data_inicio"
+        value = str(filters.get("data_inicio") or filters.get("data_ini"))
+        if _has_view_col("data_inscricao"):
+            _add_param(params, "data_inicio", "DATE", date.fromisoformat(value))
+            sql += " AND DATE(v.data_inscricao) >= @data_inicio"
+
     if filters.get("data_fim"):
-        _add_param(params,"data_fim","DATE",date.fromisoformat(str(filters.get("data_fim")))); sql += " AND DATE(v.data_inscricao) <= @data_fim"
+        value = str(filters.get("data_fim"))
+        if _has_view_col("data_inscricao"):
+            _add_param(params, "data_fim", "DATE", date.fromisoformat(value))
+            sql += " AND DATE(v.data_inscricao) <= @data_fim"
+
+    # Data de disparo
     sit = str(filters.get("data_disparo_situacao") or "").lower()
-    if sit == "vazias":
-        sql += " AND v.data_disparo IS NULL"
-    elif sit == "preenchidas":
-        sql += " AND v.data_disparo IS NOT NULL"
-    if filters.get("data_disparo_mes") and sit != "vazias":
-        y, m = map(int, str(filters["data_disparo_mes"]).split("-")); ini = date(y,m,1); fim = date(y + (m==12), 1 if m==12 else m+1, 1)
-        sql += " AND DATE(v.data_disparo) >= @data_disparo_ini AND DATE(v.data_disparo) < @data_disparo_fim"
-        _add_param(params,"data_disparo_ini","DATE",ini); _add_param(params,"data_disparo_fim","DATE",fim)
+    if _has_view_col("data_disparo"):
+        if sit == "vazias":
+            sql += " AND v.data_disparo IS NULL"
+        elif sit == "preenchidas":
+            sql += " AND v.data_disparo IS NOT NULL"
+
+        if filters.get("data_disparo_mes") and sit != "vazias":
+            y, m = map(int, str(filters["data_disparo_mes"]).split("-"))
+            ini = date(y, m, 1)
+            fim = date(y + (m == 12), 1 if m == 12 else m + 1, 1)
+            sql += " AND DATE(v.data_disparo) >= @data_disparo_ini AND DATE(v.data_disparo) < @data_disparo_fim"
+            _add_param(params, "data_disparo_ini", "DATE", ini)
+            _add_param(params, "data_disparo_fim", "DATE", fim)
+
     return sql
 
 def _params_to_dict(params): return {p.name:p.value for p in params}
@@ -172,10 +301,55 @@ def query_leads_count(filters=None):
     params=[]; sql=_apply_filters(f"SELECT COUNT(*) AS total FROM {_view_table_id()} v WHERE 1=1", filters, params)
     return int(_run_gestao_query(_postgres_sql(sql), _params_to_dict(params), "leads_count")[0]["total"])
 
+
 def query_options():
-    opts={}
-    for col in ["status","curso","modalidade","turno","polo","origem","consultor_disparo","consultor_comercial","canal","campanha","tipo_disparo","tipo_negocio"]:
-        opts[col]=[r[col] for r in _run_gestao_query(f"SELECT DISTINCT {col} FROM {_view_table_id()} WHERE {col} IS NOT NULL ORDER BY {col} LIMIT 500", {}, f"options_{col}")]
+    """
+    Retorna opções dos filtros compatíveis com o frontend.
+
+    O frontend atual espera chaves no plural:
+    cursos, modalidades, polos, origens, campanhas, canais,
+    consultores_disparo, consultores_comercial, tipos_disparo, tipos_negocio.
+
+    Também devolvemos chaves antigas/singulares por compatibilidade.
+    """
+    option_map = {
+        "status": ("status", "status"),
+        "curso": ("curso", "cursos"),
+        "modalidade": ("modalidade", "modalidades"),
+        "turno": ("turno", "turnos"),
+        "polo": ("polo", "polos"),
+        "origem": ("origem", "origens"),
+        "consultor_disparo": ("consultor_disparo", "consultores_disparo"),
+        "consultor_comercial": ("consultor_comercial", "consultores_comercial"),
+        "canal": ("canal", "canais"),
+        "campanha": ("campanha", "campanhas"),
+        "tipo_disparo": ("tipo_disparo", "tipos_disparo"),
+        "tipo_negocio": ("tipo_negocio", "tipos_negocio"),
+    }
+
+    opts = {}
+
+    for col, (singular_key, plural_key) in option_map.items():
+        if not _has_view_col(col):
+            logger.warning("Options ignorado: coluna não existe na view col=%s view=%s", col, _view_table_id())
+            values = []
+        else:
+            rows = _run_gestao_query(
+                f"""
+                SELECT DISTINCT NULLIF(TRIM({col}::text), '') AS value
+                FROM {_view_table_id()}
+                WHERE NULLIF(TRIM({col}::text), '') IS NOT NULL
+                ORDER BY value
+                LIMIT 1000
+                """,
+                {},
+                f"options_{col}",
+            )
+            values = [r["value"] for r in rows if r.get("value") not in (None, "")]
+
+        opts[singular_key] = values
+        opts[plural_key] = values
+
     return opts
 
 def export_leads_rows(filters=None, limit=EXPORT_MAX_ROWS, offset=0): return query_leads(filters, limit, offset)
