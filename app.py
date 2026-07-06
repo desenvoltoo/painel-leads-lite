@@ -35,7 +35,6 @@ from services.database import (
     export_leads_rows,
     export_leads_rows_iter,
     rows_to_xlsx,               # gera export XLSX no servidor
-    EXPORT_COLUMNS,
     create_export_job,
     update_export_job,
     get_export_job,
@@ -118,6 +117,38 @@ from services.gestao_operacional import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Ordem oficial das colunas nas exportações de leads (XLSX e CSV em lote).
+# Mantida em app.py para garantir a ordem final mesmo se algum campo vier ausente.
+EXPORT_ORDER = [
+    "status_inscricao",
+    "data_inscricao",
+    "origem",
+    "unidade",
+    "tipo_negocio",
+    "curso",
+    "modalidade",
+    "turno",
+    "nome",
+    "cpf",
+    "celular",
+    "email",
+    "data_ultima_acao",
+    "qtd_acionamentos",
+    "status",
+    "data_disparo",
+    "peca_disparo",
+    "texto_disparo",
+    "consultor_disparo",
+    "tipo_disparo",
+    "campanha",
+    "observacao",
+    "data_matricula",
+    "matriculado",
+    "canal",
+    "acao_comercial",
+    "consultor_comercial",
+]
 
 
 class InvalidDataDisparoFilter(ValueError):
@@ -1693,7 +1724,7 @@ def create_app() -> Flask:
 
             with open(out_path, "w", newline="", encoding="utf-8-sig") as csvfile:
                 writer = csv.writer(csvfile, delimiter=";")
-                keys = list(EXPORT_COLUMNS)
+                keys = list(EXPORT_ORDER)
                 writer.writerow(keys)
 
                 processed = 0

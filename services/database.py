@@ -24,7 +24,37 @@ IDENT_RE = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]*$")
 DB_SCHEMA = os.getenv("DB_SCHEMA", "public").strip() or "public"
 LEADS_VIEW = os.getenv("LEADS_VIEW", "vw_leads_painel_lite").strip() or "vw_leads_painel_lite"
 EXPORT_MAX_ROWS = int(os.getenv("EXPORT_MAX_ROWS", "50000"))
-EXPORT_COLUMNS = ["sk_pessoa","cpf","celular","nome","email","curso","modalidade","turno","polo","origem","tipo_negocio","consultor_comercial","consultor_disparo","campanha","canal","acao_comercial","tipo_disparo","peca_disparo","texto_disparo","qtd_acionamentos","status","status_inscricao","observacao","flag_matriculado","data_inscricao","data_matricula","data_atualizacao","data_ultima_acao","data_disparo"]
+LEADS_COLUMNS = ["sk_pessoa","cpf","celular","nome","email","curso","modalidade","turno","polo","origem","tipo_negocio","consultor_comercial","consultor_disparo","campanha","canal","acao_comercial","tipo_disparo","peca_disparo","texto_disparo","qtd_acionamentos","status","status_inscricao","observacao","flag_matriculado","data_inscricao","data_matricula","data_atualizacao","data_ultima_acao","data_disparo"]
+EXPORT_COLUMNS = [
+    ("status_inscricao", "status_inscricao"),
+    ("data_inscricao", "data_inscricao"),
+    ("origem", "origem"),
+    ("polo", "unidade"),
+    ("tipo_negocio", "tipo_negocio"),
+    ("curso", "curso"),
+    ("modalidade", "modalidade"),
+    ("turno", "turno"),
+    ("nome", "nome"),
+    ("cpf", "cpf"),
+    ("celular", "celular"),
+    ("email", "email"),
+    ("data_ultima_acao", "data_ultima_acao"),
+    ("qtd_acionamentos", "qtd_acionamentos"),
+    ("status", "status"),
+    ("data_disparo", "data_disparo"),
+    ("peca_disparo", "peca_disparo"),
+    ("texto_disparo", "texto_disparo"),
+    ("consultor_disparo", "consultor_disparo"),
+    ("tipo_disparo", "tipo_disparo"),
+    ("campanha", "campanha"),
+    ("observacao", "observacao"),
+    ("data_matricula", "data_matricula"),
+    ("flag_matriculado", "matriculado"),
+    ("canal", "canal"),
+    ("acao_comercial", "acao_comercial"),
+    ("consultor_comercial", "consultor_comercial"),
+]
+EXPORT_ORDER = [output_col for _, output_col in EXPORT_COLUMNS]
 
 _engine: Engine | None = None
 _export_jobs: Dict[str, Dict[str, Any]] = {}
@@ -290,13 +320,13 @@ def _params_to_dict(params): return {p.name:p.value for p in params}
 def _postgres_sql(sql): return re.sub(r"@(\w+)", r":\1", sql)
 
 def _safe_order(order_by, order_dir):
-    col = order_by if order_by in EXPORT_COLUMNS else "data_inscricao"
+    col = order_by if order_by in LEADS_COLUMNS else "data_inscricao"
     direction = "DESC" if str(order_dir).upper() == "DESC" else "ASC"
     return col, direction
 
 def query_leads(filters=None, limit=100, offset=0, order_by=None, order_dir="asc"):
     col, direction = _safe_order(order_by, order_dir); params=[]
-    sql = _apply_filters(f"SELECT {', '.join('v.'+c for c in EXPORT_COLUMNS)} FROM {_view_table_id()} v WHERE 1=1", filters, params)
+    sql = _apply_filters(f"SELECT {', '.join('v.'+c for c in LEADS_COLUMNS)} FROM {_view_table_id()} v WHERE 1=1", filters, params)
     sql += f" ORDER BY v.{col} {direction} NULLS LAST LIMIT @limit OFFSET @offset"
     _add_param(params,"limit","INT64",int(limit)); _add_param(params,"offset","INT64",int(offset))
     return _run_gestao_query(_postgres_sql(sql), _params_to_dict(params), "leads_list")
@@ -359,11 +389,51 @@ def query_options():
 
     return opts
 
+def _export_select_parts() -> List[str]:
+    select_parts = []
+    for source_col, output_col in EXPORT_COLUMNS:
+        safe_output_col = _safe_ident(output_col)
+        if _has_view_col(source_col):
+            select_parts.append(f"v.{_safe_ident(source_col)} AS {safe_output_col}")
+        else:
+            select_parts.append(f"NULL AS {safe_output_col}")
+    return select_parts
+
+
+def _export_order_clause() -> str:
+    order_cols = [col for col in ("data_inscricao", "data_atualizacao", "dt_upload") if _has_view_col(col)]
+    if not order_cols:
+        return " ORDER BY 1"
+    expressions = ", ".join(f"v.{_safe_ident(col)}" for col in order_cols)
+    return f" ORDER BY COALESCE({expressions}) DESC NULLS LAST"
+
+
 def export_leads_rows(filters=None, limit=EXPORT_MAX_ROWS, offset=0, order_by=None, order_dir="asc"):
-    return query_leads(filters, limit, offset, order_by, order_dir)
+    params = []
+    sql = f"""
+SELECT
+  {', '.join(_export_select_parts())}
+FROM {_view_table_id()} v
+WHERE 1=1
+"""
+    sql = _apply_filters(sql, filters, params)
+    sql += _export_order_clause()
+    sql += " LIMIT @limit OFFSET @offset"
+    _add_param(params, "limit", "INT64", int(limit))
+    _add_param(params, "offset", "INT64", int(offset))
+    return _run_gestao_query(_postgres_sql(sql), _params_to_dict(params), "leads_export")
+
 def export_leads_rows_iter(filters=None, limit=EXPORT_MAX_ROWS, offset=0, order_by=None, order_dir="asc"):
-    yield from query_leads_iter(filters, limit, offset, order_by, order_dir)
-def rows_to_xlsx(rows, xlsx_path, sheet_name="Dados"): pd.DataFrame(rows).to_excel(xlsx_path,index=False,sheet_name=sheet_name); return xlsx_path
+    yield from export_leads_rows(filters, limit, offset, order_by, order_dir)
+
+def _rows_dataframe_export_order(rows) -> pd.DataFrame:
+    df = pd.DataFrame(rows)
+    for col in EXPORT_ORDER:
+        if col not in df.columns:
+            df[col] = None
+    return df[EXPORT_ORDER]
+
+def rows_to_xlsx(rows, xlsx_path, sheet_name="Dados"): _rows_dataframe_export_order(rows).to_excel(xlsx_path,index=False,sheet_name=sheet_name); return xlsx_path
 def df_to_xlsx(df, xlsx_path, sheet_name="Dados"): df.to_excel(xlsx_path,index=False,sheet_name=sheet_name); return xlsx_path
 
 def _coerce_df_to_staging_schema(df, staging_schema, upload_ts):
