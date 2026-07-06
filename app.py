@@ -39,6 +39,7 @@ from services.database import (
     create_export_job,
     update_export_job,
     get_export_job,
+    registrar_exportacao,
 )
 from services.gestao import (
     GestaoValidationError,
@@ -1657,6 +1658,14 @@ def create_app() -> Flask:
             out_path = str(EXPORT_DIR / fname)
  
             rows_to_xlsx(rows or [], out_path, sheet_name="Leads")
+            registrar_exportacao(
+                export_id=uuid.uuid4().hex,
+                usuario=getattr(g, "current_user", None) or "desconhecido",
+                tipo_exportacao="xlsx",
+                filtros=filters,
+                total_linhas=len(rows or []),
+                arquivo=fname,
+            )
  
             return send_file(
                 out_path,
@@ -1684,30 +1693,36 @@ def create_app() -> Flask:
 
             with open(out_path, "w", newline="", encoding="utf-8-sig") as csvfile:
                 writer = csv.writer(csvfile, delimiter=";")
-                headers = [label for _, label in EXPORT_COLUMNS]
-                keys = [key for key, _ in EXPORT_COLUMNS]
-                writer.writerow(headers)
+                keys = list(EXPORT_COLUMNS)
+                writer.writerow(keys)
 
                 processed = 0
-                for idx, batch in enumerate(
-                    export_leads_rows_iter(
+                for idx in range(total_batches):
+                    batch = export_leads_rows(
                         filters=filters,
-                        batch_size=batch_size,
+                        limit=batch_size,
+                        offset=idx * batch_size,
                         order_by="data_disparo",
                         order_dir="ASC",
-                    ),
-                    start=1,
-                ):
+                    )
                     for row in batch:
                         writer.writerow([(row.get(k) if row.get(k) is not None else "") for k in keys])
                     processed += len(batch)
                     update_export_job(
                         job_id,
-                        current_batch=idx,
+                        current_batch=idx + 1,
                         processed=processed,
-                        message=f"Exportando lote {idx} de {max(total_batches, idx)}",
+                        message=f"Exportando lote {idx + 1} de {max(total_batches, idx + 1)}",
                     )
 
+            registrar_exportacao(
+                export_id=job_id,
+                usuario="sistema",
+                tipo_exportacao="batch_csv",
+                filtros=filters,
+                total_linhas=total,
+                arquivo=out_path.name,
+            )
             update_export_job(
                 job_id,
                 status="done",
@@ -1790,6 +1805,15 @@ def create_app() -> Flask:
             return jsonify({"ok": False, "error": "job_id não encontrado"}), 404
         if job.get("status") != "done" or not job.get("file_path"):
             return jsonify({"ok": False, "error": "Arquivo ainda não está pronto"}), 409
+
+        registrar_exportacao(
+            export_id=uuid.uuid4().hex,
+            usuario=getattr(g, "current_user", None) or "desconhecido",
+            tipo_exportacao="batch_csv_download",
+            filtros={"job_id": job_id},
+            total_linhas=job.get("total") or job.get("processed") or 0,
+            arquivo=job.get("file_name"),
+        )
 
         return send_file(
             job["file_path"],
