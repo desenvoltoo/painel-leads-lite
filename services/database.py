@@ -9,6 +9,7 @@ import logging
 import os
 import re
 import uuid
+import unicodedata
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from decimal import Decimal
@@ -67,7 +68,13 @@ def _database_url() -> str:
 def get_engine() -> Engine:
     global _engine
     if _engine is None:
-        _engine = create_engine(_database_url(), pool_pre_ping=True, future=True)
+        schema = os.getenv("DB_SCHEMA", DB_SCHEMA).strip() or "modelo_estrela"
+        _engine = create_engine(
+            _database_url(),
+            pool_pre_ping=True,
+            future=True,
+            connect_args={"options": f"-csearch_path={schema},public"},
+        )
     return _engine
 
 
@@ -352,8 +359,10 @@ def query_options():
 
     return opts
 
-def export_leads_rows(filters=None, limit=EXPORT_MAX_ROWS, offset=0): return query_leads(filters, limit, offset)
-def export_leads_rows_iter(filters=None, limit=EXPORT_MAX_ROWS, offset=0): return query_leads_iter(filters, limit, offset)
+def export_leads_rows(filters=None, limit=EXPORT_MAX_ROWS, offset=0, order_by=None, order_dir="asc"):
+    return query_leads(filters, limit, offset, order_by, order_dir)
+def export_leads_rows_iter(filters=None, limit=EXPORT_MAX_ROWS, offset=0, order_by=None, order_dir="asc"):
+    yield from query_leads_iter(filters, limit, offset, order_by, order_dir)
 def rows_to_xlsx(rows, xlsx_path, sheet_name="Dados"): pd.DataFrame(rows).to_excel(xlsx_path,index=False,sheet_name=sheet_name); return xlsx_path
 def df_to_xlsx(df, xlsx_path, sheet_name="Dados"): df.to_excel(xlsx_path,index=False,sheet_name=sheet_name); return xlsx_path
 
@@ -363,8 +372,162 @@ def _coerce_df_to_staging_schema(df, staging_schema, upload_ts):
         if field.name == "dt_upload" and "dt_upload" not in out.columns: out["dt_upload"] = upload_ts
     return out
 
-def process_upload_dataframe(df, filename="upload"): raise RuntimeError("Upload legado desativado; use POST /api/upload para PostgreSQL.")
-def get_bq_job_status(job_id): return {"job_id": job_id, "status":"not_available", "done": True}
+def _normalize_upload_col(name: Any) -> str:
+    s = unicodedata.normalize("NFKD", str(name or "").strip().lower())
+    s = "".join(ch for ch in s if not unicodedata.combining(ch))
+    s = re.sub(r"[\s\-.]+", "_", s)
+    s = re.sub(r"[^a-z0-9_]", "", s)
+    s = re.sub(r"_+", "_", s).strip("_")
+    return s
+
+
+def _staging_columns(schema: str) -> set[str]:
+    rows = _run_gestao_query(
+        """
+        SELECT column_name
+        FROM information_schema.columns
+        WHERE table_schema = :schema AND table_name = 'stg_leads_site'
+        """,
+        {"schema": schema},
+        "staging_columns",
+    )
+    return {r["column_name"] for r in rows}
+
+
+def process_upload_dataframe(df, filename="upload"):
+    upload_id = str(uuid.uuid4())
+    upload_ts = datetime.now(timezone.utc)
+    schema = os.getenv("DB_SCHEMA", DB_SCHEMA).strip() or "modelo_estrela"
+
+    aliases = {
+        "cpf": ["cpf", "documento", "cpf_aluno"],
+        "celular": ["celular", "telefone", "telefone_celular", "whatsapp", "phone"],
+        "nome": ["nome", "nome_aluno", "aluno", "nome_completo"],
+        "email": ["email", "e_mail"],
+        "curso": ["curso", "nome_curso"],
+        "modalidade": ["modalidade"],
+        "turno": ["turno"],
+        "polo": ["polo", "unidade", "campus"],
+        "origem": ["origem", "source"],
+        "tipo_negocio": ["tipo_negocio", "negocio"],
+        "consultor_comercial": ["consultor_comercial", "consultor"],
+        "consultor_disparo": ["consultor_disparo"],
+        "campanha": ["campanha"],
+        "canal": ["canal"],
+        "acao_comercial": ["acao_comercial"],
+        "tipo_disparo": ["tipo_disparo"],
+        "peca_disparo": ["peca_disparo"],
+        "texto_disparo": ["texto_disparo"],
+        "qtd_acionamentos": ["qtd_acionamentos", "acionamentos"],
+        "status": ["status"],
+        "status_inscricao": ["status_inscricao"],
+        "observacao": ["observacao", "obs"],
+        "matriculado": ["matriculado"],
+        "flag_matriculado": ["flag_matriculado"],
+        "data_inscricao": ["data_inscricao", "dt_inscricao"],
+        "data_matricula": ["data_matricula", "dt_matricula"],
+        "data_atualizacao": ["data_atualizacao", "updated_at", "dt_atualizacao"],
+        "data_ultima_acao": ["data_ultima_acao", "dt_ultima_acao"],
+        "data_disparo": ["data_disparo", "dt_disparo"],
+    }
+    alias_to_target = {alias: target for target, names in aliases.items() for alias in names}
+
+    work = df.copy()
+    normalized_cols = [_normalize_upload_col(c) for c in work.columns]
+    rename = {}
+    seen_targets = set()
+    for original, normalized in zip(work.columns, normalized_cols):
+        target = alias_to_target.get(normalized, normalized)
+        if target in seen_targets:
+            continue
+        rename[original] = target
+        seen_targets.add(target)
+    work = work.rename(columns=rename)
+
+    work["upload_id"] = upload_id
+    work["linha_arquivo"] = range(2, len(work) + 2)
+    work["nome_arquivo"] = filename
+    work["dt_upload"] = upload_ts
+
+    staging_cols = _staging_columns(schema)
+    if not staging_cols:
+        raise RuntimeError(f"Tabela de staging não encontrada: {schema}.stg_leads_site")
+    insert_cols = [c for c in work.columns if c in staging_cols]
+    work = work[insert_cols]
+
+    with get_engine().begin() as conn:
+        work.to_sql(
+            name="stg_leads_site",
+            con=conn,
+            schema=schema,
+            if_exists="append",
+            index=False,
+            method="multi",
+            chunksize=1000,
+        )
+        result = conn.execute(text(f"SELECT * FROM {_safe_ident(schema)}.sp_processar_stg_leads_site(:upload_id)"), {"upload_id": upload_id})
+        proc_rows = _rows(result) if result.returns_rows else []
+
+    report = {
+        "linhas_recebidas": int(len(df)),
+        "linhas_processadas": int(len(df)),
+        "linhas_rejeitadas": 0,
+        "linhas_gravadas_staging": int(len(work)),
+        "duplicados_arquivo": 0,
+        "duplicados_banco": 0,
+    }
+    if proc_rows:
+        for k in list(report):
+            for row in proc_rows:
+                if k in row and row[k] is not None:
+                    report[k] = int(row[k])
+                    break
+    return {"job_id": upload_id, "status": "DONE", "done": True, "report": report}
+
+
+def get_bq_job_status(job_id):
+    schema = os.getenv("DB_SCHEMA", DB_SCHEMA).strip() or "modelo_estrela"
+    rows = _run_gestao_query(
+        f"""
+        SELECT upload_id, status, etapa, mensagem, total_linhas, linhas_recebidas,
+               linhas_validas, linhas_inseridas, linhas_rejeitadas, erros,
+               criado_em, atualizado_em, finalizado_em
+        FROM {_safe_ident(schema)}.logs_importacoes
+        WHERE upload_id = :job_id
+        """,
+        {"job_id": job_id},
+        "upload_status",
+    )
+    if not rows:
+        return {"job_id": job_id, "status": "not_found", "done": True}
+    data = rows[0]
+    data["job_id"] = data.get("upload_id")
+    data["done"] = str(data.get("status") or "").upper() in {"CONCLUIDO", "CONCLUIDO_COM_REJEICOES", "ERRO"}
+    return data
+
+
+def registrar_exportacao(export_id, usuario, tipo_exportacao, filtros, total_linhas, status="CONCLUIDO", mensagem=None, arquivo=None):
+    schema = os.getenv("DB_SCHEMA", DB_SCHEMA).strip() or "modelo_estrela"
+    _run_gestao_query(
+        f"""
+        INSERT INTO {_safe_ident(schema)}.logs_exportacoes
+        (export_id, usuario, tipo_exportacao, filtros_json, total_linhas, status, mensagem, arquivo)
+        VALUES (:export_id, :usuario, :tipo_exportacao, CAST(:filtros_json AS jsonb), :total_linhas, :status, :mensagem, :arquivo)
+        """,
+        {
+            "export_id": export_id,
+            "usuario": usuario,
+            "tipo_exportacao": tipo_exportacao,
+            "filtros_json": json.dumps(filtros or {}, ensure_ascii=False, default=str),
+            "total_linhas": int(total_linhas or 0),
+            "status": status,
+            "mensagem": mensagem,
+            "arquivo": arquivo,
+        },
+        "registrar_exportacao",
+    )
+    return {"export_id": export_id, "success": True}
+
 def create_export_job(job_id, metadata_dict): _export_jobs[job_id]={"job_id":job_id,"status":"PENDING","metadata":metadata_dict,"created_at":datetime.now(timezone.utc).isoformat()}
 def update_export_job(job_id, **kwargs): _export_jobs.setdefault(job_id,{"job_id":job_id}).update(kwargs)
 def get_export_job(job_id): return _export_jobs.get(job_id)

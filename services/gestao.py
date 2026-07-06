@@ -177,14 +177,14 @@ def get_importacoes(filters, meta):
     if filters.get("status"): where.append("status = :status"); params["status"]=filters["status"]
     if filters.get("nomeArquivo"): where.append("nome_arquivo ILIKE :nome"); params["nome"]="%"+filters["nomeArquivo"]+"%"
     wh=(" WHERE "+" AND ".join(where)) if where else ""
-    count=_run(f"SELECT COUNT(*) total FROM vw_historico_importacoes{wh}",params,"import_history_count")[0]["total"]
+    count=_run(f"SELECT COUNT(*) total FROM {bq._safe_ident(bq.DB_SCHEMA)}.vw_historico_importacoes{wh}",params,"import_history_count")[0]["total"]
     params.update({"limit":meta.get("pageSize",50),"offset":meta.get("offset",0)})
-    rows=_run(f"SELECT * FROM vw_historico_importacoes{wh} ORDER BY criado_em DESC LIMIT :limit OFFSET :offset",params,"import_history")
+    rows=_run(f"SELECT * FROM {bq._safe_ident(bq.DB_SCHEMA)}.vw_historico_importacoes{wh} ORDER BY criado_em DESC LIMIT :limit OFFSET :offset",params,"import_history")
     safe=[{k:v for k,v in r.items() if k.lower() not in {"payload","email","cpf","celular"}} for r in rows]
     ps=meta.get("pageSize",50); return {"items":safe,"pagination":{"page":meta.get("page",1),"pageSize":ps,"total":int(count),"totalPages":math.ceil(int(count)/ps) if ps else 0}}, False
 
 def get_rejeicoes(filters, meta):
-    rows=_run("SELECT motivo, linha, criado_em FROM logs_rejeicoes_import ORDER BY criado_em DESC LIMIT :limit OFFSET :offset", {"limit":meta.get("limit",50),"offset":meta.get("offset",0)}, "gestao_rejeicoes")
+    rows=_run(f"SELECT motivo, linha, criado_em FROM {bq._safe_ident(bq.DB_SCHEMA)}.logs_rejeicoes_import ORDER BY criado_em DESC LIMIT :limit OFFSET :offset", {"limit":meta.get("limit",50),"offset":meta.get("offset",0)}, "gestao_rejeicoes")
     return {"items":[mask_rejection_row(r) for r in rows],"pagination":{"page":meta.get("page",1),"page_size":meta.get("limit",50),"total":len(rows),"total_pages":1}}, False
 
 def get_opcoes(filters, meta): return bq.query_options(), False
@@ -195,7 +195,7 @@ def export_qualidade(filters, meta, tipo="sem_status"):
     data,_=get_qualidade_detalhes(filters,meta,tipo); rows=data["items"]; return f"qualidade_{tipo}_{datetime.now():%Y%m%d_%H%M%S}.csv", _csv_bytes(rows, ["motivo","identificador","nome","curso","consultor","data_inscricao","data_upload","origem","status"]), len(rows)
 def export_importacoes(filters, meta):
     if not meta: meta={"pageSize":100,"offset":0,"page":1}
-    rows=[{k:v for k,v in r.items() if k.lower() not in {"payload","cpf","email","celular"}} for r in _run("SELECT * FROM vw_historico_importacoes ORDER BY criado_em DESC LIMIT 1000",{},"import_export")]
+    rows=[{k:v for k,v in r.items() if k.lower() not in {"payload","cpf","email","celular"}} for r in _run(f"SELECT * FROM {bq._safe_ident(bq.DB_SCHEMA)}.vw_historico_importacoes ORDER BY criado_em DESC LIMIT 1000",{},"import_export")]
     return f"historico_importacoes_{datetime.now():%Y%m%d_%H%M%S}.csv", _csv_bytes(rows), len(rows)
 def export_fila(filters, meta):
     rows=_run(_fila_sql(meta.get("limit",100),meta.get("offset",0)), {"limit":meta.get("limit",100),"offset":meta.get("offset",0)}, "gestao_fila_exportar")
@@ -205,9 +205,16 @@ def export_produtividade(filters, meta): data,_=get_produtividade(filters,meta);
 
 def criar_log_importacao(**kw):
     params=[bq.database.ScalarQueryParameter(k,"STRING",v) for k,v in kw.items()]
-    bq._run_gestao_query("INSERT INTO logs_importacoes (upload_id,id_importacao,nome_arquivo,tipo_arquivo,tamanho_arquivo_bytes,usuario,status,etapa,mensagem,criado_em) VALUES (@upload_id,@id_importacao,@nome_arquivo,@tipo_arquivo,@tamanho_arquivo_bytes,@usuario,'RECEBIDO','UPLOAD','Upload recebido',now())", params, "import_log_create")
+    schema=bq._safe_ident(bq.DB_SCHEMA)
+    bq._run_gestao_query(f"INSERT INTO {schema}.logs_importacoes (upload_id,id_importacao,nome_arquivo,tipo_arquivo,tamanho_arquivo_bytes,usuario,status,etapa,mensagem,criado_em) VALUES (@upload_id,@id_importacao,@nome_arquivo,@tipo_arquivo,@tamanho_arquivo_bytes,@usuario,'RECEBIDO','UPLOAD','Upload recebido',now())", params, "import_log_create")
     return {"upload_id":kw.get("upload_id"),"success":True}
 def atualizar_log_importacao(upload_id, **kw):
-    params=[bq.database.ScalarQueryParameter("upload_id","STRING",upload_id)] + [bq.database.ScalarQueryParameter(k,"STRING",v) for k,v in kw.items()]
-    bq._run_gestao_query("UPDATE logs_importacoes SET status = COALESCE(@status,status), etapa = COALESCE(@etapa,etapa), mensagem = COALESCE(@mensagem,mensagem), atualizado_em = now() WHERE upload_id = @upload_id", params, "import_log_update")
+    allowed={"status","etapa","mensagem","total_linhas","linhas_recebidas","linhas_validas","linhas_inseridas","linhas_rejeitadas","erros","duplicados_arquivo","duplicados_banco"}
+    sets=[f"{k} = @{k}" for k in kw if k in allowed]
+    if kw.get("finalizado"):
+        sets.append("finalizado_em = now()")
+    sets.append("atualizado_em = now()")
+    params=[bq.database.ScalarQueryParameter("upload_id","STRING",upload_id)] + [bq.database.ScalarQueryParameter(k,"STRING",v) for k,v in kw.items() if k in allowed]
+    schema=bq._safe_ident(bq.DB_SCHEMA)
+    bq._run_gestao_query(f"UPDATE {schema}.logs_importacoes SET {', '.join(sets)} WHERE upload_id = @upload_id", params, "import_log_update")
     return {"success":True}
