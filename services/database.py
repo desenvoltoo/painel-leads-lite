@@ -436,145 +436,158 @@ def _rows_dataframe_export_order(rows) -> pd.DataFrame:
 def rows_to_xlsx(rows, xlsx_path, sheet_name="Dados"): _rows_dataframe_export_order(rows).to_excel(xlsx_path,index=False,sheet_name=sheet_name); return xlsx_path
 def df_to_xlsx(df, xlsx_path, sheet_name="Dados"): df.to_excel(xlsx_path,index=False,sheet_name=sheet_name); return xlsx_path
 
+
 def _coerce_df_to_staging_schema(df, staging_schema, upload_ts):
     out = df.copy()
     for field in staging_schema:
-        if field.name == "dt_upload" and "dt_upload" not in out.columns: out["dt_upload"] = upload_ts
+        if field.name == "dt_upload" and "dt_upload" not in out.columns:
+            out["dt_upload"] = upload_ts
     return out
 
+
 def _normalize_upload_col(name: Any) -> str:
-    s = unicodedata.normalize("NFKD", str(name or "").strip().lower())
+    s = str(name or "").strip().lower()
+    s = unicodedata.normalize("NFKD", s)
     s = "".join(ch for ch in s if not unicodedata.combining(ch))
-    s = re.sub(r"[\s\-.]+", "_", s)
-    s = re.sub(r"[^a-z0-9_]", "", s)
-    s = re.sub(r"_+", "_", s).strip("_")
-    return s
+    s = re.sub(r"[^a-z0-9]+", "_", s)
+    return s.strip("_")
 
 
-def _staging_columns(schema: str) -> set[str]:
+UPLOAD_ALIASES = {
+    "cpf": ["cpf", "documento", "cpf_aluno"],
+    "celular": ["celular", "telefone", "telefone_celular", "whatsapp", "phone", "fone"],
+    "nome": ["nome", "nome_aluno", "aluno", "nome_completo"],
+    "email": ["email", "e_mail", "mail"],
+    "curso": ["curso", "nome_curso"],
+    "modalidade": ["modalidade"],
+    "turno": ["turno"],
+    "polo": ["polo", "unidade", "campus"],
+    "origem": ["origem", "source"],
+    "tipo_negocio": ["tipo_negocio", "negocio", "tipo_de_negocio"],
+    "consultor_comercial": ["consultor_comercial", "consultor", "consultor_venda"],
+    "consultor_disparo": ["consultor_disparo", "consultor_do_disparo"],
+    "campanha": ["campanha"],
+    "canal": ["canal"],
+    "acao_comercial": ["acao_comercial", "acao", "ação_comercial"],
+    "tipo_disparo": ["tipo_disparo"],
+    "peca_disparo": ["peca_disparo", "peça_disparo"],
+    "texto_disparo": ["texto_disparo"],
+    "qtd_acionamentos": ["qtd_acionamentos", "acionamentos", "quantidade_acionamentos"],
+    "status": ["status"],
+    "status_inscricao": ["status_inscricao", "status_da_inscricao", "status_inscrição"],
+    "observacao": ["observacao", "observação", "obs"],
+    "matriculado": ["matriculado"],
+    "flag_matriculado": ["flag_matriculado"],
+    "data_inscricao": ["data_inscricao", "data_inscrição", "dt_inscricao", "dt_inscrição"],
+    "data_matricula": ["data_matricula", "data_matrícula", "dt_matricula", "dt_matrícula"],
+    "data_atualizacao": ["data_atualizacao", "data_atualização", "updated_at", "dt_atualizacao", "dt_atualização"],
+    "data_ultima_acao": ["data_ultima_acao", "data_última_ação", "dt_ultima_acao", "dt_última_ação"],
+    "data_disparo": ["data_disparo", "dt_disparo"],
+}
+
+
+def _table_columns(schema: str, table: str) -> list[str]:
     rows = _run_gestao_query(
         """
         SELECT column_name
         FROM information_schema.columns
-        WHERE table_schema = :schema AND table_name = 'stg_leads_site'
+        WHERE table_schema = :schema
+          AND table_name = :table
+        ORDER BY ordinal_position
         """,
-        {"schema": schema},
-        "staging_columns",
+        {"schema": schema, "table": table},
+        f"columns_{schema}_{table}",
     )
-    return {r["column_name"] for r in rows}
+    return [r["column_name"] for r in rows]
 
 
-def process_upload_dataframe(df, filename="upload"):
-    upload_id = str(uuid.uuid4())
-    upload_ts = datetime.now(timezone.utc)
+def _prepare_upload_dataframe(df: pd.DataFrame, filename: str, upload_id: str) -> pd.DataFrame:
+    if df is None or df.empty:
+        return pd.DataFrame()
+
+    raw = df.copy()
+    raw.columns = [_normalize_upload_col(c) for c in raw.columns]
+
+    alias_to_target = {}
+    for target, aliases in UPLOAD_ALIASES.items():
+        for alias in aliases:
+            alias_to_target[_normalize_upload_col(alias)] = target
+
+    out = pd.DataFrame()
+    for col in raw.columns:
+        target = alias_to_target.get(col)
+        if target and target not in out.columns:
+            out[target] = raw[col]
+
+    for target in UPLOAD_ALIASES.keys():
+        if target not in out.columns:
+            out[target] = None
+
+    out.insert(0, "upload_id", upload_id)
+    out.insert(1, "linha_arquivo", range(2, len(out) + 2))
+    out.insert(2, "nome_arquivo", filename)
+    out["dt_upload"] = datetime.now(timezone.utc).replace(tzinfo=None)
+    return out.astype(object).where(pd.notnull(out), None)
+
+
+def process_upload_dataframe(df, filename="upload", upload_id=None):
+    """Importa leads via staging PostgreSQL e procedure oficial."""
     schema = os.getenv("DB_SCHEMA", DB_SCHEMA).strip() or "modelo_estrela"
+    schema_ident = _safe_ident(schema)
+    upload_id = upload_id or uuid.uuid4().hex
+    prepared = _prepare_upload_dataframe(df, filename, upload_id)
 
-    aliases = {
-        "cpf": ["cpf", "documento", "cpf_aluno"],
-        "celular": ["celular", "telefone", "telefone_celular", "whatsapp", "phone"],
-        "nome": ["nome", "nome_aluno", "aluno", "nome_completo"],
-        "email": ["email", "e_mail"],
-        "curso": ["curso", "nome_curso"],
-        "modalidade": ["modalidade"],
-        "turno": ["turno"],
-        "polo": ["polo", "unidade", "campus"],
-        "origem": ["origem", "source"],
-        "tipo_negocio": ["tipo_negocio", "negocio"],
-        "consultor_comercial": ["consultor_comercial", "consultor"],
-        "consultor_disparo": ["consultor_disparo"],
-        "campanha": ["campanha"],
-        "canal": ["canal"],
-        "acao_comercial": ["acao_comercial"],
-        "tipo_disparo": ["tipo_disparo"],
-        "peca_disparo": ["peca_disparo"],
-        "texto_disparo": ["texto_disparo"],
-        "qtd_acionamentos": ["qtd_acionamentos", "acionamentos"],
-        "status": ["status"],
-        "status_inscricao": ["status_inscricao"],
-        "observacao": ["observacao", "obs"],
-        "matriculado": ["matriculado"],
-        "flag_matriculado": ["flag_matriculado"],
-        "data_inscricao": ["data_inscricao", "dt_inscricao"],
-        "data_matricula": ["data_matricula", "dt_matricula"],
-        "data_atualizacao": ["data_atualizacao", "updated_at", "dt_atualizacao"],
-        "data_ultima_acao": ["data_ultima_acao", "dt_ultima_acao"],
-        "data_disparo": ["data_disparo", "dt_disparo"],
-    }
-    alias_to_target = {alias: target for target, names in aliases.items() for alias in names}
+    if prepared.empty:
+        return {"job_id": upload_id, "status": "DONE", "done": True, "report": {"linhas_recebidas": 0, "linhas_processadas": 0, "linhas_rejeitadas": 0, "linhas_gravadas_staging": 0, "duplicados_arquivo": 0, "duplicados_banco": 0}}
 
-    work = df.copy()
-    normalized_cols = [_normalize_upload_col(c) for c in work.columns]
-    rename = {}
-    seen_targets = set()
-    for original, normalized in zip(work.columns, normalized_cols):
-        target = alias_to_target.get(normalized, normalized)
-        if target in seen_targets:
-            continue
-        rename[original] = target
-        seen_targets.add(target)
-    work = work.rename(columns=rename)
+    stg_cols = set(_table_columns(schema, "stg_leads_site"))
+    if not stg_cols:
+        raise RuntimeError(f"Tabela {schema}.stg_leads_site não encontrada.")
+    prepared = prepared[[c for c in prepared.columns if c in stg_cols]]
+    if "upload_id" not in prepared.columns:
+        raise RuntimeError("Coluna upload_id não existe na staging.")
+    if "dt_upload" not in prepared.columns:
+        raise RuntimeError("Coluna dt_upload não existe na staging.")
 
-    work["upload_id"] = upload_id
-    work["linha_arquivo"] = range(2, len(work) + 2)
-    work["nome_arquivo"] = filename
-    work["dt_upload"] = upload_ts
-
-    staging_cols = _staging_columns(schema)
-    if not staging_cols:
-        raise RuntimeError(f"Tabela de staging não encontrada: {schema}.stg_leads_site")
-    insert_cols = [c for c in work.columns if c in staging_cols]
-    work = work[insert_cols]
-
+    logger.info("upload_staging_insert inicio upload_id=%s arquivo=%s linhas=%s colunas=%s", upload_id, filename, len(prepared), list(prepared.columns))
     with get_engine().begin() as conn:
-        work.to_sql(
-            name="stg_leads_site",
-            con=conn,
-            schema=schema,
-            if_exists="append",
-            index=False,
-            method="multi",
-            chunksize=1000,
-        )
-        result = conn.execute(text(f"SELECT * FROM {_safe_ident(schema)}.sp_processar_stg_leads_site(:upload_id)"), {"upload_id": upload_id})
-        proc_rows = _rows(result) if result.returns_rows else []
+        prepared.to_sql("stg_leads_site", con=conn, schema=schema_ident, if_exists="append", index=False, method="multi", chunksize=1000)
+    logger.info("upload_staging_insert fim upload_id=%s arquivo=%s linhas=%s", upload_id, filename, len(prepared))
 
-    report = {
-        "linhas_recebidas": int(len(df)),
-        "linhas_processadas": int(len(df)),
-        "linhas_rejeitadas": 0,
-        "linhas_gravadas_staging": int(len(work)),
-        "duplicados_arquivo": 0,
-        "duplicados_banco": 0,
-    }
-    if proc_rows:
-        for k in list(report):
-            for row in proc_rows:
-                if k in row and row[k] is not None:
-                    report[k] = int(row[k])
-                    break
-    return {"job_id": upload_id, "status": "DONE", "done": True, "report": report}
+    proc_check = _run_gestao_query("SELECT to_regprocedure(:proc_name) AS proc", {"proc_name": f"{schema}.sp_processar_stg_leads_site(text)"}, "check_import_proc")
+    if not proc_check or not proc_check[0].get("proc"):
+        raise RuntimeError(f"Procedure {schema}.sp_processar_stg_leads_site(text) não encontrada.")
+
+    rows = _run_gestao_query(f"SELECT * FROM {schema_ident}.sp_processar_stg_leads_site(:upload_id)", {"upload_id": upload_id}, "processar_stg_leads_site")
+    report = rows[0] if rows else {}
+    return {"job_id": upload_id, "status": "DONE", "done": True, "report": {"linhas_recebidas": int(report.get("linhas_recebidas") or len(prepared)), "linhas_processadas": int(report.get("linhas_processadas") or 0), "linhas_rejeitadas": int(report.get("linhas_rejeitadas") or 0), "linhas_gravadas_staging": int(report.get("linhas_gravadas_staging") or len(prepared)), "duplicados_arquivo": int(report.get("duplicados_arquivo") or 0), "duplicados_banco": int(report.get("duplicados_banco") or 0)}}
 
 
 def get_bq_job_status(job_id):
     schema = os.getenv("DB_SCHEMA", DB_SCHEMA).strip() or "modelo_estrela"
+    schema_ident = _safe_ident(schema)
     rows = _run_gestao_query(
         f"""
-        SELECT upload_id, status, etapa, mensagem, total_linhas, linhas_recebidas,
-               linhas_validas, linhas_inseridas, linhas_rejeitadas, erros,
-               criado_em, atualizado_em, finalizado_em
-        FROM {_safe_ident(schema)}.logs_importacoes
-        WHERE upload_id = :job_id
+        SELECT upload_id, id_importacao, nome_arquivo, status, etapa, mensagem,
+               total_linhas, linhas_recebidas, linhas_validas, linhas_inseridas,
+               linhas_atualizadas, linhas_ignoradas, linhas_rejeitadas,
+               duplicados_arquivo, duplicados_banco, erros, criado_em, atualizado_em,
+               finalizado_em, duracao_ms
+        FROM {schema_ident}.logs_importacoes
+        WHERE upload_id = :job_id OR id_importacao = :job_id
+        ORDER BY criado_em DESC
+        LIMIT 1
         """,
         {"job_id": job_id},
         "upload_status",
     )
     if not rows:
-        return {"job_id": job_id, "status": "not_found", "done": True}
-    data = rows[0]
-    data["job_id"] = data.get("upload_id")
-    data["done"] = str(data.get("status") or "").upper() in {"CONCLUIDO", "CONCLUIDO_COM_REJEICOES", "ERRO"}
-    return data
-
+        return {"job_id": job_id, "status": "NAO_ENCONTRADO", "done": True, "message": "Upload não encontrado em logs_importacoes."}
+    row = rows[0]
+    status = str(row.get("status") or "").upper()
+    row["job_id"] = job_id
+    row["done"] = status in {"CONCLUIDO", "CONCLUIDO_COM_REJEICOES", "ERRO"}
+    return row
 
 def registrar_exportacao(export_id, usuario, tipo_exportacao, filtros, total_linhas, status="CONCLUIDO", mensagem=None, arquivo=None):
     schema = os.getenv("DB_SCHEMA", DB_SCHEMA).strip() or "modelo_estrela"

@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """PostgreSQL services for gestão endpoints."""
 from __future__ import annotations
-import csv, io, math, re
+import csv, io, json, math, re
 from datetime import date, datetime, timezone
 from decimal import Decimal
 from typing import Any, Dict, Iterable, List, Tuple
@@ -204,17 +204,41 @@ def export_rejeicoes(filters, meta): data,_=get_rejeicoes(filters,meta); return 
 def export_produtividade(filters, meta): data,_=get_produtividade(filters,meta); return f"produtividade_{datetime.now():%Y%m%d_%H%M%S}.csv", _csv_bytes(data["items"]), len(data["items"])
 
 def criar_log_importacao(**kw):
-    params=[bq.database.ScalarQueryParameter(k,"STRING",v) for k,v in kw.items()]
-    schema=bq._safe_ident(bq.DB_SCHEMA)
-    bq._run_gestao_query(f"INSERT INTO {schema}.logs_importacoes (upload_id,id_importacao,nome_arquivo,tipo_arquivo,tamanho_arquivo_bytes,usuario,status,etapa,mensagem,criado_em) VALUES (@upload_id,@id_importacao,@nome_arquivo,@tipo_arquivo,@tamanho_arquivo_bytes,@usuario,'RECEBIDO','UPLOAD','Upload recebido',now())", params, "import_log_create")
-    return {"upload_id":kw.get("upload_id"),"success":True}
+    params = {
+        "upload_id": kw.get("upload_id"),
+        "id_importacao": kw.get("id_importacao"),
+        "nome_arquivo": kw.get("nome_arquivo"),
+        "tipo_arquivo": kw.get("tipo_arquivo"),
+        "tamanho_arquivo_bytes": int(kw.get("tamanho_arquivo_bytes") or 0),
+        "usuario": kw.get("usuario") or "desconhecido",
+        "correlation_id": kw.get("correlation_id"),
+    }
+    schema = bq._safe_ident(bq.DB_SCHEMA)
+    bq._run_gestao_query(
+        f"""
+        INSERT INTO {schema}.logs_importacoes (upload_id, id_importacao, nome_arquivo, tipo_arquivo, tamanho_arquivo_bytes, usuario, status, etapa, mensagem, correlation_id, criado_em, iniciado_em, atualizado_em)
+        VALUES (:upload_id, :id_importacao, :nome_arquivo, :tipo_arquivo, :tamanho_arquivo_bytes, :usuario, 'RECEBIDO', 'UPLOAD', 'Upload recebido', :correlation_id, now(), now(), now())
+        ON CONFLICT (upload_id) DO UPDATE SET id_importacao = EXCLUDED.id_importacao, nome_arquivo = EXCLUDED.nome_arquivo, tipo_arquivo = EXCLUDED.tipo_arquivo, tamanho_arquivo_bytes = EXCLUDED.tamanho_arquivo_bytes, usuario = EXCLUDED.usuario, status = EXCLUDED.status, etapa = EXCLUDED.etapa, mensagem = EXCLUDED.mensagem, correlation_id = EXCLUDED.correlation_id, atualizado_em = now()
+        """,
+        params,
+        "import_log_create",
+    )
+    return {"upload_id": kw.get("upload_id"), "success": True}
+
+
 def atualizar_log_importacao(upload_id, **kw):
-    allowed={"status","etapa","mensagem","total_linhas","linhas_recebidas","linhas_validas","linhas_inseridas","linhas_rejeitadas","erros","duplicados_arquivo","duplicados_banco"}
-    sets=[f"{k} = @{k}" for k in kw if k in allowed]
+    allowed = {"status", "etapa", "mensagem", "total_linhas", "linhas_recebidas", "linhas_validas", "linhas_inseridas", "linhas_atualizadas", "linhas_ignoradas", "linhas_rejeitadas", "duplicados_arquivo", "duplicados_banco", "erros", "duracao_ms", "correlation_id"}
+    params = {"upload_id": upload_id}
+    sets = ["atualizado_em = now()"]
+    for key, value in kw.items():
+        if key in allowed:
+            sets.append(f"{key} = :{key}")
+            params[key] = value
+    if "detalhes_json" in kw:
+        sets.append("detalhes_json = CAST(:detalhes_json AS jsonb)")
+        params["detalhes_json"] = json.dumps(kw.get("detalhes_json") or {}, ensure_ascii=False)
     if kw.get("finalizado"):
-        sets.append("finalizado_em = now()")
-    sets.append("atualizado_em = now()")
-    params=[bq.database.ScalarQueryParameter("upload_id","STRING",upload_id)] + [bq.database.ScalarQueryParameter(k,"STRING",v) for k,v in kw.items() if k in allowed]
-    schema=bq._safe_ident(bq.DB_SCHEMA)
-    bq._run_gestao_query(f"UPDATE {schema}.logs_importacoes SET {', '.join(sets)} WHERE upload_id = @upload_id", params, "import_log_update")
-    return {"success":True}
+        sets.append("finalizado_em = COALESCE(finalizado_em, now())")
+    schema = bq._safe_ident(bq.DB_SCHEMA)
+    bq._run_gestao_query(f"UPDATE {schema}.logs_importacoes SET {', '.join(sets)} WHERE upload_id = :upload_id", params, "import_log_update")
+    return {"success": True}
