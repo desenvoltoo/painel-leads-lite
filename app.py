@@ -1934,7 +1934,7 @@ def create_app() -> Flask:
                 len(df.columns),
             )
             gestao_atualizar_log_importacao(upload_id=upload_id, status="PROCESSANDO", etapa="CARGA_STAGING", mensagem="Carregando dados na staging.", correlation_id=correlation_id, total_linhas=rows_received, linhas_recebidas=rows_received)
-            result = process_upload_dataframe(df, filename=filename)
+            result = process_upload_dataframe(df, filename=filename, upload_id=upload_id)
             report = result.get("report") or {}
             status = "CONCLUIDO_COM_REJEICOES" if int(report.get("linhas_rejeitadas") or 0) > 0 else "CONCLUIDO"
             gestao_atualizar_log_importacao(
