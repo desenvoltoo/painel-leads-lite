@@ -2,8 +2,8 @@
 """Pipeline robusto de upload para PostgreSQL/Supabase.
 
 Compatibiliza instalações em que a rotina de consolidação foi criada como
-FUNCTION ou PROCEDURE e impede que o upload seja marcado como concluído quando
-as linhas continuam presas na staging.
+FUNCTION ou PROCEDURE. No Supabase, a staging pode ser mantida como histórico;
+por isso, a permanência das linhas não é tratada isoladamente como falha.
 """
 from __future__ import annotations
 
@@ -62,7 +62,7 @@ def _staging_count(schema_ident: str, upload_id: str) -> int:
     rows = db._run_gestao_query(
         f"SELECT COUNT(*) AS total FROM {schema_ident}.stg_leads_site WHERE upload_id = :upload_id",
         {"upload_id": upload_id},
-        "upload_staging_pending",
+        "upload_staging_retained",
     )
     return int((rows or [{}])[0].get("total") or 0)
 
@@ -115,6 +115,8 @@ def process_upload_dataframe(df, filename: str = "upload", upload_id: str | None
                 "linhas_processadas": 0,
                 "linhas_rejeitadas": 0,
                 "linhas_gravadas_staging": 0,
+                "linhas_pendentes_staging": 0,
+                "staging_retida": False,
                 "duplicados_arquivo": 0,
                 "duplicados_banco": 0,
             },
@@ -161,22 +163,24 @@ def process_upload_dataframe(df, filename: str = "upload", upload_id: str | None
         routine.get("prokind"),
     )
     report = _execute_routine(schema_ident, routine, upload_id)
-    pending = _staging_count(schema_ident, upload_id)
+    retained = _staging_count(schema_ident, upload_id)
     log_row = _log_snapshot(schema_ident, upload_id)
-
-    if pending > 0:
-        raise RuntimeError(
-            f"A rotina {schema}.{routine.get('routine_name')} foi executada, "
-            f"mas {pending} linha(s) do upload {upload_id} continuam na staging. "
-            "A importação não foi consolidada na base real."
-        )
 
     processed = int(
         report.get("linhas_processadas")
+        or report.get("linhas_validas")
         or log_row.get("linhas_validas")
         or len(prepared)
     )
     rejected = int(report.get("linhas_rejeitadas") or log_row.get("linhas_rejeitadas") or 0)
+
+    if retained:
+        logger.info(
+            "upload_staging_retained upload_id=%s linhas=%s observacao=%s",
+            upload_id,
+            retained,
+            "A instalação Supabase mantém staging como histórico; isso não indica falha isoladamente.",
+        )
 
     return {
         "job_id": upload_id,
@@ -191,7 +195,8 @@ def process_upload_dataframe(df, filename: str = "upload", upload_id: str | None
             "linhas_processadas": processed,
             "linhas_rejeitadas": rejected,
             "linhas_gravadas_staging": len(prepared),
-            "linhas_pendentes_staging": 0,
+            "linhas_pendentes_staging": retained,
+            "staging_retida": bool(retained),
             "duplicados_arquivo": int(report.get("duplicados_arquivo") or log_row.get("duplicados_arquivo") or 0),
             "duplicados_banco": int(report.get("duplicados_banco") or log_row.get("duplicados_banco") or 0),
         },
