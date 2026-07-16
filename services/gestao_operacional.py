@@ -30,7 +30,8 @@ def classify_database_error(exc: Exception):
 
 
 def parse_operational_request(args=None, json_payload=None):
-    return {"filters": dict(args or {}), "meta": dict(json_payload or {})}
+    """Retorna filtros e metadados como a rota Flask espera."""
+    return dict(args or {}), dict(json_payload or {})
 
 
 def _result(data: Any):
@@ -111,8 +112,6 @@ def get_dashboard(*_args, **_kwargs):
     }
     defaults.update(dashboard or {})
 
-    # Fallback mínimo: mostra ao menos o volume da base quando a view operacional
-    # ainda não foi criada no Supabase.
     if not dashboard and _relation_exists("leads_painel_lite"):
         base = _rows(
             f"""
@@ -222,8 +221,7 @@ def get_logs_auditoria(kind, args=None, _user_ctx=None):
     return _result({"success": True, "ok": True, "data": items, "items": items, "total": total, "limit": limit, "offset": offset})
 
 
-# Operações ainda preservadas por compatibilidade. Todas obedecem ao contrato
-# (dados, cached), evitando falhas de desempacotamento nas rotas Flask.
+# Operações preservadas por compatibilidade.
 def _empty_items(*_args, **_kwargs): return _result({"items": [], "total": 0})
 def get_leads_disponiveis(*a, **k): return _empty_items()
 def criar_lote(*a, **k): return _result({"lote_id": None})
