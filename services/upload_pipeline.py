@@ -163,19 +163,18 @@ def process_upload_dataframe(df, filename: str = "upload", upload_id: str | None
     report = _execute_routine(schema_ident, routine, upload_id)
     pending = _staging_count(schema_ident, upload_id)
     log_row = _log_snapshot(schema_ident, upload_id)
-    log_status = str(log_row.get("status") or "").upper()
 
-    completed_by_log = log_status in {"CONCLUIDO", "CONCLUIDO_COM_REJEICOES"}
-    if pending > 0 and not completed_by_log:
+    if pending > 0:
         raise RuntimeError(
             f"A rotina {schema}.{routine.get('routine_name')} foi executada, "
-            f"mas {pending} linha(s) do upload {upload_id} continuam na staging."
+            f"mas {pending} linha(s) do upload {upload_id} continuam na staging. "
+            "A importação não foi consolidada na base real."
         )
 
     processed = int(
         report.get("linhas_processadas")
         or log_row.get("linhas_validas")
-        or max(len(prepared) - pending, 0)
+        or len(prepared)
     )
     rejected = int(report.get("linhas_rejeitadas") or log_row.get("linhas_rejeitadas") or 0)
 
@@ -192,7 +191,7 @@ def process_upload_dataframe(df, filename: str = "upload", upload_id: str | None
             "linhas_processadas": processed,
             "linhas_rejeitadas": rejected,
             "linhas_gravadas_staging": len(prepared),
-            "linhas_pendentes_staging": pending,
+            "linhas_pendentes_staging": 0,
             "duplicados_arquivo": int(report.get("duplicados_arquivo") or log_row.get("duplicados_arquivo") or 0),
             "duplicados_banco": int(report.get("duplicados_banco") or log_row.get("duplicados_banco") or 0),
         },
