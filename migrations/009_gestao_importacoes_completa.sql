@@ -1,17 +1,22 @@
 -- Gestão completa do pipeline de importação
--- Execute no PostgreSQL/Supabase após o deploy da aplicação.
+-- Adaptada ao schema real do PostgreSQL/Supabase.
 
 BEGIN;
 
 ALTER TABLE modelo_estrela.logs_importacoes
-  ADD COLUMN IF NOT EXISTS correlation_id text,
-  ADD COLUMN IF NOT EXISTS detalhes_json jsonb DEFAULT '{}'::jsonb;
+  ADD COLUMN IF NOT EXISTS correlation_id text;
+
+-- detalhes_json já existe como text na instalação atual.
+-- Não alteramos o tipo nesta migration para evitar quebra de dados legados.
 
 CREATE INDEX IF NOT EXISTS idx_logs_importacoes_criado_em
   ON modelo_estrela.logs_importacoes (criado_em DESC);
 
 CREATE INDEX IF NOT EXISTS idx_logs_rejeicoes_upload_id
   ON modelo_estrela.logs_rejeicoes_import (upload_id);
+
+CREATE INDEX IF NOT EXISTS idx_logs_rejeicoes_criado_em
+  ON modelo_estrela.logs_rejeicoes_import (criado_em DESC);
 
 CREATE INDEX IF NOT EXISTS idx_stg_leads_site_upload_id
   ON modelo_estrela.stg_leads_site (upload_id);
@@ -36,7 +41,11 @@ LEFT JOIN (
   SELECT
     upload_id,
     COUNT(*) AS total_rejeicoes_log,
-    string_agg(DISTINCT COALESCE(motivo, 'Sem motivo'), ' | ' ORDER BY COALESCE(motivo, 'Sem motivo')) AS motivos_rejeicao
+    string_agg(
+      DISTINCT COALESCE(motivo, 'Sem motivo'),
+      ' | '
+      ORDER BY COALESCE(motivo, 'Sem motivo')
+    ) AS motivos_rejeicao
   FROM modelo_estrela.logs_rejeicoes_import
   GROUP BY upload_id
 ) r ON r.upload_id = i.upload_id
@@ -48,7 +57,11 @@ LEFT JOIN (
 
 CREATE OR REPLACE VIEW modelo_estrela.vw_gestao_rejeicoes_import AS
 SELECT
-  r.id,
+  row_number() OVER (
+    ORDER BY COALESCE(r.criado_em, r.ts) DESC NULLS LAST,
+             r.upload_id,
+             r.linha
+  ) AS rejeicao_id,
   r.upload_id,
   i.nome_arquivo,
   i.usuario,
@@ -57,8 +70,10 @@ SELECT
   r.campo,
   r.valor_mascarado,
   r.criado_em,
+  r.ts,
   i.correlation_id
 FROM modelo_estrela.logs_rejeicoes_import r
-LEFT JOIN modelo_estrela.logs_importacoes i ON i.upload_id = r.upload_id;
+LEFT JOIN modelo_estrela.logs_importacoes i
+  ON i.upload_id = r.upload_id;
 
 COMMIT;
