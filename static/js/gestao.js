@@ -1,79 +1,225 @@
 (() => {
   'use strict';
-  const userPermissions = new Set((document.body?.dataset?.permissions || '').split(',').filter(Boolean));
-  const can = p => userPermissions.has(p) || document.body?.dataset?.userProfile === 'ADMIN';
-  const $ = (s, r=document) => r.querySelector(s);
-  const $$ = (s, r=document) => Array.from(r.querySelectorAll(s));
-  const fmt = v => (v === null || v === undefined || v === '') ? '—' : String(v);
-  const esc = v => String(v ?? '').replace(/[&<>'"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));
-  const moduleTitles = {inicio:'Dashboard', 'importar-novos':'Importar Leads', 'exportar-lote':'Gerar Lote', 'importar-resultado':'Importar Retorno', lotes:'Lotes', 'lote-atual':'Lote atual', consultores:'Consultores', evolucao:'Evolução', logs:'Logs / Auditoria', rastreabilidade:'Leads / Rastreabilidade', usuarios:'Usuários'};
-  const moduleHelp = {inicio:'Resumo da operação e fluxo recomendado de ponta a ponta.', 'importar-novos':'Envie novos leads pela rota oficial /api/upload.', 'exportar-lote':'Gere o lote pela procedure oficial e baixe CSV para disparo.', 'importar-resultado':'Importe o retorno trabalhado para atualizar métricas.', lotes:'Acompanhe, finalize ou cancele lotes.', 'lote-atual':'Trabalhe o lote no painel.', consultores:'Progresso por consultor.', evolucao:'Evolução por consultor, lote e lead.', logs:'Investigue importações, rejeições, auditoria, eventos, fila e sincronização PostgreSQL.', rastreabilidade:'Busque leads e acompanhe a linha do tempo.', usuarios:'Gerencie usuários do painel.'};
 
-  function payloadFromForm(form){ const payload={}; if(!form) return payload; new FormData(form).forEach((v,k)=>{ if(v instanceof File) return; v=String(v).trim(); if(v) payload[k]=k==='quantidade'?Number(v):v; }); return payload; }
-  function queryFromForm(form){ const q=new URLSearchParams(); if(!form) return q; new FormData(form).forEach((v,k)=>{ if(v instanceof File) return; v=String(v).trim(); if(v) q.append(k,v); }); return q; }
-  async function opFetch(path, opts={}){ const headers=opts.body instanceof FormData ? {'Accept':'application/json'} : {'Accept':'application/json','Content-Type':'application/json'}; const res=await fetch(`/api/gestao/operacional/${path}`, {...opts, headers:{...headers,...(opts.headers||{})}}); const body=await res.json().catch(()=>null); if(!res.ok || !body?.ok){ const err=new Error(body?.error?.message || body?.message || `Falha HTTP ${res.status}`); err.endpoint=`/api/gestao/operacional/${path}`; err.status=res.status; err.body=body; throw err; } return body.data || body; }
-  function showToast(message, type='info'){ const region=$('#toastRegion'); if(!region) return alert(message); const el=document.createElement('div'); el.className=`alert alert-${type==='error'?'danger':type} shadow-sm`; el.textContent=message; region.appendChild(el); setTimeout(()=>el.remove(),4500); }
-  function showOperationError(endpoint, error){ const el=$('#operacao-error'); if(!el) return; const msg=error?.body?.error?.message || error?.message || 'Erro desconhecido'; el.innerHTML=`<strong>Falha operacional.</strong><br>Endpoint: <code>${esc(endpoint || error?.endpoint || '--')}</code><br>Status HTTP: <code>${esc(error?.status || '--')}</code><br>Mensagem: ${esc(msg)}<br><small>${esc(error?.body?.details || error?.body?.error?.details || '')}</small>`; el.classList.remove('d-none'); }
-  function setLoading(target, active){ const el=typeof target==='string'?$(target):target; if(!el) return; el.toggleAttribute('disabled', !!active); el.classList.toggle('is-loading', !!active); const block=el.closest?.('.data-panel,.block-loading'); block?.classList.toggle('block-loading-active', !!active); }
-  function rows(tableId, data, cols){ const tb=$(`#${tableId} tbody`); if(!tb) return; tb.innerHTML=(data||[]).map(r=>`<tr>${cols.map(c=>`<td>${typeof c==='function'?c(r):esc(fmt(r[c]))}</td>`).join('')}</tr>`).join('') || `<tr><td colspan="${cols.length}"><div class="empty-state my-2">Nenhum registro encontrado.</div></td></tr>`; }
-
-
-  function confirmAction({title='Confirmar ação', body='Deseja continuar?', confirmText='Confirmar', variant='danger'}={}){ return new Promise(resolve=>{ const el=$('#confirmActionModal'); if(!el || !window.bootstrap){ resolve(window.confirm(body)); return; } $('#confirmActionTitle').textContent=title; $('#confirmActionBody').textContent=body; const btn=$('#confirmActionButton'); btn.textContent=confirmText; btn.className=`btn btn-${variant}`; const modal=bootstrap.Modal.getOrCreateInstance(el); const cleanup=()=>{ btn.removeEventListener('click', onConfirm); el.removeEventListener('hidden.bs.modal', onHidden); }; const onConfirm=()=>{ cleanup(); modal.hide(); resolve(true); }; const onHidden=()=>{ cleanup(); resolve(false); }; btn.addEventListener('click', onConfirm, {once:true}); el.addEventListener('hidden.bs.modal', onHidden, {once:true}); modal.show(); }); }
-  function statusBadge(status){ const raw=String(status||'--').toUpperCase(); return `<span class="badge status-${esc(raw.toLowerCase())}">${esc(raw)}</span>`; }
-
-  function switchGestaoModule(moduleName){ const name=String(moduleName||'inicio').replace(/^#/,'').replace(/^mod-/,''); $$('.gestao-module-page').forEach(p=>p.classList.toggle('active', p.id===`mod-${name}`)); $$('[data-module-target]').forEach(b=>b.classList.toggle('active', b.dataset.moduleTarget===name)); $('#moduleHelp').textContent=moduleHelp[name] || ''; if(name==='lotes') loadLotes(); if(name==='logs') loadLogs(); if(name==='importar-resultado') loadLotesSelect(); if(name==='lote-atual') { loadLotesSelect(); loadLoteAtual(); } if(name==='consultores') loadConsultores(); if(name==='evolucao') loadEvolucao(); if(name==='usuarios') loadUsuarios(); }
-  async function loadOperacaoDashboard(){ const grid=$('#opDashboardGrid'); grid?.classList.add('block-loading-active'); try{ const d=await opFetch('dashboard'); if((d.missing_fields||[]).length) console.error('Campos ausentes em vw_op_dashboard_cards:', d.missing_fields); const cards=[['leads_novos_disponiveis','Leads novos disponíveis'],['leads_redisparo_disponiveis','Leads para redisparo'],['leads_em_lotes','Leads em lotes'],['leads_pendentes','Pendentes'],['leads_em_atendimento','Em atendimento'],['total_lotes','Total de lotes'],['lotes_abertos','Lotes abertos'],['lotes_em_andamento','Lotes em andamento'],['lotes_importados','Lotes importados'],['lotes_concluidos','Lotes concluídos'],['lotes_cancelados','Lotes cancelados'],['retornos','Retornos'],['positivos','Positivos'],['negativos','Negativos'],['matriculas','Matrículas'],['taxa_retorno_pct','Taxa de retorno'],['taxa_matricula_pct','Taxa de matrícula']]; $('#opDashboardGrid').innerHTML=cards.map(([k,t])=>`<article class="kpi-card"><span>${t}</span><strong>${Object.prototype.hasOwnProperty.call(d,k) ? esc(fmt(d[k])) : (console.error('Campo ausente em vw_op_dashboard_cards:', k), '—')}${k.endsWith('_pct') && k in d?'%':''}</strong></article>`).join(''); if(d.warning) showOperationError('/api/gestao/operacional/dashboard',{status:200,message:d.warning,body:{error:{message:d.warning}}}); updateFlowStatus(null); return d; } finally { grid?.classList.remove('block-loading-active'); } }
-  async function loadLotesSelect(){ const d=await opFetch('lotes-select'); const opts='<option value="">Selecione</option>'+(d.items||[]).map(l=>`<option value="${esc(l.lote_id)}">${esc(l.nome_lote||l.lote_id)} • ${esc(l.tipo_disparo)} • ${esc(l.status_lote)}</option>`).join(''); ['#opLoteSelect','#globalLoteSelect','#opLoteAtualSelect'].forEach(id=>{ const s=$(id); if(s) s.innerHTML=opts; }); return d; }
-  async function loadPreviewProximoLote(){ const qs=queryFromForm($('#opExportarForm')); const d=await opFetch(`preview-proximo-lote?${qs}`); const leads=d.leads || d.items || []; rows('opPreviewTable', leads, ['nome','cpf','celular','curso','polo','score_prioridade','data_inscricao']); $('#opExportarMsg').innerHTML=`<div class="alert alert-info">Disponíveis: ${esc(d.total_disponivel ?? d.count ?? leads.length)} • Prévia: ${esc(d.quantidade_preview ?? leads.length)}</div>`; return d; }
-  async function exportarProximoLote(){ const btn=$('#opExportarForm button[type="submit"]'); setLoading(btn,true); try{ const payload={modo:'NOVO', filtros:{}}; Object.entries(payloadFromForm($('#opExportarForm'))).forEach(([k,v])=>{ if(['curso','polo','origem','nivel_prioridade'].includes(k)) payload.filtros[k]=v; else payload[k]=v; }); const res=await fetch('/api/gestao/lotes/criar-exportar',{method:'POST',headers:{'Accept':'application/json','Content-Type':'application/json'},body:JSON.stringify(payload)}); const d=await res.json().catch(()=>null); if(!res.ok || !(d?.success || d?.ok)){ throw Object.assign(new Error(d?.error?.message||`Falha HTTP ${res.status}`),{status:res.status,body:d,endpoint:'/api/gestao/lotes/criar-exportar'}); } const downloadUrl=d.download_url || `/api/gestao/lotes/${encodeURIComponent(d.lote_id)}/csv`; const fileRes=await fetch(downloadUrl,{headers:{'Accept':'text/csv'}}); if(!fileRes.ok){ const b=await fileRes.json().catch(()=>null); throw Object.assign(new Error(b?.error?.message||`Falha ao baixar CSV (${fileRes.status})`),{status:fileRes.status,body:b,endpoint:downloadUrl}); } const blob=await fileRes.blob(); const cd=fileRes.headers.get('Content-Disposition')||''; const name=(cd.match(/filename="?([^";]+)"?/)||[])[1]||d.nome_arquivo_exportado||`${d.nome_lote||'lote_operacional'}.csv`; const url=URL.createObjectURL(blob); const a=document.createElement('a'); a.href=url; a.download=name; document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url); $('#opExportarMsg').innerHTML=`<div class="alert alert-success"><strong>Lote criado:</strong> ${esc(d.lote_id)}<br>Leads liberados: ${esc(d.quantidade_liberada ?? '--')} • Arquivo: ${esc(name)}</div>`; await Promise.allSettled([loadOperacaoDashboard(), loadLotes(), loadLotesSelect()]); showToast('Lote gerado e CSV baixado com sucesso.','success'); } finally { setLoading(btn,false); } }
-  async function importarLoteDisparado(){ const form=$('#opImportarDisparadoForm'); const loteId=form?.lote_id?.value; if(!loteId) throw new Error('Selecione um lote.'); const res=await fetch(`/api/gestao/lotes/${encodeURIComponent(loteId)}/importar-retorno`,{method:'POST',headers:{'Accept':'application/json'},body:new FormData(form)}); const d=await res.json().catch(()=>null); if(!res.ok || !(d?.success||d?.ok)) throw Object.assign(new Error(d?.error?.message||d?.message||`Falha HTTP ${res.status}`),{status:res.status,body:d,endpoint:`/api/gestao/lotes/${loteId}/importar-retorno`}); $('#opImportarDisparadoMsg').innerHTML=`<div class="alert alert-success"><strong>Retorno importado:</strong> ${esc(d.nome_lote||d.lote_id)}<br>Lote: ${esc(d.lote_id)} • Batch: ${esc(d.import_batch_id)}<br>Linhas recebidas: ${esc(d.linhas_recebidas)} • Leads atualizados: ${esc(d.leads_atualizados)} • Retornos: ${esc(d.total_retorno)} • Positivos: ${esc(d.total_positivo)} • Negativos: ${esc(d.total_negativo)} • Matrículas: ${esc(d.total_matriculas)}</div>`; showToast('Retorno importado com sucesso.','success'); await Promise.allSettled([loadOperacaoDashboard(), loadLotes(), loadLogs()]); }
-  async function marcarLoteDisparado(loteId){ const res=await fetch(`/api/gestao/lotes/${encodeURIComponent(loteId)}/marcar-disparado`,{method:'POST',headers:{'Accept':'application/json','Content-Type':'application/json'},body:JSON.stringify({})}); const d=await res.json().catch(()=>null); if(!res.ok || !d?.ok){ throw Object.assign(new Error(d?.error?.message||`Falha HTTP ${res.status}`),{status:res.status,body:d,endpoint:`/api/gestao/lotes/${loteId}/marcar-disparado`}); } await Promise.allSettled([loadLotes(), loadOperacaoDashboard(), loadLotesSelect()]); showToast('Lote marcado como disparado. Status atualizado para EM_ANDAMENTO.','success'); return d.data || d; }
-
-  function updateFlowStatus(lote){ const st=String(lote?.status_lote||'').toUpperCase(); let current='exportar-lote'; if(!lote) current='exportar-lote'; else if(st==='ABERTO') current='lotes'; else if(st==='EM_ANDAMENTO') current='lote-atual'; else if(st==='IMPORTADO') current='evolucao'; else if(st==='CONCLUIDO') current='evolucao'; const buttons=$$('#opFlow [data-flow-step]'); const order=['importar-novos','exportar-lote','lotes','lote-atual','importar-resultado','evolucao','lotes']; const idx=order.indexOf(current); buttons.forEach((b,i)=>{ b.classList.remove('is-done','is-current','is-pending'); b.classList.add(i<idx?'is-done':(i===idx?'is-current':'is-pending')); }); }
-  function progressSummary(items){ const total=items.length, pend=items.filter(r=>String(r.status_atendimento||'').toUpperCase()==='PENDENTE').length, ret=items.filter(r=>r.retorno).length, pos=items.filter(r=>r.positivo).length, neg=items.filter(r=>r.negativo).length, mat=items.filter(r=>r.matriculado).length; const trab=Math.max(total-pend,0); return {total,pend,ret,pos,neg,mat,trab,pct:total?Math.round((trab/total)*100):0}; }
-  async function loadConsultores(){ const q=queryFromForm($('#opConsultoresFilters')); const d=await opFetch(`consultores?${q}`); rows('opConsultoresTable', d.items||[], ['consultor_disparo','total_leads_em_lote','total_lotes','leads_em_lotes_abertos','leads_em_disparo','leads_com_retorno_importado','leads_finalizados','pendentes','em_atendimento','retornos','positivos','negativos','matriculas','taxa_retorno_pct','taxa_matricula_pct','trabalhados','percentual_trabalhado','ultima_movimentacao']); }
-  async function loadLoteAtual(meus=false){ const q=queryFromForm($('#opLoteAtualFilters')); q.set('limit','100'); if(meus) q.set('meus_leads','1'); const d=await opFetch(`lote-atual/leads?${q}`); const items=d.data||d.items||[]; const p=d.summary||progressSummary(items); const nome=items[0]?.nome_lote||'—'; $('#loteAtualProgress').innerHTML=`<h3 class="h6">Meu lote atual: ${esc(nome)}</h3><div class="progress-caption">Pendentes: ${esc(p.pendentes??p.pend)} • Em atendimento: ${esc(p.em_atendimento??0)} • Retornos: ${esc(p.retornos??p.ret)} • Positivos: ${esc(p.positivos??p.pos)} • Negativos: ${esc(p.negativos??p.neg)} • Matrículas: ${esc(p.matriculas??p.mat)}</div><div class="progress"><div class="progress-bar bg-success" style="width:${esc(p.percentual_trabalhado??p.pct)}%"></div></div><small>${esc(p.percentual_trabalhado??p.pct)}% trabalhado</small>`; const statusBtns=['AC','EC','NT','IF','NI','COU','MAT']; rows('opLoteAtualTable', items, [r=>`<button class="btn btn-link p-0" data-open-lead="${esc(r.sk_pessoa)}">${esc(r.nome)}</button>`,'cpf','celular','email','curso','polo','campanha', r=>`<select class="form-select form-select-sm" data-edit-status="${esc(r.lote_id)}:${esc(r.sk_pessoa)}"><option value="${esc(r.status_atendimento||'')}">${esc(r.status_atendimento||'PENDENTE')}</option>${statusBtns.map(x=>`<option value="${x}">${x}</option>`).join('')}</select>`, 'retorno','positivo','negativo', r=>`<input type="checkbox" data-edit-mat="${esc(r.lote_id)}:${esc(r.sk_pessoa)}" ${r.matriculado?'checked':''}>`, r=>`<textarea class="form-control form-control-sm" data-edit-obs="${esc(r.lote_id)}:${esc(r.sk_pessoa)}">${esc(r.observacao||'')}</textarea>`, r=>`${esc(fmt(r.data_inscricao))}<br>${esc(fmt(r.data_disparo))}<br>${esc(fmt(r.ultimo_evento))} ${esc(fmt(r.ultimo_evento_em))} ${esc(fmt(r.ultimo_evento_por))}`, r=>`${statusBtns.map(x=>`<button class="btn btn-outline-primary btn-sm me-1 mb-1" data-lote-status="${x}" data-lote="${esc(r.lote_id)}" data-sk="${esc(r.sk_pessoa)}">${x}</button>`).join('')}<button class="btn btn-success btn-sm" data-save-lead="${esc(r.lote_id)}:${esc(r.sk_pessoa)}">Salvar</button>`]); }
-  async function salvarLeadLote(loteId, sk, statusOverride){ const key=`${CSS.escape(loteId)}:${CSS.escape(sk)}`; const status=statusOverride || $(`[data-edit-status="${key}"]`)?.value || ''; const payload={status_atendimento:status, observacao:$(`[data-edit-obs="${key}"]`)?.value||'', matriculado:!!$(`[data-edit-mat="${key}"]`)?.checked, data_matricula:null, consultor_disparo:''}; const res=await fetch(`/api/gestao/lotes/${encodeURIComponent(loteId)}/leads/${encodeURIComponent(sk)}/atualizar`,{method:'POST',headers:{'Accept':'application/json','Content-Type':'application/json'},body:JSON.stringify(payload)}); const d=await res.json().catch(()=>null); if(!res.ok || !d?.ok) throw Object.assign(new Error(d?.error?.message||`Falha HTTP ${res.status}`),{status:res.status,body:d,endpoint:`/api/gestao/lotes/${loteId}/leads/${sk}/atualizar`}); await Promise.allSettled([loadLoteAtual(), loadOperacaoDashboard(), loadConsultores(), loadLotes()]); showToast('Lead atualizado com sucesso.','success'); }
-  async function abrirLeadDrawer(sk){ const lead=(await gestaoApi(`leads/buscar?q=${encodeURIComponent(sk)}`)).items?.[0]||{sk_pessoa:sk}; const fields=['sk_pessoa','nome','cpf','celular','email','curso','polo','campanha','lote_id','status_atendimento']; $('#leadDrawerCards').innerHTML=fields.map(k=>`<article class="kpi-card"><span>${esc(k)}</span><strong>${esc(k==='cpf'?maskCpf(lead[k]):k==='celular'?maskPhone(lead[k]):fmt(lead[k]))}</strong></article>`).join(''); const [timeline,eventos]=await Promise.all([gestaoApi(`leads/${encodeURIComponent(sk)}/timeline`),gestaoApi(`leads/${encodeURIComponent(sk)}/eventos`)]); $('#leadDrawerTimeline').innerHTML=(timeline.items||[]).map(e=>`<div class="p-2 border-bottom"><strong>${esc(e.evento||e.tipo_evento||'Evento')}</strong><br><small>${esc(fmt(e.created_at))} • ${esc(fmt(e.usuario))}</small><p class="mb-0">${esc(e.nome_lote||'')} ${esc(e.status_anterior||'')} → ${esc(e.status_novo||'')}<br>${esc(e.descricao||'')}</p></div>`).join('') || '<div class="empty-state">Sem timeline.</div>'; $('#leadDrawerEventos').innerHTML=(eventos.items||[]).map(e=>`<div class="p-2 border-bottom"><strong>${esc(e.tipo_evento||'Evento')}</strong><br><small>${esc(fmt(e.created_at))} • ${esc(fmt(e.usuario))}</small><p class="mb-0">${esc(e.status_anterior||'')} → ${esc(e.status_novo||'')}<br>${esc(e.descricao||'')}</p></div>`).join('') || '<div class="empty-state">Sem eventos técnicos.</div>'; const drawer=$('#leadDrawer'); if(drawer) drawer.classList.add('active'); else switchGestaoModule('rastreabilidade'); }
-  async function loadEvolucao(){ await Promise.allSettled([loadConsultores(), loadLotes()]); const q=queryFromForm($('#evolucaoLeadFilters')); const d=q.toString()?await gestaoApi(`logs/timeline?${q}`).catch(()=>({data:[]})):{data:[]}; const items=d.data||d.items||[]; rows('evolucaoLeadsTable', items, ['created_at','sk_pessoa','nome','cpf','celular','lote_id','nome_lote','consultor_disparo','evento','status_anterior','status_novo','usuario','descricao']); }
-
-  async function importarNovosLeads(){ const res=await fetch('/api/upload',{method:'POST',headers:{'Accept':'application/json'},body:new FormData($('#opImportarNovosForm'))}); const d=await res.json().catch(()=>({})); if(!res.ok || d.ok===false){ throw Object.assign(new Error(d?.error?.message||d?.error||'Falha no upload oficial.'),{status:res.status,body:d,endpoint:'/api/upload'}); } const rep=d.report||d.relatorio||{}; $('#opImportarNovosMsg').innerHTML=`<div class="alert alert-success"><strong>Arquivo recebido:</strong> ${esc(d.filename||rep.arquivo||'processado')}<br>Linhas lidas: ${esc(d.rows_received??rep.linhas_lidas??'--')} • Válidas: ${esc(d.rows_valid??rep.linhas_validas??'--')} • Rejeitadas: ${esc(d.rows_rejected??rep.linhas_rejeitadas??'--')} • Duplicadas: ${esc(d.duplicadas??rep.duplicadas??'--')} • Inseridas: ${esc(d.inseridas??rep.inseridas??'--')} • Atualizadas: ${esc(d.atualizadas??rep.atualizadas??'--')}</div>`; await Promise.allSettled([loadOperacaoDashboard(), loadLogs()]); }
-  async function loadLotes(){ const d=await opFetch('lotes?limit=100'); updateFlowStatus((d.items||[])[0]); const action=r=>{ const st=String(r.status_lote||'').toUpperCase(); const id=esc(r.lote_id); const buttons=[]; if(st==='ABERTO') buttons.push(`<button class="btn btn-outline-success btn-sm" data-marcar-disparado="${id}">Marcar como disparado</button>`); if(['EM_ANDAMENTO','IMPORTADO'].includes(st)) buttons.push(`<button class="btn btn-outline-primary btn-sm" data-finish="${id}">Finalizar lote</button>`); if(!['CONCLUIDO','CANCELADO'].includes(st)) buttons.push(`<button class="btn btn-outline-danger btn-sm" data-cancel="${id}">Cancelar</button>`); return buttons.length ? `<div class="row-actions">${buttons.join('')}</div>` : '--'; }; rows('opLotesTable', d.items||[], ['nome_lote','nome_arquivo_exportado','mes_leads','exportado_por','campanha','tipo_disparo','consultor_disparo','quantidade_leads',r=>statusBadge(r.status_lote),'etapa_fluxo','proxima_acao','total_retorno','total_positivo','total_negativo','total_matriculas','taxa_retorno','taxa_matricula','exportado_em','started_at','importado_em','finished_at', action]); rows('homeLotesTable',(d.items||[]).slice(0,6),['nome_lote','tipo_disparo',r=>statusBadge(r.status_lote),'quantidade_leads']); }
-  async function loadMeusLeads(){ const q=queryFromForm($('#opMeusFilters')); q.set('limit','100'); const d=await opFetch(`meus-leads?${q}`); const statuses=['AC','EC','NT','IF','MAT','NI','COU','CONCLUIDO','CANCELADO']; rows('opMeusTable', d.items||[], ['nome','curso','celular','lote_id','status_atendimento', r=>`<input class="form-control form-control-sm" data-obs="${esc(r.lote_id)}:${esc(r.sk_pessoa)}" value="${esc(r.observacao||'')}">`, r=>statuses.map(s=>`<button class="btn btn-outline-primary btn-sm me-1 mb-1" data-status="${s}" data-lote="${esc(r.lote_id)}" data-sk="${esc(r.sk_pessoa)}">${s}</button>`).join('')]); }
-  async function updateLeadStatus(skPessoa, payload){ const d=await opFetch(`leads/${encodeURIComponent(skPessoa)}/status`,{method:'PATCH',body:JSON.stringify(payload)}); showToast('Status atualizado.','success'); return d; }
-  async function loadPerformance(){ await loadOperacaoDashboard(); }
-  const logTabs = {
-    importacoes:{endpoint:'importacoes', cols:['upload_id','id_importacao','nome_arquivo','usuario','status','etapa','mensagem','total_linhas','linhas_recebidas','linhas_validas','linhas_inseridas','linhas_atualizadas','linhas_ignoradas','linhas_rejeitadas','duplicados_arquivo','duplicados_banco','erros','criado_em','iniciado_em','finalizado_em','duracao_ms'], filters:['status','usuario','nome_arquivo','upload_id'], date:true},
-    rejeicoes:{endpoint:'rejeicoes', cols:['ts','motivo','cpf_raw','celular_raw','nome_raw','email_raw','payload'], filters:['motivo','cpf','celular','nome'], date:true},
-    auditoria:{endpoint:'auditoria', cols:['created_at','usuario_email','acao','modulo','entidade','entidade_id','lote_id','sk_pessoa','cpf','descricao','payload_json','ip','user_agent'], filters:['usuario','acao','modulo','lote_id','sk_pessoa','cpf'], date:true},
-    'eventos-leads':{endpoint:'eventos-leads', cols:['created_at','lote_id','sk_pessoa','cpf','tipo_evento','status_anterior','status_novo','descricao','usuario'], filters:['lote_id','sk_pessoa','cpf','tipo_evento','usuario'], date:true},
-    timeline:{endpoint:'timeline', cols:['created_at','sk_pessoa','cpf','celular','nome','lote_id','nome_lote','evento','etapa_anterior','etapa_nova','status_anterior','status_novo','retorno','positivo','negativo','matriculado','usuario','origem_evento','descricao'], filters:['lote_id','sk_pessoa','cpf','celular','nome','evento','usuario'], date:true},
-    'debug-fila':{endpoint:'debug-fila', cols:['sk_pessoa','nome','cpf','celular','curso','polo','campanha','tipo_disparo','consultor_disparo','flag_matriculado','data_inscricao','data_disparo','score_prioridade','nivel_prioridade','etapa_operacional','motivo_fila'], filters:['motivo_fila','curso','polo','campanha','consultor_disparo','tipo_disparo','busca'], date:false},
-    'database-sync':{endpoint:'database-sync', cols:['sync_id','lote_id','status_sync','tentativas','linhas_processadas','erro','created_at','synced_at'], filters:['lote_id','status_sync'], date:true}
+  const $ = (s, r = document) => r.querySelector(s);
+  const $$ = (s, r = document) => Array.from(r.querySelectorAll(s));
+  const esc = (v) => String(v ?? '').replace(/[&<>'"]/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));
+  const num = (v) => Number(v || 0);
+  const pct = (v) => `${Number(v || 0).toFixed(1).replace('.0', '')}%`;
+  const fmtDate = (v) => {
+    if (!v) return '—';
+    const d = new Date(v);
+    return Number.isNaN(d.getTime()) ? esc(v) : d.toLocaleString('pt-BR', {dateStyle:'short', timeStyle:'short'});
   };
-  let activeLogTab='importacoes'; let logsOffset=0; let logsLimit=50; let lastPayloadText='';
-  function updateLogFilters(){ const cfg=logTabs[activeLogTab]; $$('[data-filter]', $('#logsFilters')).forEach(el=>{ el.classList.toggle('d-none', !(cfg.filters||[]).includes(el.dataset.filter)); }); $$('[data-date-filter]', $('#logsFilters')).forEach(el=>el.classList.toggle('d-none', !cfg.date)); }
-  function buildLogQuery(){ const q=queryFromForm($('#logsFilters')); logsLimit=Number(q.get('limit')||50); q.set('limit', String(logsLimit)); q.set('offset', String(logsOffset)); return q; }
-  function renderLogRows(items, cols){ const head=$('#logsAuditHead'); if(head) head.innerHTML=cols.map(c=>`<th>${esc(c)}</th>`).join(''); const body=$('#logsAuditTable tbody'); if(!body) return; body.innerHTML=(items||[]).map(r=>`<tr>${cols.map(c=>{ const val=r[c]; if(['payload','payload_json','erro'].includes(c) && val){ const text=esc(fmt(val)); return `<td><button class="btn btn-outline-secondary btn-sm" data-payload="${esc(String(val))}">Ver</button> <button class="btn btn-outline-primary btn-sm" data-copy-payload="${esc(String(val))}">Copiar</button><div class="text-truncate" style="max-width:280px">${text}</div></td>`; } return `<td>${esc(fmt(val))}</td>`; }).join('')}</tr>`).join('') || `<tr><td colspan="${cols.length}"><div class="empty-state my-2">Nenhum registro encontrado para os filtros atuais.</div></td></tr>`; }
-  async function loadLogs(){ const cfg=logTabs[activeLogTab]||logTabs.importacoes; updateLogFilters(); const state=$('#logsState'), err=$('#logsError'), table=$('#logsAuditTable'); err?.classList.add('d-none'); table?.classList.add('block-loading-active'); if(state) state.textContent='Carregando registros...'; try{ const res=await fetch(`/api/gestao/logs/${cfg.endpoint}?${buildLogQuery()}`, {headers:{'Accept':'application/json'}}); const d=await res.json().catch(()=>null); if(!res.ok || d?.success===false) throw Object.assign(new Error(d?.error?.message||`Falha HTTP ${res.status}`),{status:res.status,body:d,endpoint:`/api/gestao/logs/${cfg.endpoint}`}); const items=d.data||d.items||[]; renderLogRows(items, cfg.cols); const total=Number(d.total||0); if(state) state.textContent=items.length?`${items.length} registro(s) carregado(s).`:'Nenhum registro encontrado.'; const info=$('#logsPaginationInfo'); if(info) info.textContent=`Total: ${total} • exibindo ${logsOffset+1}-${Math.min(logsOffset+items.length,total)} • limite ${d.limit||logsLimit}`; $('#btnLogsPrev')?.toggleAttribute('disabled', logsOffset<=0); $('#btnLogsNext')?.toggleAttribute('disabled', logsOffset+logsLimit>=total); if(activeLogTab==='database-sync' || activeLogTab==='eventos-leads'){ $('#homeAlerts').innerHTML=items.slice(0,5).map(r=>`<div class="p-2 border-bottom"><strong>${esc(fmt(r.status_sync||r.tipo_evento||r.status||'Log'))}</strong><br><small>${esc(fmt(r.created_at))}</small><p class="mb-0">${esc(fmt(r.erro||r.descricao||''))}</p></div>`).join('') || '<div class="empty-state">Sem alertas recentes.</div>'; }
-    return d;
-  }catch(e){ if(err){ err.textContent=`Erro ao carregar ${cfg.endpoint}: ${e.message}`; err.classList.remove('d-none'); } if(state) state.textContent='Falha ao carregar. Ajuste filtros ou tente novamente.'; throw e; } finally { table?.classList.remove('block-loading-active'); } }
-  function showPayload(text){ lastPayloadText=String(text||''); const pre=$('#payloadModalContent'); if(pre) pre.textContent=lastPayloadText; const el=$('#payloadModal'); if(el && window.bootstrap) bootstrap.Modal.getOrCreateInstance(el).show(); else alert(lastPayloadText); }
-  async function showDetail(loteId){ const d=await opFetch(`lotes/${encodeURIComponent(loteId)}`); showToast(`Lote ${loteId}: ${(d.leads||[]).length} leads carregados.`, 'info'); }
-  async function initGestaoOperacional(){ try{ $('#operacao-error')?.classList.add('d-none'); await Promise.allSettled([loadOperacaoDashboard(), loadLotes(), loadLotesSelect(), loadLogs()]); $('#lastUpdated').textContent=new Date().toLocaleString('pt-BR'); }catch(err){ showOperationError(err.endpoint, err); } }
 
+  let dashboard = {};
+  let team = [];
+  let lots = [];
+  let imports = [];
 
-  async function gestaoApi(path, opts={}){ const res=await fetch(`/api/gestao/${path}`, opts); const body=await res.json().catch(()=>null); if(!res.ok || body?.success===false || body?.ok===false){ throw Object.assign(new Error(body?.message||body?.error?.message||`Falha HTTP ${res.status}`),{status:res.status,body,endpoint:`/api/gestao/${path}`}); } return body.data || body; }
-  function maskCpf(v){ const d=String(v||'').replace(/\D/g,''); return d.length===11?`${d.slice(0,3)}.${d.slice(3,6)}.${d.slice(6,9)}-${d.slice(9)}`:fmt(v); }
-  function maskPhone(v){ const d=String(v||'').replace(/\D/g,''); return d.length>=10?`(${d.slice(0,2)}) ${d.slice(2,-4)}-${d.slice(-4)}`:fmt(v); }
-  async function buscarLead(q){ const d=await gestaoApi(`leads/buscar?q=${encodeURIComponent(q)}`); const items=d.items||[]; $('#leadEmpty')?.classList.toggle('d-none', items.length>0); $('#leadResults').innerHTML=items.map(r=>`<button class="btn btn-outline-primary w-100 text-start mb-2" data-lead-sk="${esc(r.sk_pessoa)}">${esc(r.nome||'Sem nome')}<br><small>${esc(r.sk_pessoa)} • ${esc(maskCpf(r.cpf))}</small></button>`).join('') || ''; if(items[0]) await carregarLead(items[0]); }
-  async function carregarLead(lead){ const fields=['sk_pessoa','nome','cpf','celular','email','curso','polo','campanha','tipo_disparo','consultor_disparo','status','flag_matriculado','data_inscricao','data_disparo']; $('#leadMainCards').innerHTML=fields.map(k=>`<article class="kpi-card"><span>${esc(k)}</span><strong>${esc(k==='cpf'?maskCpf(lead[k]):k==='celular'?maskPhone(lead[k]):fmt(lead[k]))}</strong></article>`).join(''); const sk=lead.sk_pessoa; const [lotes,timeline,eventos]=await Promise.all([gestaoApi(`leads/${encodeURIComponent(sk)}/lotes`),gestaoApi(`leads/${encodeURIComponent(sk)}/timeline`),gestaoApi(`leads/${encodeURIComponent(sk)}/eventos`)]); rows('leadLotesTable', lotes.items||[], ['lote_id','nome_lote','status_atendimento','retorno','positivo','negativo','matriculado','data_exportacao','data_disparo','data_importacao_retorno','ultimo_evento','ultimo_evento_em','ultimo_evento_por']); $('#leadTimeline').innerHTML=(timeline.items||[]).map(e=>`<div class="p-2 border-bottom"><strong>${esc(e.tipo_evento||e.evento||e.status||'Evento')}</strong><br><small>${esc(fmt(e.created_at))} • ${esc(fmt(e.usuario||e.criado_por))}</small><p class="mb-0">${esc(e.descricao||e.observacao||'')}</p></div>`).join('') || '<div class="empty-state">Sem timeline.</div>'; $('#leadEventos').innerHTML=(eventos.items||[]).map(e=>`<div class="p-2 border-bottom"><strong>${esc(e.tipo_evento||'Evento')}</strong><br><small>${esc(fmt(e.created_at))} • ${esc(fmt(e.usuario))}</small><p class="mb-0">${esc(e.descricao||'')}</p></div>`).join('') || '<div class="empty-state">Sem eventos técnicos.</div>'; }
-  async function loadUsuarios(){ const [users, perfis]=await Promise.all([gestaoApi('usuarios'), gestaoApi('perfis')]); const sel=$('#usuarioPerfilSelect'); if(sel) sel.innerHTML=(perfis||[]).map(p=>`<option value="${esc(p.perfil_id||p.codigo_perfil||p.nome)}">${esc(p.codigo_perfil||p.nome||p.perfil_id)}</option>`).join(''); const action=r=>`<button class="btn btn-outline-primary btn-sm" data-user-edit="${esc(r.usuario_id)}">Editar</button> <button class="btn btn-outline-success btn-sm" data-user-activate="${esc(r.usuario_id)}">Ativar</button> <button class="btn btn-outline-danger btn-sm" data-user-deactivate="${esc(r.usuario_id)}">Desativar</button> <button class="btn btn-outline-warning btn-sm" data-user-reset="${esc(r.usuario_id)}">Reset senha</button> <button class="btn btn-outline-secondary btn-sm" data-user-audit="${esc(r.usuario_id)}">Auditoria</button>`; rows('usuariosTable', users||[], ['nome','email',r=>r.perfil||r.codigo_perfil||r.perfil_id,'ativo','status_usuario','primeiro_acesso','ultimo_login',action]); }
-  let usuarioSaving=false;
-  async function salvarUsuario(){ if(usuarioSaving) return; usuarioSaving=true; const form=$('#usuarioForm'); try{ const payload=payloadFromForm(form); payload.ativo=form?.ativo?.checked; if(payload.senha){ payload.senha_temporaria=payload.senha; delete payload.senha; } const id=payload.usuario_id; delete payload.usuario_id; const res=await fetch(`/api/gestao/${id?`usuarios/${encodeURIComponent(id)}`:'usuarios'}`,{method:id?'PUT':'POST',headers:{'Accept':'application/json','Content-Type':'application/json'},body:JSON.stringify(payload)}); const json=await res.json().catch(()=>null); if(!res.ok || !json || json.success!==true){ showToast(json?.message || `Falha HTTP ${res.status}`,'error'); console.error('Erro ao salvar usuário',{status:res.status,response:json}); return; } showToast(json.message || 'Usuário salvo.','success'); form.reset(); form.ativo.checked=true; await loadUsuarios(); } finally { usuarioSaving=false; } }
-  async function acaoUsuario(id, action){ await gestaoApi(`usuarios/${encodeURIComponent(id)}/${action}`,{method:'POST',headers:{'Accept':'application/json','Content-Type':'application/json'},body:'{}'}); showToast('Ação executada.','success'); await loadUsuarios(); }
-  async function auditoriaUsuario(id){ const d=await gestaoApi(`usuarios/${encodeURIComponent(id)}/auditoria`); $('#usuarioAuditoria').innerHTML=(d||[]).map(a=>`<div class="p-2 border-bottom"><strong>${esc(a.acao||a.tipo_acao)}</strong><br><small>${esc(fmt(a.created_at))} • ${esc(fmt(a.usuario||a.autor))}</small><p class="mb-0">${esc(a.detalhes||'')}</p></div>`).join('') || '<div class="empty-state">Sem auditoria.</div>'; }
+  async function fetchJson(url, options = {}) {
+    const response = await fetch(url, {credentials:'same-origin', headers:{Accept:'application/json', ...(options.headers || {})}, ...options});
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok || body?.ok === false || body?.success === false) {
+      throw new Error(body?.error?.message || body?.message || `Falha HTTP ${response.status}`);
+    }
+    return body.data || body;
+  }
 
-  document.addEventListener('DOMContentLoaded',()=>{ if(!$('#gestaoModuleNav')) return; if(!can('leads:import')) $$('[data-module-target=importar-novos], #mod-importar-novos').forEach(el=>el.remove()); if(!can('lotes:create')) $$('[data-module-target=exportar-lote], #mod-exportar-lote').forEach(el=>el.remove()); if(!can('retorno:import')) $$('[data-module-target=importar-resultado], #mod-importar-resultado').forEach(el=>el.remove()); if(!can('usuarios:manage')) $$('[data-module-target=usuarios], #mod-usuarios').forEach(el=>el.remove()); if(!can('logs:view')) $$('[data-module-target=logs], #mod-logs').forEach(el=>el.remove()); initGestaoOperacional(); document.addEventListener('click', async e=>{ const nav=e.target.closest('[data-module-target]'); if(nav){ switchGestaoModule(nav.dataset.moduleTarget); return; } try{ const finish=e.target.closest('[data-finish]'); const cancel=e.target.closest('[data-cancel]'); const detail=e.target.closest('[data-detail]'); const marcar=e.target.closest('[data-marcar-disparado]'); const st=e.target.closest('[data-status]'); if(finish){ const ok=await confirmAction({title:'Finalizar lote', body:'Confirma finalizar este lote? Essa ação encerra o fluxo operacional.', confirmText:'Finalizar lote', variant:'primary'}); if(!ok) return; await opFetch(`lotes/${finish.dataset.finish}/finish`,{method:'POST',body:'{}'}); await loadLotes(); await loadOperacaoDashboard(); showToast('Lote finalizado com sucesso.','success'); } if(cancel){ const ok=await confirmAction({title:'Cancelar lote', body:'Confirma cancelar este lote? Use apenas quando o disparo não seguirá.', confirmText:'Cancelar lote', variant:'danger'}); if(!ok) return; await opFetch(`lotes/${cancel.dataset.cancel}/cancel`,{method:'POST',body:'{}'}); await loadLotes(); await loadOperacaoDashboard(); showToast('Lote cancelado.','success'); } if(detail) await showDetail(detail.dataset.detail); if(marcar){ const ok=await confirmAction({title:'Marcar lote como disparado', body:'Confirma que o CSV deste lote já foi enviado para disparo externo?', confirmText:'Marcar como disparado', variant:'success'}); if(!ok) return; setLoading(marcar,true); try{ await marcarLoteDisparado(marcar.dataset.marcarDisparado); } finally { setLoading(marcar,false); } } const leadBtn=e.target.closest('[data-lead-sk]'); if(leadBtn){ const found=[...document.querySelectorAll('[data-lead-sk]')].find(b=>b.dataset.leadSk===leadBtn.dataset.leadSk); await buscarLead(leadBtn.dataset.leadSk); } const ua=e.target.closest('[data-user-activate]'); const ud=e.target.closest('[data-user-deactivate]'); const ur=e.target.closest('[data-user-reset]'); const au=e.target.closest('[data-user-audit]'); if(ua) await acaoUsuario(ua.dataset.userActivate,'ativar'); if(ud) await acaoUsuario(ud.dataset.userDeactivate,'desativar'); if(ur) await acaoUsuario(ur.dataset.userReset,'resetar-senha'); if(au) await auditoriaUsuario(au.dataset.userAudit); const save=e.target.closest('[data-save-lead]'); const loteStatus=e.target.closest('[data-lote-status]'); const openLead=e.target.closest('[data-open-lead]'); if(openLead) await abrirLeadDrawer(openLead.dataset.openLead); if(save){ const [lote,sk]=save.dataset.saveLead.split(':'); await salvarLeadLote(lote,sk); } if(loteStatus){ await salvarLeadLote(loteStatus.dataset.lote,loteStatus.dataset.sk,loteStatus.dataset.loteStatus); } if(st){ const obs=$(`[data-obs="${CSS.escape(st.dataset.lote)}:${CSS.escape(st.dataset.sk)}"]`)?.value||''; await updateLeadStatus(st.dataset.sk,{lote_id:st.dataset.lote,status_atendimento:st.dataset.status,observacao:obs}); await loadMeusLeads(); await loadOperacaoDashboard(); } }catch(err){ showOperationError(err.endpoint,err); showToast(err.message,'error'); } }); $$('[data-log-tab]').forEach(btn=>btn.addEventListener('click', e=>{ activeLogTab=e.currentTarget.dataset.logTab; logsOffset=0; $$('[data-log-tab]').forEach(b=>b.classList.toggle('active', b===e.currentTarget)); loadLogs().catch(err=>showOperationError(err.endpoint,err)); })); $('#logsFilters')?.addEventListener('submit', e=>{ e.preventDefault(); logsOffset=0; loadLogs().catch(err=>showOperationError(err.endpoint,err)); }); $('#btnLogsClear')?.addEventListener('click', e=>{ e.preventDefault(); $('#logsFilters')?.reset(); logsOffset=0; loadLogs().catch(err=>showOperationError(err.endpoint,err)); }); $('#btnLogsRefresh')?.addEventListener('click', e=>{ e.preventDefault(); loadLogs().catch(err=>showOperationError(err.endpoint,err)); }); $('#btnLogsPrev')?.addEventListener('click', e=>{ e.preventDefault(); logsOffset=Math.max(0, logsOffset-logsLimit); loadLogs().catch(err=>showOperationError(err.endpoint,err)); }); $('#btnLogsNext')?.addEventListener('click', e=>{ e.preventDefault(); logsOffset+=logsLimit; loadLogs().catch(err=>showOperationError(err.endpoint,err)); }); document.addEventListener('click', e=>{ const view=e.target.closest('[data-payload]'); const copy=e.target.closest('[data-copy-payload]'); if(view) showPayload(view.dataset.payload); if(copy){ navigator.clipboard?.writeText(copy.dataset.copyPayload||''); showToast('Payload copiado.','success'); } }); $('#btnCopyPayloadModal')?.addEventListener('click', ()=>{ navigator.clipboard?.writeText(lastPayloadText||''); showToast('Payload copiado.','success'); }); $('#btnOpRefresh')?.addEventListener('click', initGestaoOperacional); $('#btnOpPreview')?.addEventListener('click', e=>{ setLoading(e.currentTarget,true); loadPreviewProximoLote().catch(err=>showOperationError(err.endpoint,err)).finally(()=>setLoading(e.currentTarget,false)); }); $('#opExportarForm')?.addEventListener('submit', e=>{ e.preventDefault(); exportarProximoLote().catch(err=>{ showOperationError(err.endpoint,err); $('#opExportarMsg').innerHTML=`<div class="alert alert-danger">${esc(err.message)}</div>`; }); }); $('#opImportarDisparadoForm')?.addEventListener('submit', e=>{ e.preventDefault(); importarLoteDisparado().catch(err=>{showOperationError(err.endpoint,err); $('#opImportarDisparadoMsg').innerHTML=`<div class="alert alert-danger">${esc(err.message)}</div>`;}); }); $('#leadSearchForm')?.addEventListener('submit', e=>{ e.preventDefault(); buscarLead(new FormData(e.currentTarget).get('q')).catch(err=>{showOperationError(err.endpoint,err);showToast(err.message,'error');}); }); $('#usuarioForm')?.addEventListener('submit', e=>{ e.preventDefault(); salvarUsuario().catch(err=>{showOperationError(err.endpoint,err);showToast(err.message,'error');}); }); $('#opImportarNovosForm')?.addEventListener('submit', e=>{ e.preventDefault(); importarNovosLeads().catch(err=>{showOperationError(err.endpoint,err); $('#opImportarNovosMsg').innerHTML=`<div class="alert alert-danger">${esc(err.message)}</div>`;}); }); $('#opMeusFilters')?.addEventListener('submit', e=>{ e.preventDefault(); loadMeusLeads().catch(err=>showOperationError(err.endpoint,err)); }); $('#opConsultoresFilters')?.addEventListener('submit', e=>{ e.preventDefault(); loadConsultores().catch(err=>showOperationError(err.endpoint,err)); }); $('#opLoteAtualFilters')?.addEventListener('submit', e=>{ e.preventDefault(); loadLoteAtual().catch(err=>showOperationError(err.endpoint,err)); }); $('#evolucaoLeadFilters')?.addEventListener('submit', e=>{ e.preventDefault(); loadEvolucao().catch(err=>showOperationError(err.endpoint,err)); }); $('#btnMeusLeads')?.addEventListener('click', e=>{ e.preventDefault(); loadLoteAtual(true).catch(err=>showOperationError(err.endpoint,err)); }); });
-  Object.assign(window,{initGestaoOperacional,switchGestaoModule,loadOperacaoDashboard,loadLotesSelect,loadPreviewProximoLote,exportarProximoLote,importarLoteDisparado,importarNovosLeads,loadLotes,loadLoteAtual,loadConsultores,marcarLoteDisparado,loadMeusLeads,updateLeadStatus,loadPerformance,loadEvolucao,loadLogs,showOperationError,showToast,setLoading,confirmAction});
+  function showError(error) {
+    const box = $('#globalError');
+    if (!box) return;
+    box.textContent = error?.message || 'Falha ao carregar os dados da gestão.';
+    box.classList.remove('d-none');
+  }
+
+  function clearError() {
+    $('#globalError')?.classList.add('d-none');
+  }
+
+  function toast(message, type = 'success') {
+    const region = $('#toastRegion');
+    if (!region) return;
+    const el = document.createElement('div');
+    el.className = `alert alert-${type} shadow`;
+    el.textContent = message;
+    region.appendChild(el);
+    setTimeout(() => el.remove(), 4000);
+  }
+
+  function statusBadge(value) {
+    const status = String(value || 'SEM STATUS').toUpperCase();
+    return `<span class="status-badge status-${esc(status.toLowerCase().replace(/[^a-z0-9]+/g, '-'))}">${esc(status)}</span>`;
+  }
+
+  function switchPage(name) {
+    $$('.page').forEach((page) => page.classList.toggle('active', page.id === `page-${name}`));
+    $$('.side-nav button').forEach((button) => button.classList.toggle('active', button.dataset.page === name));
+    if (name === 'imports') loadImports();
+    if (name === 'audit') loadAudit();
+  }
+
+  function renderExecutiveKpis() {
+    const items = [
+      ['Leads em operação', num(dashboard.leads_em_lotes), 'Base atualmente distribuída', 'blue'],
+      ['Pendentes', num(dashboard.leads_pendentes), 'Ainda não trabalhados', 'amber'],
+      ['Em atendimento', num(dashboard.leads_em_atendimento), 'Em tratamento pela equipe', 'cyan'],
+      ['Retornos', num(dashboard.retornos), `Taxa ${pct(dashboard.taxa_retorno_pct)}`, 'violet'],
+      ['Positivos', num(dashboard.positivos), 'Oportunidades qualificadas', 'green'],
+      ['Matrículas', num(dashboard.matriculas), `Conversão ${pct(dashboard.taxa_matricula_pct)}`, 'emerald'],
+      ['Lotes ativos', num(dashboard.lotes_abertos) + num(dashboard.lotes_em_andamento), 'Abertos ou em andamento', 'indigo'],
+      ['Leads disponíveis', num(dashboard.leads_novos_disponiveis) + num(dashboard.leads_redisparo_disponiveis), 'Prontos para novos lotes', 'slate'],
+    ];
+    $('#executiveKpis').innerHTML = items.map(([label, value, help, tone]) => `
+      <article class="executive-card tone-${tone}"><span>${label}</span><strong>${value.toLocaleString('pt-BR')}</strong><small>${help}</small></article>
+    `).join('');
+  }
+
+  function sortedTeam(source = team) {
+    const sort = $('#teamSort')?.value || 'matriculas';
+    const query = ($('#teamSearch')?.value || '').trim().toLowerCase();
+    return source.filter((r) => !query || String(r.consultor_disparo || '').toLowerCase().includes(query))
+      .sort((a, b) => num(b[sort]) - num(a[sort]));
+  }
+
+  function renderTeam() {
+    const data = sortedTeam();
+    const maxMat = Math.max(1, ...data.map((r) => num(r.matriculas)));
+    $('#teamRanking').innerHTML = data.slice(0, 6).map((r, index) => `
+      <div class="ranking-row"><div class="rank-number">${index + 1}</div><div class="rank-main"><strong>${esc(r.consultor_disparo || 'Sem consultor')}</strong><small>${num(r.trabalhados)} trabalhados · ${num(r.pendentes)} pendentes</small><div class="rank-bar"><i style="width:${Math.max(4, num(r.matriculas) / maxMat * 100)}%"></i></div></div><div class="rank-result"><strong>${num(r.matriculas)}</strong><small>matrículas</small></div></div>
+    `).join('') || '<div class="empty-state">Nenhum consultor encontrado.</div>';
+
+    $('#teamCards').innerHTML = data.map((r) => {
+      const total = Math.max(1, num(r.total_leads_em_lote));
+      const worked = num(r.trabalhados);
+      const progress = Math.min(100, num(r.percentual_trabalhado) || worked / total * 100);
+      return `<article class="team-card"><div class="team-card-head"><div><span>Consultor</span><h3>${esc(r.consultor_disparo || 'Sem consultor')}</h3></div><strong>${num(r.matriculas)}<small> matrículas</small></strong></div><div class="team-progress"><div><i style="width:${progress}%"></i></div><small>${pct(progress)} trabalhado</small></div><div class="team-metrics"><div><span>Leads</span><strong>${num(r.total_leads_em_lote)}</strong></div><div><span>Pendentes</span><strong>${num(r.pendentes)}</strong></div><div><span>Retornos</span><strong>${num(r.retornos)}</strong></div><div><span>Conversão</span><strong>${pct(r.taxa_matricula_pct)}</strong></div></div></article>`;
+    }).join('') || '<div class="empty-state">Nenhum consultor encontrado.</div>';
+
+    $('#teamTableBody').innerHTML = data.map((r) => `<tr><td><strong>${esc(r.consultor_disparo || 'Sem consultor')}</strong></td><td>${num(r.total_leads_em_lote)}</td><td>${num(r.trabalhados)}</td><td>${num(r.pendentes)}</td><td>${num(r.em_atendimento)}</td><td>${num(r.retornos)}</td><td>${num(r.positivos)}</td><td>${num(r.negativos)}</td><td><strong>${num(r.matriculas)}</strong></td><td>${pct(r.taxa_retorno_pct)}</td><td>${pct(r.taxa_matricula_pct)}</td><td>${fmtDate(r.ultima_movimentacao)}</td></tr>`).join('') || '<tr><td colspan="12" class="empty-cell">Nenhum consultor encontrado.</td></tr>';
+  }
+
+  function renderManagementAlerts() {
+    const alerts = [];
+    if (num(dashboard.leads_pendentes) > 0) alerts.push(['warning', `${num(dashboard.leads_pendentes)} leads ainda estão pendentes.`, 'Verifique a distribuição e os consultores com maior fila.']);
+    if (num(dashboard.lotes_abertos) > 0) alerts.push(['info', `${num(dashboard.lotes_abertos)} lote(s) ainda estão abertos.`, 'Confirme se precisam ser marcados como disparados.']);
+    if (num(dashboard.lotes_em_andamento) > 0) alerts.push(['primary', `${num(dashboard.lotes_em_andamento)} lote(s) estão em andamento.`, 'Acompanhe retorno e produtividade da equipe.']);
+    if (num(dashboard.taxa_matricula_pct) < 2 && num(dashboard.leads_em_lotes) > 0) alerts.push(['danger', `Conversão atual em ${pct(dashboard.taxa_matricula_pct)}.`, 'Analise consultores, campanhas e qualidade dos leads.']);
+    if (!alerts.length) alerts.push(['success', 'Operação sem alertas críticos.', 'Os indicadores estão dentro do esperado.']);
+    $('#managementAlerts').innerHTML = alerts.map(([type, title, text]) => `<div class="management-alert alert-${type}"><i></i><div><strong>${title}</strong><p>${text}</p></div></div>`).join('');
+  }
+
+  function filteredLots() {
+    const query = ($('#lotSearch')?.value || '').trim().toLowerCase();
+    const status = ($('#lotStatus')?.value || '').toUpperCase();
+    return lots.filter((r) => {
+      const text = `${r.nome_lote || ''} ${r.campanha || ''} ${r.consultor_disparo || ''}`.toLowerCase();
+      return (!query || text.includes(query)) && (!status || String(r.status_lote || '').toUpperCase() === status);
+    });
+  }
+
+  function lotRow(r, compact = false) {
+    const conversion = r.taxa_matricula ?? r.taxa_matricula_pct;
+    const cells = `<td><strong>${esc(r.nome_lote || r.lote_id || '—')}</strong></td><td>${esc(r.consultor_disparo || '—')}</td>${compact ? '' : `<td>${esc(r.campanha || '—')}</td><td>${esc(r.tipo_disparo || '—')}</td>`}<td>${statusBadge(r.status_lote)}</td><td>${num(r.quantidade_leads)}</td><td>${num(r.total_retorno)}</td><td>${num(r.total_positivo)}</td>${compact ? '' : `<td>${num(r.total_negativo)}</td>`}<td><strong>${num(r.total_matriculas)}</strong></td><td>${pct(conversion)}</td>${compact ? '' : `<td>${pct(r.taxa_retorno)}</td>`}<td>${compact ? esc(r.proxima_acao || '—') : fmtDate(r.exportado_em)}</td>${compact ? '' : `<td>${esc(r.proxima_acao || '—')}</td>`}`;
+    return `<tr>${cells}</tr>`;
+  }
+
+  function renderLots() {
+    const data = filteredLots();
+    $('#overviewLotsBody').innerHTML = lots.filter((r) => ['ABERTO','EM_ANDAMENTO','IMPORTADO'].includes(String(r.status_lote || '').toUpperCase())).slice(0, 8).map((r) => lotRow(r, true)).join('') || '<tr><td colspan="9" class="empty-cell">Nenhum lote ativo.</td></tr>';
+    $('#lotsTableBody').innerHTML = data.map((r) => `<tr><td><strong>${esc(r.nome_lote || r.lote_id || '—')}</strong></td><td>${esc(r.consultor_disparo || '—')}</td><td>${esc(r.campanha || '—')}</td><td>${esc(r.tipo_disparo || '—')}</td><td>${statusBadge(r.status_lote)}</td><td>${num(r.quantidade_leads)}</td><td>${num(r.total_retorno)}</td><td>${num(r.total_positivo)}</td><td>${num(r.total_negativo)}</td><td><strong>${num(r.total_matriculas)}</strong></td><td>${pct(r.taxa_retorno)}</td><td>${pct(r.taxa_matricula)}</td><td>${fmtDate(r.exportado_em)}</td><td>${esc(r.proxima_acao || '—')}</td></tr>`).join('') || '<tr><td colspan="14" class="empty-cell">Nenhum lote encontrado.</td></tr>';
+  }
+
+  async function loadCore() {
+    clearError();
+    $('#syncDot')?.classList.add('loading');
+    $('#syncText').textContent = 'Atualizando';
+    try {
+      const [d, t, l] = await Promise.all([
+        fetchJson('/api/gestao/operacional/dashboard'),
+        fetchJson('/api/gestao/operacional/consultores'),
+        fetchJson('/api/gestao/operacional/lotes?limit=200'),
+      ]);
+      dashboard = d || {};
+      team = t.items || t.data || [];
+      lots = l.items || l.data || [];
+      renderExecutiveKpis();
+      renderTeam();
+      renderManagementAlerts();
+      renderLots();
+      $('#lastUpdated').textContent = `Atualizado em ${new Date().toLocaleString('pt-BR')}`;
+      $('#syncText').textContent = 'Atualizado';
+    } catch (error) {
+      $('#syncText').textContent = 'Falha';
+      showError(error);
+    } finally {
+      $('#syncDot')?.classList.remove('loading');
+    }
+  }
+
+  async function loadImports() {
+    try {
+      const d = await fetchJson('/api/gestao/logs/importacoes?limit=100&offset=0');
+      imports = d.data || d.items || [];
+      const totals = imports.reduce((a, r) => {
+        a.total += 1; a.recebidas += num(r.linhas_recebidas); a.validas += num(r.linhas_validas); a.rejeitadas += num(r.linhas_rejeitadas); if (String(r.status || '').includes('CONCLUIDO')) a.concluidas += 1; return a;
+      }, {total:0, recebidas:0, validas:0, rejeitadas:0, concluidas:0});
+      $('#importSummary').innerHTML = [['Importações', totals.total], ['Concluídas', totals.concluidas], ['Linhas recebidas', totals.recebidas], ['Linhas válidas', totals.validas], ['Rejeitadas', totals.rejeitadas]].map(([k,v]) => `<div><span>${k}</span><strong>${num(v).toLocaleString('pt-BR')}</strong></div>`).join('');
+      $('#importsTableBody').innerHTML = imports.map((r) => `<tr><td><strong>${esc(r.nome_arquivo || '—')}</strong></td><td>${esc(r.usuario || '—')}</td><td>${statusBadge(r.status)}</td><td>${esc(r.etapa || '—')}</td><td>${num(r.linhas_recebidas)}</td><td>${num(r.linhas_validas)}</td><td>${num(r.linhas_inseridas)}</td><td>${num(r.linhas_atualizadas)}</td><td>${num(r.linhas_rejeitadas)}</td><td>${esc(r.mensagem || '—')}</td><td>${fmtDate(r.criado_em)}</td></tr>`).join('') || '<tr><td colspan="11" class="empty-cell">Nenhuma importação.</td></tr>';
+    } catch (error) { showError(error); }
+  }
+
+  async function uploadFile(event) {
+    event.preventDefault();
+    const form = event.currentTarget;
+    const button = form.querySelector('button');
+    button.disabled = true; button.textContent = 'Importando...';
+    try {
+      const response = await fetch('/api/upload', {method:'POST', body:new FormData(form), credentials:'same-origin', headers:{Accept:'application/json'}});
+      const body = await response.json().catch(() => ({}));
+      if (!response.ok || body?.ok === false) throw new Error(body?.error?.message || body?.error || 'Falha ao importar.');
+      const report = body.report || {};
+      $('#uploadResult').innerHTML = `<div class="alert alert-success"><strong>Importação concluída.</strong><br>Recebidas: ${num(report.linhas_recebidas)} · Processadas: ${num(report.linhas_processadas)} · Rejeitadas: ${num(report.linhas_rejeitadas)}</div>`;
+      form.reset();
+      await Promise.all([loadImports(), loadCore()]);
+      toast('Planilha importada com sucesso.');
+    } catch (error) {
+      $('#uploadResult').innerHTML = `<div class="alert alert-danger">${esc(error.message)}</div>`;
+    } finally { button.disabled = false; button.textContent = 'Importar planilha'; }
+  }
+
+  async function searchLead() {
+    const q = ($('#leadSearch')?.value || '').trim();
+    if (!q) return;
+    $('#leadResults').innerHTML = '<div class="empty-state">Buscando...</div>';
+    try {
+      const d = await fetchJson(`/api/gestao/operacional/leads/buscar?q=${encodeURIComponent(q)}`);
+      const items = d.items || d.data || [];
+      $('#leadResults').innerHTML = items.map((r) => `<article class="lead-card"><div><span>${esc(r.status_atendimento || r.status || 'Lead')}</span><h3>${esc(r.nome || 'Sem nome')}</h3><p>${esc(r.curso || '—')} · ${esc(r.polo || '—')}</p></div><dl><div><dt>CPF</dt><dd>${esc(r.cpf || '—')}</dd></div><div><dt>Celular</dt><dd>${esc(r.celular || '—')}</dd></div><div><dt>Consultor</dt><dd>${esc(r.consultor_disparo || '—')}</dd></div><div><dt>Lote</dt><dd>${esc(r.nome_lote || r.lote_id || '—')}</dd></div></dl></article>`).join('') || '<div class="empty-state">Nenhum lead encontrado.</div>';
+    } catch (error) { $('#leadResults').innerHTML = `<div class="empty-state error">${esc(error.message)}</div>`; }
+  }
+
+  async function loadAudit() {
+    if (!$('#auditTableBody')) return;
+    try {
+      const d = await fetchJson('/api/gestao/logs/auditoria?limit=100&offset=0');
+      const items = d.data || d.items || [];
+      $('#auditTableBody').innerHTML = items.map((r) => `<tr><td>${fmtDate(r.created_at)}</td><td>${esc(r.usuario_email || r.usuario || '—')}</td><td>${esc(r.acao || '—')}</td><td>${esc(r.modulo || '—')}</td><td>${esc(r.entidade || '—')}</td><td>${esc(r.lote_id || '—')}</td><td>${esc(r.sk_pessoa || r.cpf || '—')}</td><td>${esc(r.descricao || '—')}</td></tr>`).join('') || '<tr><td colspan="8" class="empty-cell">Nenhum registro.</td></tr>';
+    } catch (error) { showError(error); }
+  }
+
+  function bind() {
+    $$('.side-nav button').forEach((button) => button.addEventListener('click', () => switchPage(button.dataset.page)));
+    $$('[data-go]').forEach((button) => button.addEventListener('click', () => switchPage(button.dataset.go)));
+    $('#btnRefreshAll')?.addEventListener('click', () => Promise.all([loadCore(), loadImports()]));
+    $('#teamSearch')?.addEventListener('input', renderTeam);
+    $('#teamSort')?.addEventListener('change', renderTeam);
+    $('#lotSearch')?.addEventListener('input', renderLots);
+    $('#lotStatus')?.addEventListener('change', renderLots);
+    $('#uploadForm')?.addEventListener('submit', uploadFile);
+    $('#btnLeadSearch')?.addEventListener('click', searchLead);
+    $('#leadSearch')?.addEventListener('keydown', (e) => { if (e.key === 'Enter') searchLead(); });
+  }
+
+  document.addEventListener('DOMContentLoaded', () => { bind(); loadCore(); });
 })();
