@@ -23,29 +23,47 @@ SELECT
   i.*,
   COALESCE(r.total_rejeicoes_log, 0)::bigint AS total_rejeicoes_log,
   COALESCE(r.motivos_rejeicao, '') AS motivos_rejeicao,
-  COALESCE(s.linhas_pendentes_staging, 0)::bigint AS linhas_pendentes_staging,
+  COALESCE(s.linhas_retidas_staging, 0)::bigint AS linhas_pendentes_staging,
   CASE
-    WHEN COALESCE(s.linhas_pendentes_staging, 0) > 0
-      AND upper(COALESCE(i.status, '')) IN ('CONCLUIDO', 'CONCLUIDO_COM_REJEICOES')
-      THEN 'INCONSISTENTE'
     WHEN upper(COALESCE(i.status, '')) = 'ERRO' THEN 'ERRO'
-    WHEN COALESCE(s.linhas_pendentes_staging, 0) > 0 THEN 'PENDENTE_STAGING'
-    WHEN upper(COALESCE(i.status, '')) IN ('CONCLUIDO', 'CONCLUIDO_COM_REJEICOES') THEN 'CONSOLIDADO'
+    WHEN upper(COALESCE(i.status, '')) IN ('CONCLUIDO', 'CONCLUIDO_COM_REJEICOES')
+      AND COALESCE(i.linhas_validas, 0) > 0
+      THEN 'CONSOLIDADO'
+    WHEN upper(COALESCE(i.status, '')) IN ('CONCLUIDO', 'CONCLUIDO_COM_REJEICOES')
+      AND COALESCE(i.linhas_validas, 0) = 0
+      AND COALESCE(s.linhas_retidas_staging, 0) > 0
+      THEN 'INCONSISTENTE'
+    WHEN COALESCE(s.linhas_retidas_staging, 0) > 0 THEN 'EM_PROCESSAMENTO'
     ELSE upper(COALESCE(i.status, 'PENDENTE'))
   END AS status_pipeline,
   CASE
-    WHEN COALESCE(s.linhas_pendentes_staging, 0) > 0 THEN true
+    WHEN upper(COALESCE(i.status, '')) = 'ERRO' THEN true
+    WHEN upper(COALESCE(i.status, '')) IN ('CONCLUIDO', 'CONCLUIDO_COM_REJEICOES')
+      AND COALESCE(i.linhas_validas, 0) = 0
+      AND COALESCE(s.linhas_retidas_staging, 0) > 0
+      THEN true
     ELSE false
   END AS requer_atencao,
   CASE
-    WHEN COALESCE(s.linhas_pendentes_staging, 0) > 0
-      THEN 'Linhas ainda estão na staging e não chegaram à base real.'
     WHEN upper(COALESCE(i.status, '')) = 'ERRO'
       THEN COALESCE(NULLIF(i.mensagem, ''), 'Falha na importação.')
+    WHEN upper(COALESCE(i.status, '')) IN ('CONCLUIDO', 'CONCLUIDO_COM_REJEICOES')
+      AND COALESCE(i.linhas_validas, 0) > 0
+      AND COALESCE(s.linhas_retidas_staging, 0) > 0
+      THEN 'Importação processada; a staging foi mantida como histórico pelo Supabase.'
+    WHEN upper(COALESCE(i.status, '')) IN ('CONCLUIDO', 'CONCLUIDO_COM_REJEICOES')
+      AND COALESCE(i.linhas_validas, 0) > 0
+      THEN 'Importação consolidada com sucesso.'
+    WHEN COALESCE(s.linhas_retidas_staging, 0) > 0
+      THEN 'Linhas presentes na staging aguardando confirmação de processamento.'
     WHEN COALESCE(r.total_rejeicoes_log, 0) > 0
       THEN 'Importação concluída com rejeições.'
-    ELSE 'Importação consolidada com sucesso.'
-  END AS diagnostico_pipeline
+    ELSE 'Importação registrada.'
+  END AS diagnostico_pipeline,
+  CASE
+    WHEN COALESCE(s.linhas_retidas_staging, 0) > 0 THEN true
+    ELSE false
+  END AS staging_retida
 FROM modelo_estrela.logs_importacoes i
 LEFT JOIN (
   SELECT
@@ -61,7 +79,7 @@ LEFT JOIN (
   GROUP BY upload_id
 ) r ON r.upload_id = i.upload_id
 LEFT JOIN (
-  SELECT upload_id, COUNT(*) AS linhas_pendentes_staging
+  SELECT upload_id, COUNT(*) AS linhas_retidas_staging
   FROM modelo_estrela.stg_leads_site
   WHERE upload_id IS NOT NULL
   GROUP BY upload_id
@@ -72,12 +90,12 @@ SELECT
   COUNT(*)::bigint AS total_importacoes,
   COUNT(*) FILTER (WHERE status_pipeline = 'CONSOLIDADO')::bigint AS consolidadas,
   COUNT(*) FILTER (WHERE status_pipeline = 'INCONSISTENTE')::bigint AS inconsistentes,
-  COUNT(*) FILTER (WHERE status_pipeline = 'PENDENTE_STAGING')::bigint AS pendentes_staging,
+  COUNT(*) FILTER (WHERE status_pipeline = 'EM_PROCESSAMENTO')::bigint AS em_processamento,
   COUNT(*) FILTER (WHERE status_pipeline = 'ERRO')::bigint AS com_erro,
   COALESCE(SUM(linhas_recebidas), 0)::bigint AS linhas_recebidas,
   COALESCE(SUM(linhas_validas), 0)::bigint AS linhas_validas,
   COALESCE(SUM(linhas_rejeitadas), 0)::bigint AS linhas_rejeitadas,
-  COALESCE(SUM(linhas_pendentes_staging), 0)::bigint AS linhas_pendentes_staging,
+  COALESCE(SUM(linhas_pendentes_staging), 0)::bigint AS linhas_retidas_staging,
   MAX(criado_em) AS ultima_importacao
 FROM modelo_estrela.vw_historico_importacoes;
 
