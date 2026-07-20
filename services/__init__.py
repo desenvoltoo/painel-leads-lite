@@ -14,7 +14,7 @@ from .upload_pipeline import process_upload_dataframe
 
 
 # Garante que ``from services.database import process_upload_dataframe`` use
-a# implementação compatível com FUNCTION e PROCEDURE do PostgreSQL.
+# a implementação compatível com FUNCTION e PROCEDURE do PostgreSQL.
 _database.process_upload_dataframe = process_upload_dataframe
 
 
