@@ -110,8 +110,10 @@ def _startup_error_wsgi_app(payload: Dict[str, Any]) -> Callable:
 
 try:
     from app import create_app
+    from upload_preview_routes import register_upload_preview_routes
 
     application = create_app()
+    register_upload_preview_routes(application)
 except Exception as exc:
     log_startup_failure(exc)
     diagnostic_payload = build_error_payload(
