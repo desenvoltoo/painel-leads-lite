@@ -4,18 +4,57 @@
   const originalFetch = window.fetch.bind(window);
   let lastUploadError = null;
 
+  function asText(value, fallback = '') {
+    if (typeof value === 'string') return value;
+    if (value === null || value === undefined) return fallback;
+    try {
+      return JSON.stringify(value);
+    } catch (_) {
+      return String(value);
+    }
+  }
+
   function extractMessage(body, status) {
     const error = body?.error;
     const details = error?.details || body?.details;
     const detailText = Array.isArray(details)
-      ? details.filter(Boolean).join(' · ')
+      ? details.filter(Boolean).map((item) => asText(item)).join(' · ')
       : typeof details === 'string'
         ? details
-        : details?.message || details?.detail || details?.hint || '';
-    const base = error?.message || (typeof error === 'string' ? error : '') || body?.message || `Falha HTTP ${status}`;
-    const correlationId = body?.correlationId || error?.correlationId || '';
+        : asText(details?.message || details?.detail || details?.hint || '');
+
+    const base = asText(
+      error?.message ||
+      (typeof error === 'string' ? error : '') ||
+      body?.message ||
+      `Falha HTTP ${status}`,
+      `Falha HTTP ${status}`
+    );
+
+    const correlationId = asText(
+      body?.correlationId || error?.correlationId || '',
+      ''
+    );
+
+    const code = asText(
+      body?.code || error?.code || body?.error_type || `HTTP_${status}`,
+      `HTTP_${status}`
+    );
+
+    const message = detailText && !base.includes(detailText)
+      ? `${base} Detalhe: ${detailText}`
+      : base;
+
+    const formattedError = [
+      code ? `[${code}]` : '',
+      message,
+      correlationId ? `Código de correlação: ${correlationId}` : '',
+    ].filter(Boolean).join(' ');
+
     return {
-      message: detailText && !String(base).includes(detailText) ? `${base} Detalhe: ${detailText}` : base,
+      code: code || `HTTP_${status}`,
+      message: message || `Falha HTTP ${status}`,
+      formattedError: formattedError || `Falha HTTP ${status}`,
       correlationId,
     };
   }
@@ -29,18 +68,23 @@
       try {
         const body = await response.clone().json();
         lastUploadError = extractMessage(body, response.status);
-        window.__LAST_UPLOAD_ERROR__ = lastUploadError;
       } catch (_) {
-        lastUploadError = {message: `Falha HTTP ${response.status}`, correlationId: ''};
+        lastUploadError = {
+          code: `HTTP_${response.status}`,
+          message: `Falha HTTP ${response.status}`,
+          formattedError: `Falha HTTP ${response.status}`,
+          correlationId: '',
+        };
       }
+
+      window.__LAST_UPLOAD_ERROR__ = lastUploadError;
 
       setTimeout(() => {
         const statusBox = document.querySelector('#uploadStatus');
         if (!statusBox || !lastUploadError) return;
-        const code = lastUploadError.correlationId ? ` Código: ${lastUploadError.correlationId}` : '';
-        statusBox.textContent = `${lastUploadError.message}${code}`;
+        statusBox.textContent = lastUploadError.formattedError;
         statusBox.className = 'alert alert-danger';
-        statusBox.title = statusBox.textContent;
+        statusBox.title = lastUploadError.formattedError;
       }, 80);
     }
 
