@@ -55,7 +55,7 @@
         <div class="ops-card-head"><div><span class="ops-eyebrow">Entrada de base</span><h2>Importar leads</h2></div><span class="ops-pill">Deduplicação blindada</span></div>
         <div class="ops-upload-layout">
           <label class="upload-dropzone" for="uploadFile" id="uploadDropzone"><span class="upload-icon">⇧</span><span class="upload-title">Selecionar planilha</span><span class="upload-copy">CSV, XLS ou XLSX</span><input id="uploadFile" type="file" accept=".csv,.xlsx,.xls" /><span id="uploadFileName" class="upload-file-name">Nenhum arquivo selecionado</span></label>
-          <div class="ops-upload-side"><div class="field"><label for="uploadSource">Identificação do lote</label><input id="uploadSource" placeholder="Ex.: Captação Julho - EAD" /></div><button id="btnUpload" class="btn btn-primary" type="button">Importar planilha</button><span id="uploadStatus" class="alert alert-info" role="status">Aguardando arquivo.</span></div>
+          <div class="ops-upload-side"><div class="field"><label for="uploadSource">Identificação do lote</label><input id="uploadSource" placeholder="Ex.: Captação Julho - EAD" /></div><button id="btnUpload" class="btn btn-primary" type="button">Importar planilha</button><span id="uploadStatus" class="alert alert-info" role="status" title="Clique em uma mensagem de erro para copiá-la.">Aguardando arquivo.</span></div>
         </div>
       </article>
       <article class="ops-card ops-priority-card"><span class="ops-eyebrow">Critério da fila</span><h2>Ordem operacional</h2><ol class="priority-list"><li><strong>1</strong><span>Sem data de disparo</span></li><li><strong>2</strong><span>Inscrição mais recente</span></li><li><strong>3</strong><span>Atualização mais recente</span></li></ol><div class="priority-summary"><span>Prontos nesta página</span><strong id="pageReadyCount">0</strong></div></article>
@@ -93,6 +93,7 @@
 
   <script src="https://cdn.jsdelivr.net/npm/tom-select@2.2.2/dist/js/tom-select.complete.min.js"></script>
   <script>window.__TOMSELECT_PLUGINS__={checkbox:"checkbox_options",remove_button:"remove_button",clear_button:"clear_button"};</script>
+  <script src="{{ url_for('static', filename='js/upload-diagnostics.js', v=asset_version) }}"></script>
   <script src="{{ url_for('static', filename='js/app.js', v=asset_version) }}"></script>
   <script src="{{ url_for('static', filename='js/dashboard-v2.js', v=asset_version) }}"></script>
 </body>
