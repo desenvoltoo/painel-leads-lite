@@ -7,6 +7,7 @@ garante que a rota seja adicionada quando a instância Flask for criada.
 """
 from __future__ import annotations
 
+import importlib
 import logging
 
 logger = logging.getLogger(__name__)
@@ -196,5 +197,15 @@ def _install_flask_extension() -> None:
     logger.info("Extensão Flask de KPIs educacionais preparada.")
 
 
+def _load_upload_preview_extension() -> None:
+    """Carrega usercustomize explicitamente; em containers root ele não é automático."""
+    try:
+        importlib.import_module("usercustomize")
+        logger.info("Extensão de prévia de upload carregada explicitamente.")
+    except Exception:
+        logger.exception("Não foi possível carregar usercustomize para a prévia de upload.")
+
+
 _install_database_overrides()
 _install_flask_extension()
+_load_upload_preview_extension()
