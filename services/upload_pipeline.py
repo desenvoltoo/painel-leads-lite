@@ -1,10 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Pipeline robusto de upload para PostgreSQL/Supabase.
-
-Compatibiliza instalações em que a rotina de consolidação foi criada como
-FUNCTION ou PROCEDURE. No Supabase, a staging pode ser mantida como histórico;
-por isso, a permanência das linhas não é tratada isoladamente como falha.
-"""
+"""Pipeline robusto de upload para PostgreSQL/Supabase."""
 from __future__ import annotations
 
 import logging
@@ -19,9 +14,10 @@ from . import database as db
 logger = logging.getLogger(__name__)
 
 
-def _routine_candidates() -> list[str]:
+def _routine_candidates(preferred_routine: str | None = None) -> list[str]:
     configured = str(os.getenv("LEADS_IMPORT_ROUTINE") or "").strip()
     names = [
+        str(preferred_routine or "").strip(),
         configured,
         "sp_processar_stg_leads_site",
         "sp_importar_leads_site",
@@ -35,7 +31,8 @@ def _routine_candidates() -> list[str]:
     return result
 
 
-def _find_routine(schema: str) -> Dict[str, Any] | None:
+def _find_routine(schema: str, preferred_routine: str | None = None) -> Dict[str, Any] | None:
+    names = _routine_candidates(preferred_routine)
     rows = db._run_gestao_query(
         """
         SELECT p.proname AS routine_name,
@@ -48,7 +45,7 @@ def _find_routine(schema: str) -> Dict[str, Any] | None:
         ORDER BY array_position(:names, p.proname),
                  CASE WHEN pg_get_function_identity_arguments(p.oid) = 'text' THEN 0 ELSE 1 END
         """,
-        {"schema": schema, "names": _routine_candidates()},
+        {"schema": schema, "names": names},
         "find_import_routine",
     )
     for row in rows or []:
@@ -85,12 +82,10 @@ def _log_snapshot(schema_ident: str, upload_id: str) -> Dict[str, Any]:
 def _execute_routine(schema_ident: str, routine: Dict[str, Any], upload_id: str) -> Dict[str, Any]:
     name = db._safe_ident(str(routine.get("routine_name") or ""))
     prokind = str(routine.get("prokind") or "f").lower()
-
     if prokind == "p":
         with db.get_engine().begin() as conn:
             conn.execute(text(f"CALL {schema_ident}.{name}(:upload_id)"), {"upload_id": upload_id})
         return {}
-
     rows = db._run_gestao_query(
         f"SELECT * FROM {schema_ident}.{name}(:upload_id)",
         {"upload_id": upload_id},
@@ -99,7 +94,12 @@ def _execute_routine(schema_ident: str, routine: Dict[str, Any], upload_id: str)
     return (rows or [{}])[0]
 
 
-def process_upload_dataframe(df, filename: str = "upload", upload_id: str | None = None):
+def process_upload_dataframe(
+    df,
+    filename: str = "upload",
+    upload_id: str | None = None,
+    routine_name: str | None = None,
+):
     schema = str(os.getenv("DB_SCHEMA", db.DB_SCHEMA) or "modelo_estrela").strip()
     schema_ident = db._safe_ident(schema)
     upload_id = upload_id or uuid.uuid4().hex
@@ -132,10 +132,11 @@ def process_upload_dataframe(df, filename: str = "upload", upload_id: str | None
             raise RuntimeError(f"Coluna {required} não existe na staging.")
 
     logger.info(
-        "upload_staging_insert inicio upload_id=%s arquivo=%s linhas=%s",
+        "upload_staging_insert inicio upload_id=%s arquivo=%s linhas=%s rotina_preferida=%s",
         upload_id,
         filename,
         len(prepared),
+        routine_name or "padrao",
     )
     with db.get_engine().begin() as conn:
         prepared.to_sql(
@@ -148,12 +149,12 @@ def process_upload_dataframe(df, filename: str = "upload", upload_id: str | None
             chunksize=1000,
         )
 
-    routine = _find_routine(schema)
+    routine = _find_routine(schema, routine_name)
     if not routine:
-        candidates = ", ".join(_routine_candidates())
+        candidates = ", ".join(_routine_candidates(routine_name))
         raise RuntimeError(
             f"Nenhuma rotina de consolidação encontrada no schema {schema}. "
-            f"Rotinas procuradas: {candidates}. Configure LEADS_IMPORT_ROUTINE se o nome for diferente."
+            f"Rotinas procuradas: {candidates}."
         )
 
     logger.info(
@@ -169,18 +170,11 @@ def process_upload_dataframe(df, filename: str = "upload", upload_id: str | None
     processed = int(
         report.get("linhas_processadas")
         or report.get("linhas_validas")
+        or report.get("linhas_novas")
         or log_row.get("linhas_validas")
         or len(prepared)
     )
     rejected = int(report.get("linhas_rejeitadas") or log_row.get("linhas_rejeitadas") or 0)
-
-    if retained:
-        logger.info(
-            "upload_staging_retained upload_id=%s linhas=%s observacao=%s",
-            upload_id,
-            retained,
-            "A instalação Supabase mantém staging como histórico; isso não indica falha isoladamente.",
-        )
 
     return {
         "job_id": upload_id,
@@ -197,7 +191,16 @@ def process_upload_dataframe(df, filename: str = "upload", upload_id: str | None
             "linhas_gravadas_staging": len(prepared),
             "linhas_pendentes_staging": retained,
             "staging_retida": bool(retained),
-            "duplicados_arquivo": int(report.get("duplicados_arquivo") or log_row.get("duplicados_arquivo") or 0),
+            "linhas_novas": int(report.get("linhas_novas") or 0),
+            "existentes_por_celular": int(report.get("existentes_por_celular") or 0),
+            "existentes_por_cpf": int(report.get("existentes_por_cpf") or 0),
+            "duplicados_arquivo": int(
+                report.get("duplicados_no_arquivo")
+                or report.get("duplicados_arquivo")
+                or log_row.get("duplicados_arquivo")
+                or 0
+            ),
             "duplicados_banco": int(report.get("duplicados_banco") or log_row.get("duplicados_banco") or 0),
+            "mensagem": report.get("mensagem") or "",
         },
     }
