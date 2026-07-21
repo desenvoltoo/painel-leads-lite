@@ -101,11 +101,6 @@ BEGIN
     ranqueada AS (
         SELECT
             e.*,
-            CASE
-                WHEN e.cpf_limpo IS NOT NULL THEN 'CPF:' || e.cpf_limpo
-                WHEN e.celular_limpo IS NOT NULL THEN 'CEL:' || e.celular_limpo
-                ELSE 'SEM_ID:' || e.id::text
-            END AS chave_arquivo,
             ROW_NUMBER() OVER (
                 PARTITION BY
                     CASE
@@ -137,24 +132,17 @@ BEGIN
       INTO v_novas, v_existentes, v_duplicados, v_sem_identificador
       FROM tmp_massivo_classificacao;
 
-    -- Tudo que não for NOVO é marcado como já processado para que a procedure
+    -- Tudo que não for NOVO é marcado como processado para que a procedure
     -- oficial ignore essas linhas. Nenhum dado existente é atualizado.
     UPDATE modelo_estrela.stg_leads_site s
-       SET processado = TRUE,
-           erro = CASE c.classificacao
-               WHEN 'EXISTENTE' THEN 'IGNORADO_JA_EXISTE'
-               WHEN 'DUPLICADO_ARQUIVO' THEN 'IGNORADO_DUPLICADO_ARQUIVO'
-               WHEN 'SEM_IDENTIFICADOR' THEN 'IGNORADO_SEM_IDENTIFICADOR'
-               ELSE s.erro
-           END
+       SET processado = TRUE
       FROM tmp_massivo_classificacao c
      WHERE s.id = c.id
        AND c.classificacao <> 'NOVO';
 
     -- Garante que apenas as linhas classificadas como novas estejam liberadas.
     UPDATE modelo_estrela.stg_leads_site s
-       SET processado = FALSE,
-           erro = NULL
+       SET processado = FALSE
       FROM tmp_massivo_classificacao c
      WHERE s.id = c.id
        AND c.classificacao = 'NOVO';
@@ -188,7 +176,6 @@ BEGIN
         v_rejeitadas
     );
 
-    -- Mantém o log claro para auditoria da carga massiva.
     UPDATE modelo_estrela.logs_importacoes
        SET mensagem = v_mensagem,
            linhas_recebidas = v_total,
