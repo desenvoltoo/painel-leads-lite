@@ -1,8 +1,9 @@
 # -*- coding: utf-8 -*-
 """Extensões operacionais carregadas automaticamente pelo Python.
 
-Mantém a fila de disparos priorizada e registra KPIs educacionais sem alterar o
-contrato das rotas existentes do painel.
+Mantém a fila de disparos priorizada e registra os KPIs educacionais sem
+importar ``app.py`` durante a inicialização. Isso evita importação circular e
+garante que a rota seja adicionada quando a instância Flask for criada.
 """
 from __future__ import annotations
 
@@ -60,21 +61,24 @@ def _install_database_overrides() -> None:
     logger.info("Prioridade operacional da fila instalada.")
 
 
-def _install_app_extensions() -> None:
+def _install_flask_extension() -> None:
     try:
-        import app as app_module
-        from flask import jsonify, request
+        from flask import Flask, jsonify, request
         from services import database as db
     except Exception:
-        logger.exception("Não foi possível carregar o app para registrar extensões.")
+        logger.exception("Não foi possível preparar a extensão Flask de KPIs.")
         return
 
-    flask_app = getattr(app_module, "app", None)
-    if flask_app is None:
+    original_init = Flask.__init__
+    if getattr(original_init, "_education_kpis_patched", False):
         return
 
-    if "api_kpis_education" not in flask_app.view_functions:
-        @flask_app.post("/api/kpis/education", endpoint="api_kpis_education")
+    def patched_init(self, *args, **kwargs):
+        original_init(self, *args, **kwargs)
+
+        if "api_kpis_education" in self.view_functions:
+            return
+
         def api_kpis_education():
             try:
                 filters = request.get_json(silent=True) or {}
@@ -93,19 +97,19 @@ def _install_app_extensions() -> None:
                         COUNT(*)::bigint AS total,
                         COUNT(*) FILTER (WHERE data_disparo IS NULL)::bigint AS fila_disparo,
                         COUNT(*) FILTER (WHERE data_inscricao::date = CURRENT_DATE)::bigint AS inscritos_hoje,
-                        COUNT(*) FILTER (WHERE data_inscricao >= CURRENT_DATE - INTERVAL '6 days')::bigint AS inscritos_7_dias,
+                        COUNT(*) FILTER (WHERE data_inscricao::date >= CURRENT_DATE - 6)::bigint AS inscritos_7_dias,
                         COUNT(*) FILTER (WHERE data_disparo::date = CURRENT_DATE)::bigint AS disparados_hoje,
                         COUNT(*) FILTER (WHERE flag_matriculado IS TRUE)::bigint AS matriculas,
                         COUNT(*) FILTER (
                             WHERE data_disparo IS NULL
-                              AND data_inscricao < CURRENT_DATE - INTERVAL '3 days'
+                              AND data_inscricao::date < CURRENT_DATE - 3
                         )::bigint AS backlog_3_dias,
                         COALESCE(
-                            AVG(EXTRACT(EPOCH FROM (data_disparo - data_inscricao)) / 86400.0)
+                            AVG(EXTRACT(EPOCH FROM (data_disparo - data_inscricao::timestamp)) / 86400.0)
                             FILTER (
                                 WHERE data_disparo IS NOT NULL
                                   AND data_inscricao IS NOT NULL
-                                  AND data_disparo >= data_inscricao
+                                  AND data_disparo >= data_inscricao::timestamp
                             ),
                             0
                         )::numeric(12,2) AS tempo_medio_disparo_dias
@@ -131,10 +135,16 @@ def _install_app_extensions() -> None:
                 )
                 SELECT
                     r.*,
-                    CASE WHEN r.total > 0 THEN ROUND((r.matriculas::numeric * 100) / r.total, 2) ELSE 0 END AS taxa_matricula,
-                    tc.nome AS top_curso_nome, tc.total AS top_curso_total,
-                    tor.nome AS top_origem_nome, tor.total AS top_origem_total,
-                    tm.nome AS top_modalidade_nome, tm.total AS top_modalidade_total
+                    CASE
+                        WHEN r.total > 0 THEN ROUND((r.matriculas::numeric * 100) / r.total, 2)
+                        ELSE 0
+                    END AS taxa_matricula,
+                    tc.nome AS top_curso_nome,
+                    tc.total AS top_curso_total,
+                    tor.nome AS top_origem_nome,
+                    tor.total AS top_origem_total,
+                    tm.nome AS top_modalidade_nome,
+                    tm.total AS top_modalidade_total
                 FROM resumo r
                 LEFT JOIN top_curso tc ON TRUE
                 LEFT JOIN top_origem tor ON TRUE
@@ -156,17 +166,35 @@ def _install_app_extensions() -> None:
                     "backlog_3_dias": int(row.get("backlog_3_dias") or 0),
                     "taxa_matricula": float(row.get("taxa_matricula") or 0),
                     "tempo_medio_disparo_dias": float(row.get("tempo_medio_disparo_dias") or 0),
-                    "top_curso": {"nome": row.get("top_curso_nome"), "total": int(row.get("top_curso_total") or 0)},
-                    "top_origem": {"nome": row.get("top_origem_nome"), "total": int(row.get("top_origem_total") or 0)},
-                    "top_modalidade": {"nome": row.get("top_modalidade_nome"), "total": int(row.get("top_modalidade_total") or 0)},
+                    "top_curso": {
+                        "nome": row.get("top_curso_nome"),
+                        "total": int(row.get("top_curso_total") or 0),
+                    },
+                    "top_origem": {
+                        "nome": row.get("top_origem_nome"),
+                        "total": int(row.get("top_origem_total") or 0),
+                    },
+                    "top_modalidade": {
+                        "nome": row.get("top_modalidade_nome"),
+                        "total": int(row.get("top_modalidade_total") or 0),
+                    },
                 }
                 return jsonify({"ok": True, "data": data})
             except Exception as exc:
                 logger.exception("Falha ao calcular KPIs educacionais.")
                 return jsonify({"ok": False, "error": str(exc)}), 500
 
-    logger.info("Endpoint de KPIs educacionais instalado.")
+        self.add_url_rule(
+            "/api/kpis/education",
+            endpoint="api_kpis_education",
+            view_func=api_kpis_education,
+            methods=["POST"],
+        )
+
+    patched_init._education_kpis_patched = True
+    Flask.__init__ = patched_init
+    logger.info("Extensão Flask de KPIs educacionais preparada.")
 
 
 _install_database_overrides()
-_install_app_extensions()
+_install_flask_extension()
