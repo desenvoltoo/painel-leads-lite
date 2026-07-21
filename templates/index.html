@@ -55,7 +55,19 @@
         <div class="ops-card-head"><div><span class="ops-eyebrow">Entrada de base</span><h2>Importar leads</h2></div><span class="ops-pill">Deduplicação blindada</span></div>
         <div class="ops-upload-layout">
           <label class="upload-dropzone" for="uploadFile" id="uploadDropzone"><span class="upload-icon">⇧</span><span class="upload-title">Selecionar planilha</span><span class="upload-copy">CSV, XLS ou XLSX</span><input id="uploadFile" type="file" accept=".csv,.xlsx,.xls" /><span id="uploadFileName" class="upload-file-name">Nenhum arquivo selecionado</span></label>
-          <div class="ops-upload-side"><div class="field"><label for="uploadSource">Identificação do lote</label><input id="uploadSource" placeholder="Ex.: Captação Julho - EAD" /></div><button id="btnUpload" class="btn btn-primary" type="button">Importar planilha</button><span id="uploadStatus" class="alert alert-info" role="status" title="Clique em uma mensagem de erro para copiá-la.">Aguardando arquivo.</span></div>
+          <div class="ops-upload-side">
+            <div class="field"><label for="uploadSource">Identificação do lote</label><input id="uploadSource" placeholder="Ex.: Captação Julho - EAD" /></div>
+            <div class="field">
+              <label for="uploadMode">Modo da importação</label>
+              <select id="uploadMode">
+                <option value="normal">Atualizar base existente</option>
+                <option value="somente_novos">Somente leads novos</option>
+              </select>
+              <small id="uploadModeHelp">Importação normal: atualiza registros existentes conforme as regras.</small>
+            </div>
+            <button id="btnUpload" class="btn btn-primary" type="button">Importar planilha</button>
+            <span id="uploadStatus" class="alert alert-info" role="status" title="Clique em uma mensagem de erro para copiá-la.">Aguardando arquivo.</span>
+          </div>
         </div>
         <div class="import-policy" role="note" aria-label="Regra da importação">
           <strong>Regra desta importação</strong>
@@ -103,6 +115,7 @@
   <script src="{{ url_for('static', filename='js/upload-diagnostics.js', v=asset_version) }}"></script>
   <script src="{{ url_for('static', filename='js/upload-preview.js', v=asset_version) }}"></script>
   <script src="{{ url_for('static', filename='js/upload-confirmation.js', v=asset_version) }}"></script>
+  <script src="{{ url_for('static', filename='js/upload-mode.js', v=asset_version) }}"></script>
   <script src="{{ url_for('static', filename='js/app.js', v=asset_version) }}"></script>
   <script src="{{ url_for('static', filename='js/upload-result.js', v=asset_version) }}"></script>
   <script src="{{ url_for('static', filename='js/dashboard-v2.js', v=asset_version) }}"></script>
