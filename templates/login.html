@@ -3,52 +3,69 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>Login | Painel Leads Lite</title>
+  <title>Portal Desenvolto | Entrar</title>
   <link rel="stylesheet" href="{{ url_for('static', filename='css/styles.css', v=asset_version) }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/modular-portal.css', v=asset_version) }}">
 </head>
-<body>
-  <div class="release-banner">Versão ativa no servidor: {{ ui_version }}</div>
-
-  <main class="auth-shell">
-    <section class="auth-card">
-      <div class="brand auth-brand">
-        <div class="logo">PL</div>
+<body class="portal-body">
+  <main class="portal-shell">
+    <section class="portal-hero">
+      <div class="portal-brand">
+        <div class="portal-mark">D</div>
         <div>
-          <div class="title">Painel Leads Lite</div>
-          <div class="subtitle">Acesso restrito</div>
+          <strong>Portal Desenvolto</strong>
+          <div style="color:#bfdbfe;font-size:13px">Operação integrada e modular</div>
         </div>
       </div>
 
-      <div class="auth-copy">
-        <h1>Entrar no painel</h1>
-        <p>Use seu e-mail e senha para acessar o painel de gestão.</p>
+      <div style="position:relative;z-index:1">
+        <h1>Todos os seus módulos em um só lugar.</h1>
+        <p>Acesse a gestão de leads e os próximos sistemas usando uma única conta, com permissões independentes por módulo.</p>
+        <div class="portal-badges">
+          <span class="portal-badge">Gestão de Leads</span>
+          <span class="portal-badge">Acesso por perfil</span>
+          <span class="portal-badge">Novos módulos prontos para integrar</span>
+        </div>
       </div>
 
-      <form id="loginForm" class="auth-form" autocomplete="off">
-        <div class="field">
-          <label for="username">E-mail</label>
-          <input id="username" name="username" type="email" placeholder="Digite seu e-mail" required />
-        </div>
+      <small style="position:relative;z-index:1;color:#bfdbfe">Versão {{ ui_version }}</small>
+    </section>
 
-        <div class="field">
-          <label for="password">Senha</label>
-          <input id="password" name="password" type="password" placeholder="Digite sua senha" required />
-        </div>
+    <section class="portal-auth">
+      <div class="portal-card">
+        <h2>Bem-vindo</h2>
+        <p class="lead">Entre com seu e-mail e senha para acessar os módulos liberados para o seu perfil.</p>
 
-        <div id="loginError" class="error auth-error" role="alert" aria-live="polite"></div>
+        <form id="loginForm" autocomplete="off">
+          <div class="portal-field">
+            <label for="username">E-mail</label>
+            <input id="username" name="username" type="email" placeholder="seuemail@empresa.com" required autofocus />
+          </div>
 
-        <button type="submit" class="btn btn-primary auth-submit">Entrar</button>
-      </form>
+          <div class="portal-field">
+            <label for="password">Senha</label>
+            <input id="password" name="password" type="password" placeholder="Digite sua senha" required />
+          </div>
+
+          <div id="loginError" class="portal-error" role="alert" aria-live="polite"></div>
+          <button id="loginButton" type="submit" class="portal-submit">Entrar no portal</button>
+        </form>
+
+        <div class="portal-foot">Acesso restrito. Suas permissões são definidas por usuário e por módulo.</div>
+      </div>
     </section>
   </main>
 
   <script>
     const form = document.getElementById('loginForm');
     const errorEl = document.getElementById('loginError');
+    const button = document.getElementById('loginButton');
 
     form.addEventListener('submit', async (event) => {
       event.preventDefault();
       errorEl.textContent = '';
+      button.disabled = true;
+      button.textContent = 'Entrando...';
 
       const username = document.getElementById('username').value.trim();
       const password = document.getElementById('password').value;
@@ -63,13 +80,16 @@
 
         const data = await res.json();
         if (!res.ok || !data?.ok) {
-          errorEl.textContent = data?.error || 'Não foi possível autenticar. Tente novamente.';
+          errorEl.textContent = data?.error || 'Não foi possível autenticar. Confira os dados e tente novamente.';
           return;
         }
 
         window.location.href = data.redirect_to || '/';
       } catch {
         errorEl.textContent = 'Erro de conexão ao tentar autenticar.';
+      } finally {
+        button.disabled = false;
+        button.textContent = 'Entrar no portal';
       }
     });
   </script>
