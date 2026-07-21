@@ -3,327 +3,97 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>Painel de Leads | Dashboard Comercial</title>
-
+  <title>Central de Disparos | Leads Educação</title>
   <link href="https://cdn.jsdelivr.net/npm/tom-select@2.2.2/dist/css/tom-select.css" rel="stylesheet">
-  <link rel="stylesheet" href="{{ url_for('static', filename='css/styles.css', v=asset_version) }}"> 
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/styles.css', v=asset_version) }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/dashboard-v2.css', v=asset_version) }}">
 </head>
-
-<body>
-  <div class="release-banner">Versão ativa no servidor: {{ ui_version }}</div>
-
-  <header class="topbar">
-    <div class="brand">
-      <div class="logo">PL</div>
-      <div>
-        <div class="title">Painel de Leads</div>
-        <div class="subtitle">Gestão, importação e acompanhamento comercial</div>
-      </div>
+<body class="ops-body">
+  <header class="ops-topbar">
+    <div class="ops-brand">
+      <div class="ops-logo">D</div>
+      <div><div class="ops-brand-title">Central de Disparos</div><div class="ops-brand-subtitle">Operação educacional · fila priorizada</div></div>
     </div>
-
-    <div class="actions">
-      <span class="user-chip">Usuário: {{ current_user or "—" }}</span>
-      <button id="btnReload" class="btn" type="button">Recarregar dados</button>
+    <div class="ops-top-actions">
+      <span class="ops-user">{{ current_user or "Usuário" }}</span>
+      <button id="btnReload" class="btn btn-ghost" type="button">Atualizar</button>
       <button id="btnExport" class="btn btn-ghost" type="button">Exportar XLSX</button>
-      <button id="btnBatchExport" class="btn btn-primary" type="button">Exportar em lote</button>
-      <form action="{{ url_for('logout') }}" method="post" class="logout-form">
-        <button type="submit" class="btn btn-danger">Sair</button>
-      </form>
+      <button id="btnBatchExport" class="btn btn-primary" type="button">Exportar fila</button>
+      <form action="{{ url_for('logout') }}" method="post" class="logout-form"><button type="submit" class="btn btn-danger">Sair</button></form>
     </div>
   </header>
 
-  <main class="container">
-    <section class="dashboard-hero" aria-labelledby="dashboardTitle">
-      <div>
-        <span class="eyebrow">Dashboard comercial</span>
-        <h1 id="dashboardTitle">Painel de Leads</h1>
-        <p>Importe planilhas, acompanhe KPIs e consulte leads consolidados no PostgreSQL com uma experiência mais clara e responsiva.</p>
-      </div>
-      <div class="hero-metadata" aria-label="Resumo técnico">
-        <span>PostgreSQL</span>
-        <span>Modelo Estrela</span>
-        <span>UI {{ ui_version }}</span>
+  <main class="ops-shell">
+    <section class="ops-hero">
+      <div><span class="ops-eyebrow">Prioridade automática</span><h1>Leads sem disparo primeiro</h1><p>A fila considera primeiro quem ainda não recebeu disparo e, em seguida, as inscrições mais recentes.</p></div>
+      <div class="ops-hero-actions">
+        <button id="quickQueue" class="quick-action active" type="button">Fila não disparada</button>
+        <button id="quickToday" class="quick-action" type="button">Inscritos hoje</button>
+        <button id="quickClear" class="quick-action" type="button">Visão geral</button>
       </div>
     </section>
 
-    <section class="kpis" aria-label="Indicadores principais">
-      <div class="kpi kpi-card kpi-blue">
-        <div class="kpi-icon" aria-hidden="true">👥</div>
-        <div>
-          <div class="kpi-label">Total de leads</div>
-          <div class="kpi-value" id="kpiCount">—</div>
-          <div class="kpi-caption">Registros conforme filtros ativos</div>
-        </div>
-      </div>
-      <div class="kpi kpi-card kpi-green">
-        <div class="kpi-icon" aria-hidden="true">🏷️</div>
-        <div>
-          <div class="kpi-label">Status predominante</div>
-          <div class="kpi-value" id="kpiTopStatus">—</div>
-          <div class="kpi-caption">Maior concentração na consulta</div>
-        </div>
-      </div>
-      <div class="kpi kpi-card kpi-amber">
-        <div class="kpi-icon" aria-hidden="true">🧩</div>
-        <div>
-          <div class="kpi-label">Base de dados</div>
-          <div class="kpi-value kpi-value-small">Star Schema</div>
-          <div class="kpi-caption">Dimensões + fato no PostgreSQL</div>
-        </div>
-      </div>
+    <section class="ops-kpis" aria-label="Indicadores da operação">
+      <article class="ops-kpi ops-kpi-primary"><span class="ops-kpi-label">Fila para disparo</span><strong id="kpiQueue">—</strong><small>Leads sem data de disparo</small></article>
+      <article class="ops-kpi"><span class="ops-kpi-label">Inscritos hoje</span><strong id="kpiToday">—</strong><small>Entradas do dia</small></article>
+      <article class="ops-kpi"><span class="ops-kpi-label">Novos em 7 dias</span><strong id="kpi7d">—</strong><small>Demanda recente</small></article>
+      <article class="ops-kpi ops-kpi-success"><span class="ops-kpi-label">Disparados hoje</span><strong id="kpiDispatchedToday">—</strong><small>Produção diária</small></article>
+      <article class="ops-kpi ops-kpi-success"><span class="ops-kpi-label">Matrículas</span><strong id="kpiEnrolled">—</strong><small id="kpiConversion">Conversão: —</small></article>
+      <article class="ops-kpi ops-kpi-warning"><span class="ops-kpi-label">Backlog +3 dias</span><strong id="kpiBacklog">—</strong><small id="kpiAvgDelay">Tempo médio: —</small></article>
     </section>
 
-    <section class="card upload-card" aria-labelledby="uploadTitle">
-      <div class="card-header card-header-row">
-        <div>
-          <span class="eyebrow">Importação</span>
-          <h2 id="uploadTitle">Importar planilha de leads</h2>
-          <p>Envie arquivos <strong>.xlsx</strong>, <strong>.xls</strong> ou <strong>.csv</strong> para processar no PostgreSQL pela rota atual de upload.</p>
+    <section class="ops-insights" aria-label="Leitura educacional">
+      <div><span>Curso com maior volume</span><strong id="topCourse">—</strong></div>
+      <div><span>Origem com maior volume</span><strong id="topOrigin">—</strong></div>
+      <div><span>Modalidade predominante</span><strong id="topModality">—</strong></div>
+      <div><span>Status predominante</span><strong id="kpiTopStatus">—</strong></div>
+      <span id="kpiCount" hidden>—</span>
+    </section>
+
+    <section class="ops-grid-top">
+      <article class="ops-card ops-upload-card">
+        <div class="ops-card-head"><div><span class="ops-eyebrow">Entrada de base</span><h2>Importar leads</h2></div><span class="ops-pill">Deduplicação blindada</span></div>
+        <div class="ops-upload-layout">
+          <label class="upload-dropzone" for="uploadFile" id="uploadDropzone"><span class="upload-icon">⇧</span><span class="upload-title">Selecionar planilha</span><span class="upload-copy">CSV, XLS ou XLSX</span><input id="uploadFile" type="file" accept=".csv,.xlsx,.xls" /><span id="uploadFileName" class="upload-file-name">Nenhum arquivo selecionado</span></label>
+          <div class="ops-upload-side"><div class="field"><label for="uploadSource">Identificação do lote</label><input id="uploadSource" placeholder="Ex.: Captação Julho - EAD" /></div><button id="btnUpload" class="btn btn-primary" type="button">Importar planilha</button><span id="uploadStatus" class="alert alert-info" role="status">Aguardando arquivo.</span></div>
         </div>
-        <div class="header-badge">Stored Procedure</div>
-      </div>
+      </article>
+      <article class="ops-card ops-priority-card"><span class="ops-eyebrow">Critério da fila</span><h2>Ordem operacional</h2><ol class="priority-list"><li><strong>1</strong><span>Sem data de disparo</span></li><li><strong>2</strong><span>Inscrição mais recente</span></li><li><strong>3</strong><span>Atualização mais recente</span></li></ol><div class="priority-summary"><span>Prontos nesta página</span><strong id="pageReadyCount">0</strong></div></article>
+    </section>
 
-      <div class="upload-layout">
-        <label class="upload-dropzone" for="uploadFile" id="uploadDropzone">
-          <span class="upload-icon" aria-hidden="true">⇧</span>
-          <span class="upload-title">Selecionar arquivo</span>
-          <span class="upload-copy">Clique ou arraste uma planilha para esta área.</span>
-          <input id="uploadFile" type="file" accept=".csv,.xlsx,.xls" />
-          <span id="uploadFileName" class="upload-file-name">Nenhum arquivo selecionado</span>
-        </label>
-
-        <div class="upload-side-panel">
-          <div class="field">
-            <label for="uploadSource">Tag de lote (opcional)</label>
-            <input id="uploadSource" placeholder="Ex: Lote_Fevereiro" aria-describedby="uploadSourceHelp" />
-            <small id="uploadSourceHelp" class="muted">Tag reservada para auditoria/versões futuras.</small>
-          </div>
-
-          <div class="upload-note">
-            <strong>Importante:</strong> a tabela staging é temporária e pode ficar vazia após o processamento, pois a procedure limpa os dados ao final.
-          </div>
-
-          <div class="field field-actions upload-actions">
-            <button id="btnUpload" class="btn btn-primary" type="button">Importar planilha</button>
-            <span id="uploadStatus" class="alert alert-info" role="status" aria-live="polite">Aguardando seleção de arquivo.</span>
-          </div>
+    <section class="ops-card ops-filter-card">
+      <button id="toggleFilters" class="ops-filter-toggle" type="button" aria-expanded="true"><span><span class="ops-eyebrow">Segmentação</span><strong>Filtros da fila</strong></span><span id="filterToggleLabel">Recolher</span></button>
+      <div id="filterPanel" class="ops-filter-panel">
+        <div class="ops-search-row">
+          <div class="field ops-search-field"><label for="fBusca">Busca rápida</label><input id="fBusca" placeholder="Nome, CPF, celular ou e-mail" autocomplete="off" /></div>
+          <div class="field"><label for="fDataDisparoSituacao">Situação do disparo</label><select id="fDataDisparoSituacao"><option value="">Todos</option><option value="vazias">Não disparados</option><option value="preenchidas">Já disparados</option></select></div>
+          <div class="field"><label for="fLimit">Leads por página</label><select id="fLimit"><option value="50">50</option><option value="100" selected>100</option><option value="250">250</option><option value="500">500</option></select></div>
+          <div class="ops-filter-actions"><button id="btnApply" class="btn btn-primary" type="button">Aplicar</button><button id="btnClear" class="btn btn-ghost" type="button">Limpar</button></div>
+        </div>
+        <div class="ops-filter-grid">
+          <div class="field"><label for="fStatus">Status</label><select id="fStatus" multiple></select></div><div class="field"><label for="fCurso">Curso</label><select id="fCurso" multiple></select></div><div class="field"><label for="fModalidade">Modalidade</label><select id="fModalidade" multiple></select></div><div class="field"><label for="fTurno">Turno</label><select id="fTurno" multiple></select></div><div class="field"><label for="fPolo">Polo</label><select id="fPolo" multiple></select></div><div class="field"><label for="fOrigem">Origem</label><select id="fOrigem" multiple></select></div>
+          <div class="field"><label for="fConsultorDisparo">Consultor de disparo</label><select id="fConsultorDisparo" multiple></select></div><div class="field"><label for="fConsultorComercial">Consultor comercial</label><select id="fConsultorComercial" multiple></select></div><div class="field"><label for="fCanal">Canal</label><select id="fCanal" multiple></select></div><div class="field"><label for="fCampanha">Campanha</label><select id="fCampanha" multiple></select></div><div class="field"><label for="fTipoDisparo">Tipo de disparo</label><select id="fTipoDisparo" multiple></select></div><div class="field"><label for="fTipoNegocio">Tipo de negócio</label><select id="fTipoNegocio" multiple></select></div>
+        </div>
+        <div class="ops-date-row">
+          <div class="field"><label for="fIni">Inscrição inicial</label><input id="fIni" type="date" /></div><div class="field"><label for="fFim">Inscrição final</label><input id="fFim" type="date" /></div><div class="field"><label for="fMesDisparo">Mês do disparo</label><input id="fMesDisparo" type="month" /></div><div class="field"><label for="fMatriculado">Matriculado</label><select id="fMatriculado"><option value="">Todos</option><option value="true">Sim</option><option value="false">Não</option></select></div><div class="field ops-saved-view"><label for="savedFilterSelect">Visualização salva</label><select id="savedFilterSelect"><option value="">Filtros salvos...</option></select></div><button id="btnSaveFilterView" class="btn btn-ghost" type="button">Salvar visão</button><button id="btnDeleteFilterView" class="btn btn-danger" type="button">Excluir</button>
         </div>
       </div>
     </section>
 
-    <section class="card">
-      <div class="card-header">
-        <span class="eyebrow">Consulta</span>
-        <h2>Filtros dinâmicos</h2>
-        <p>Seleção múltipla com busca. Filtros já alinhados ao novo Modelo Estrela.</p>
-      </div>
-
-      <!-- Linha 1 -->
-      <div class="filters filters-6">
-        <div class="field col-2">
-          <label for="fStatus">Status (Multi)</label>
-          <select id="fStatus" multiple placeholder="Todos os status..."></select>
-        </div>
-
-        <div class="field col-2">
-          <label for="fCurso">Cursos (Multi)</label>
-          <select id="fCurso" multiple placeholder="Todos os cursos..."></select>
-        </div>
-
-        <div class="field col-2">
-          <label for="fModalidade">Modalidade (Multi)</label>
-          <select id="fModalidade" multiple placeholder="Todas as modalidades..."></select>
-        </div>
-
-        <div class="field col-2">
-          <label for="fTurno">Turno (Multi)</label>
-          <select id="fTurno" multiple placeholder="Todos os turnos..."></select>
-        </div>
-
-        <div class="field col-2">
-          <label for="fPolo">Polos (Multi)</label>
-          <select id="fPolo" multiple placeholder="Todos os polos..."></select>
-        </div>
-
-        <div class="field col-2">
-          <label for="fOrigem">Origem (Multi)</label>
-          <select id="fOrigem" multiple placeholder="Todas as origens..."></select>
-        </div>
-      </div>
-
-      <!-- Linha 2 -->
-      <div class="filters filters-6">
-        <div class="field col-2">
-          <label for="fConsultorDisparo">Consultor Disparo (Multi)</label>
-          <select id="fConsultorDisparo" multiple placeholder="Todos os consultores..."></select>
-        </div>
-
-        <div class="field col-2">
-          <label for="fConsultorComercial">Consultor Comercial (Multi)</label>
-          <select id="fConsultorComercial" multiple placeholder="Todos os consultores..."></select>
-        </div>
-
-        <div class="field col-2">
-          <label for="fCanal">Canal (Multi)</label>
-          <select id="fCanal" multiple placeholder="Todos os canais..."></select>
-        </div>
-
-        <div class="field col-2">
-          <label for="fCampanha">Campanha (Multi)</label>
-          <select id="fCampanha" multiple placeholder="Todas as campanhas..."></select>
-        </div>
-
-        <div class="field col-2">
-          <label for="fTipoDisparo">Tipo Disparo (Multi)</label>
-          <select id="fTipoDisparo" multiple placeholder="Todos os tipos..."></select>
-        </div>
-
-        <div class="field col-2">
-          <label for="fTipoNegocio">Tipo Negócio (Multi)</label>
-          <select id="fTipoNegocio" multiple placeholder="Todos os tipos..."></select>
-        </div>
-      </div>
-
-      <!-- Linha 3 -->
-      <div class="filters filters-6">
-        <div class="field col-1">
-          <label for="fIni">Data Inicial</label>
-          <input id="fIni" type="date" />
-        </div>
-
-        <div class="field col-1">
-          <label for="fFim">Data Final</label>
-          <input id="fFim" type="date" />
-        </div>
-
-        <div class="field col-1">
-          <label for="fMesDisparo">Mês do disparo</label>
-          <input id="fMesDisparo" type="month" />
-        </div>
-
-        <div class="field col-1">
-          <label for="fDataDisparoSituacao">Data disparo</label>
-          <select id="fDataDisparoSituacao">
-            <option value="">Todos</option>
-            <option value="vazias">Sem data</option>
-            <option value="preenchidas">Com data</option>
-          </select>
-        </div>
-
-        <div class="field col-1">
-          <label for="fMatriculado">Matriculado</label>
-          <select id="fMatriculado">
-            <option value="">Todos</option>
-            <option value="true">Sim</option>
-            <option value="false">Não</option>
-          </select>
-        </div>
-
-        <div class="field col-1">
-          <label for="fLimit">Limite</label>
-          <input id="fLimit" type="number" min="50" step="50" value="500" />
-        </div>
-
-        <div class="field field-actions col-3">
-          <button id="btnApply" class="btn btn-primary">Filtrar</button>
-          <button id="btnClear" class="btn btn-ghost">Limpar filtros</button>
-          <select id="savedFilterSelect">
-            <option value="">Filtros salvos...</option>
-          </select>
-          <button id="btnSaveFilterView" class="btn">Salvar Filtro</button>
-          <button id="btnDeleteFilterView" class="btn btn-danger">Excluir Filtro</button>
-        </div>
-
-        <div class="field col-5">
-          <label for="fBusca">Busca rápida (Nome / CPF / Celular / Email)</label>
-          <input id="fBusca" placeholder="Ex.: Maria / 12345678900 / 11999999999 / email@..." />
-          <small class="muted">O painel detecta automaticamente o tipo de busca e envia os parâmetros corretos.</small>
-        </div>
-      </div>
-
-      <div class="muted section-hint">
-        Dica: use o campo de busca dentro do dropdown para achar opções rápido e clique em
-        <strong>Selecionar resultados da busca</strong> para marcar tudo de uma vez.
-      </div>
+    <section class="ops-card ops-table-card">
+      <div class="ops-table-head"><div><span class="ops-eyebrow">Fila operacional</span><h2>Leads para disparo</h2><p id="statusLine">Carregando fila...</p></div><div class="ops-legend"><span><i class="legend-dot ready"></i> Pronto para disparo</span><span><i class="legend-dot sent"></i> Já disparado</span></div></div>
+      <div class="table-wrap ops-table-wrap"><table id="tbl"><thead><tr><th>Inscrição</th><th>Candidato</th><th>CPF</th><th>Celular</th><th>Origem</th><th>Polo</th><th>Curso</th><th>Modalidade</th><th>Status</th><th>Matrícula</th><th>Consultor</th><th>Disparo</th><th>Campanha</th><th>Canal</th></tr></thead><tbody></tbody></table></div>
+      <div id="searchLoading" class="loading-row" hidden><div class="spinner"></div><span>Buscando leads...</span></div>
+      <div class="ops-table-footer"><span id="lblRange">Mostrando 0-0 de 0 leads</span><div class="pagination-bar"><button id="btnPrevPage" class="btn btn-ghost" type="button">Anterior</button><span id="lblPage">Página 1</span><button id="btnNextPage" class="btn btn-ghost" type="button">Próxima</button></div><strong id="lblTotal">—</strong></div>
+      <div id="exportProgress" class="export-progress" hidden><div class="export-progress-head"><strong>Exportação</strong><span id="exportProgressText">Aguardando...</span></div><div class="progress-track"><div class="progress-bar" id="exportProgressBar"></div></div></div>
     </section>
 
-    <section class="card">
-      <div class="card-header">
-        <span class="eyebrow">Listagem</span>
-        <h2>Leads consolidados</h2>
-        <p id="statusLine">Aguardando consulta...</p>
-      </div>
-
-      <div class="table-wrap">
-        <table id="tbl">
-          <thead>
-            <tr>
-              <th>Data Inscrição</th>
-              <th>Candidato</th>
-              <th>CPF</th>
-              <th>Celular</th>
-              <th>Origem</th>
-              <th>Polo</th>
-              <th>Curso</th>
-              <th>Modalidade</th>
-              <th>Status</th>
-              <th>Matriculado</th>
-              <th>Consultor Disparo</th>
-              <th>Data Disparo</th>
-              <th>Campanha</th>
-              <th>Canal</th>
-            </tr>
-          </thead>
-          <tbody>
-            <!-- preenchido via JS -->
-          </tbody>
-        </table>
-      </div>
-
-      <div class="muted section-total">
-        <span id="lblRange">Mostrando 0-0 de 0 leads</span>
-        <strong id="lblTotal">—</strong>
-      </div>
-
-      <div class="pagination-bar">
-        <button id="btnPrevPage" class="btn btn-ghost" type="button">Página anterior</button>
-        <span class="muted" id="lblPage">Página 1</span>
-        <button id="btnNextPage" class="btn btn-ghost" type="button">Próxima página</button>
-      </div>
-
-      <div class="loading-row" id="searchLoading" hidden>
-        <div class="spinner"></div>
-        <span>Buscando leads...</span>
-      </div>
-
-      <div class="export-progress" id="exportProgress" hidden>
-        <div class="export-progress-head">
-          <strong>Exportação em lote</strong>
-          <span id="exportProgressText">Aguardando...</span>
-        </div>
-        <div class="progress-track">
-          <div class="progress-bar" id="exportProgressBar"></div>
-        </div>
-      </div>
-    </section>
-
-    <footer class="footer">
-      <span>© Painel Leads Lite - Engenharia de Dados</span>
-      <span class="muted">Infra: PostgreSQL + Modelo Estrela</span>
-      <span class="build-tag">UI {{ ui_version }}</span>
-    </footer>
+    <footer class="ops-footer"><span>Central de Disparos · Educação</span><span>PostgreSQL + Modelo Estrela</span><span>{{ ui_version }}</span></footer>
   </main>
 
   <script src="https://cdn.jsdelivr.net/npm/tom-select@2.2.2/dist/js/tom-select.complete.min.js"></script>
-
-  <script>
-    window.__TOMSELECT_PLUGINS__ = {
-      checkbox: "checkbox_options",
-      remove_button: "remove_button",
-      clear_button: "clear_button"
-    };
-  </script>
-
+  <script>window.__TOMSELECT_PLUGINS__={checkbox:"checkbox_options",remove_button:"remove_button",clear_button:"clear_button"};</script>
   <script src="{{ url_for('static', filename='js/app.js', v=asset_version) }}"></script>
+  <script src="{{ url_for('static', filename='js/dashboard-v2.js', v=asset_version) }}"></script>
 </body>
 </html>
