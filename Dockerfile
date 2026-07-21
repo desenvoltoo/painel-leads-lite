@@ -17,4 +17,4 @@ COPY . /app
 
 EXPOSE 8000
 
-CMD exec gunicorn -c gunicorn.conf.py app:app
+CMD exec gunicorn -c gunicorn.conf.py wsgi:application
