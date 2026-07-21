@@ -57,6 +57,11 @@
           <label class="upload-dropzone" for="uploadFile" id="uploadDropzone"><span class="upload-icon">⇧</span><span class="upload-title">Selecionar planilha</span><span class="upload-copy">CSV, XLS ou XLSX</span><input id="uploadFile" type="file" accept=".csv,.xlsx,.xls" /><span id="uploadFileName" class="upload-file-name">Nenhum arquivo selecionado</span></label>
           <div class="ops-upload-side"><div class="field"><label for="uploadSource">Identificação do lote</label><input id="uploadSource" placeholder="Ex.: Captação Julho - EAD" /></div><button id="btnUpload" class="btn btn-primary" type="button">Importar planilha</button><span id="uploadStatus" class="alert alert-info" role="status" title="Clique em uma mensagem de erro para copiá-la.">Aguardando arquivo.</span></div>
         </div>
+        <div class="import-policy" role="note" aria-label="Regra da importação">
+          <strong>Regra desta importação</strong>
+          <span>Dados pessoais e acadêmicos vazios preservam o valor atual.</span>
+          <span>Campos operacionais presentes no arquivo substituem o banco; célula vazia limpa o campo.</span>
+        </div>
       </article>
       <article class="ops-card ops-priority-card"><span class="ops-eyebrow">Critério da fila</span><h2>Ordem operacional</h2><ol class="priority-list"><li><strong>1</strong><span>Sem data de disparo</span></li><li><strong>2</strong><span>Inscrição mais recente</span></li><li><strong>3</strong><span>Atualização mais recente</span></li></ol><div class="priority-summary"><span>Prontos nesta página</span><strong id="pageReadyCount">0</strong></div></article>
     </section>
