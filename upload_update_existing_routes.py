@@ -2,13 +2,11 @@
 from __future__ import annotations
 
 import os
-import uuid
-from time import perf_counter
 
 from flask import jsonify, request
 
 from app import _read_upload_to_df, _validate_upload_filename
-from services.upload_pipeline import process_upload_dataframe
+from services.upload_async import enqueue_upload_dataframe
 
 
 def register_upload_update_existing_routes(app) -> None:
@@ -21,54 +19,31 @@ def register_upload_update_existing_routes(app) -> None:
 
         file_storage = request.files["file"]
         filename = (file_storage.filename or "").strip()
-        if not filename:
-            return jsonify({"ok": False, "error": {"code": "NO_FILENAME", "message": "Nome do arquivo é obrigatório."}}), 400
-        if not _validate_upload_filename(filename):
-            return jsonify({"ok": False, "error": {"code": "INVALID_FILE", "message": "Formato inválido. Envie CSV, XLSX ou XLS."}}), 400
+        if not filename or not _validate_upload_filename(filename):
+            return jsonify({"ok": False, "error": {"code": "INVALID_FILE", "message": "Envie um arquivo CSV, XLS ou XLSX válido."}}), 400
 
-        started = perf_counter()
-        upload_id = uuid.uuid4().hex
         try:
             df = _read_upload_to_df(file_storage)
-            routine_name = str(
-                os.getenv("LEADS_IMPORT_ROUTINE")
-                or "sp_processar_stg_leads_site"
-            ).strip()
+            routine_name = str(os.getenv("LEADS_IMPORT_ROUTINE") or "sp_processar_stg_leads_site").strip()
+            mass_routine = str(os.getenv("LEADS_IMPORT_ROUTINE_MASSIVA") or "sp_importar_somente_leads_novos").strip()
+            if routine_name == mass_routine:
+                raise RuntimeError("As rotinas dos dois modos não podem ser iguais.")
 
-            if routine_name == str(os.getenv("LEADS_IMPORT_ROUTINE_MASSIVA") or "sp_importar_somente_leads_novos").strip():
-                raise RuntimeError(
-                    "Configuração inválida: a rotina normal não pode ser igual à rotina de somente novos."
-                )
-
-            app.logger.info(
-                "upload_mode_selected upload_id=%s mode=atualizar_existentes routine=%s linhas=%s",
-                upload_id,
-                routine_name,
-                len(df),
-            )
-            result = process_upload_dataframe(
+            result = enqueue_upload_dataframe(
                 df,
                 filename=filename,
-                upload_id=upload_id,
+                mode="ATUALIZAR_EXISTENTES",
                 routine_name=routine_name,
             )
             return jsonify({
                 "ok": True,
                 "mode": "atualizar_existentes",
-                "message": "Carga concluída. Novos registros foram incluídos e existentes foram atualizados.",
-                "duration_s": round(perf_counter() - started, 3),
+                "message": "Arquivo gravado na staging. Atualização iniciada em segundo plano.",
                 **result,
-            }), 200
+            }), 202
         except Exception as exc:
-            app.logger.exception("upload_atualizar_existentes_error upload_id=%s", upload_id)
-            return jsonify({
-                "ok": False,
-                "error": {
-                    "code": exc.__class__.__name__,
-                    "message": "Falha ao atualizar a base existente.",
-                    "details": str(exc),
-                },
-            }), 500
+            app.logger.exception("upload_atualizar_existentes_error")
+            return jsonify({"ok": False, "error": {"code": exc.__class__.__name__, "message": "Falha ao iniciar a atualização da base.", "details": str(exc)}}), 500
 
     app.add_url_rule(
         "/api/upload/atualizar-existentes",
