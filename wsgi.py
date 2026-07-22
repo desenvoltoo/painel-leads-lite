@@ -48,6 +48,10 @@ def _startup_error_wsgi_app(payload: Dict[str, Any]) -> Callable:
 
 
 try:
+    from services.upload_compat import apply_upload_alias_compat
+
+    apply_upload_alias_compat()
+
     from app import create_app
     from upload_preview_routes import register_upload_preview_routes
     from upload_new_only_routes import register_upload_new_only_routes
