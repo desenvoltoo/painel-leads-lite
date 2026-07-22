@@ -2,134 +2,67 @@
   'use strict';
 
   let requestInProgress = false;
-  let progressTimer = null;
-  let progressValue = 0;
   let progressStartedAt = 0;
+  let activeUploadId = '';
 
   function selectedMode() {
-    return document.querySelector('#uploadMode')?.value === 'somente_novos'
-      ? 'somente_novos'
-      : 'normal';
+    return document.querySelector('#uploadMode')?.value === 'somente_novos' ? 'somente_novos' : 'normal';
   }
 
   function endpointForMode() {
-    return selectedMode() === 'somente_novos'
-      ? '/api/upload/somente-novos'
-      : '/api/upload/atualizar-existentes';
+    return selectedMode() === 'somente_novos' ? '/api/upload/somente-novos' : '/api/upload/atualizar-existentes';
   }
 
   function routineLabel() {
-    return selectedMode() === 'somente_novos'
-      ? 'sp_importar_somente_leads_novos'
-      : 'sp_processar_stg_leads_site';
+    return selectedMode() === 'somente_novos' ? 'sp_importar_somente_leads_novos' : 'sp_processar_stg_leads_site';
   }
 
   function setStatus(message, type = 'info') {
     const status = document.querySelector('#uploadStatus');
     if (!status) return;
-    const normalized = type === 'error' ? 'danger' : type;
     status.textContent = message;
-    status.className = `alert alert-${normalized}`;
+    status.className = `alert alert-${type === 'error' ? 'danger' : type}`;
   }
 
   function ensureProgress() {
     let box = document.querySelector('#uploadLiveProgress');
     if (box) return box;
-
     box = document.createElement('div');
     box.id = 'uploadLiveProgress';
     box.className = 'upload-live-progress';
     box.hidden = true;
-    box.innerHTML = `
-      <div class="upload-live-progress-head">
-        <strong id="uploadProgressStage">Preparando importação</strong>
-        <span id="uploadProgressPercent">0%</span>
-      </div>
-      <div class="upload-live-progress-track" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
-        <div id="uploadProgressBar" class="upload-live-progress-bar"></div>
-      </div>
-      <div class="upload-live-progress-meta">
-        <span id="uploadProgressMode">—</span>
-        <span id="uploadProgressElapsed">0s</span>
-      </div>
-    `;
+    box.innerHTML = `<div class="upload-live-progress-head"><strong id="uploadProgressStage">Preparando importação</strong><span id="uploadProgressPercent">0%</span></div><div class="upload-live-progress-track" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><div id="uploadProgressBar" class="upload-live-progress-bar"></div></div><div class="upload-live-progress-meta"><span id="uploadProgressMode">—</span><span id="uploadProgressElapsed">0s</span></div>`;
     document.querySelector('#uploadStatus')?.insertAdjacentElement('afterend', box);
-
     if (!document.querySelector('#uploadProgressStyle')) {
       const style = document.createElement('style');
       style.id = 'uploadProgressStyle';
-      style.textContent = `
-        .upload-live-progress{margin-top:10px;padding:12px;border:1px solid #dbe4f0;border-radius:12px;background:#fff;color:#172033}
-        .upload-live-progress-head,.upload-live-progress-meta{display:flex;justify-content:space-between;gap:12px;align-items:center}
-        .upload-live-progress-head{margin-bottom:8px}.upload-live-progress-head span{font-weight:700;color:#2457c5}
-        .upload-live-progress-track{height:12px;border-radius:999px;background:#e8eef8;overflow:hidden}
-        .upload-live-progress-bar{height:100%;width:0;border-radius:inherit;background:linear-gradient(90deg,#2563eb,#60a5fa);transition:width .45s ease}
-        .upload-live-progress-meta{margin-top:7px;font-size:.78rem;color:#64748b}
-      `;
+      style.textContent = `.upload-live-progress{margin-top:10px;padding:12px;border:1px solid #dbe4f0;border-radius:12px;background:#fff;color:#172033}.upload-live-progress-head,.upload-live-progress-meta{display:flex;justify-content:space-between;gap:12px;align-items:center}.upload-live-progress-head{margin-bottom:8px}.upload-live-progress-head span{font-weight:700;color:#2457c5}.upload-live-progress-track{height:12px;border-radius:999px;background:#e8eef8;overflow:hidden}.upload-live-progress-bar{height:100%;width:0;border-radius:inherit;background:linear-gradient(90deg,#2563eb,#60a5fa);transition:width .4s ease}.upload-live-progress-meta{margin-top:7px;font-size:.78rem;color:#64748b}`;
       document.head.appendChild(style);
     }
     return box;
   }
 
-  function formatElapsed(seconds) {
-    const total = Math.max(0, Math.floor(seconds));
+  function formatElapsed() {
+    const total = Math.max(0, Math.floor((Date.now() - progressStartedAt) / 1000));
     const hours = Math.floor(total / 3600);
     const minutes = Math.floor((total % 3600) / 60);
-    const secs = total % 60;
-    if (hours > 0) return `${hours}h ${String(minutes).padStart(2, '0')}m ${String(secs).padStart(2, '0')}s`;
-    if (minutes > 0) return `${minutes}m ${String(secs).padStart(2, '0')}s`;
-    return `${secs}s`;
+    const seconds = total % 60;
+    if (hours) return `${hours}h ${minutes}m ${String(seconds).padStart(2, '0')}s`;
+    if (minutes) return `${minutes}m ${String(seconds).padStart(2, '0')}s`;
+    return `${seconds}s`;
   }
 
-  function renderProgress(value, stage) {
-    progressValue = Math.max(0, Math.min(100, Math.round(value)));
+  function renderProgress(value, stage, failed = false) {
+    const progress = Math.max(0, Math.min(100, Number(value) || 0));
     const box = ensureProgress();
-    const bar = box.querySelector('#uploadProgressBar');
-    const track = box.querySelector('.upload-live-progress-track');
-    const percent = box.querySelector('#uploadProgressPercent');
-    const stageEl = box.querySelector('#uploadProgressStage');
-    const elapsed = box.querySelector('#uploadProgressElapsed');
-    const mode = box.querySelector('#uploadProgressMode');
     box.hidden = false;
-    if (bar) bar.style.width = `${progressValue}%`;
-    if (track) track.setAttribute('aria-valuenow', String(progressValue));
-    if (percent) percent.textContent = `${progressValue}%`;
-    if (stageEl) stageEl.textContent = stage;
-    if (elapsed) elapsed.textContent = formatElapsed((Date.now() - progressStartedAt) / 1000);
-    if (mode) mode.textContent = `${selectedMode() === 'somente_novos' ? 'Somente novos' : 'Atualizar existentes'} · ${routineLabel()}`;
-  }
-
-  function startProgress() {
-    window.clearInterval(progressTimer);
-    progressStartedAt = Date.now();
-    const bar = ensureProgress().querySelector('#uploadProgressBar');
-    if (bar) bar.style.background = 'linear-gradient(90deg,#2563eb,#60a5fa)';
-    renderProgress(5, 'Validando arquivo');
-    progressTimer = window.setInterval(() => {
-      const elapsed = (Date.now() - progressStartedAt) / 1000;
-      let next = progressValue;
-      let stage = 'Enviando arquivo para staging';
-      if (elapsed < 3) {
-        next = Math.min(25, progressValue + 4);
-      } else if (elapsed < 10) {
-        stage = 'Gravando linhas na staging';
-        next = Math.min(48, progressValue + 2);
-      } else {
-        stage = selectedMode() === 'somente_novos'
-          ? 'Processando somente os leads novos no PostgreSQL'
-          : 'Inserindo novos e atualizando existentes no PostgreSQL';
-        next = Math.min(92, progressValue + (progressValue < 75 ? 1.5 : 0.15));
-      }
-      renderProgress(next, stage);
-    }, 1000);
-  }
-
-  function finishProgress(success, message) {
-    window.clearInterval(progressTimer);
-    progressTimer = null;
-    renderProgress(success ? 100 : progressValue, message);
-    const bar = document.querySelector('#uploadProgressBar');
-    if (bar && !success) bar.style.background = '#dc2626';
+    box.querySelector('#uploadProgressBar').style.width = `${progress}%`;
+    box.querySelector('#uploadProgressBar').style.background = failed ? '#dc2626' : 'linear-gradient(90deg,#2563eb,#60a5fa)';
+    box.querySelector('.upload-live-progress-track').setAttribute('aria-valuenow', String(progress));
+    box.querySelector('#uploadProgressPercent').textContent = `${Math.round(progress)}%`;
+    box.querySelector('#uploadProgressStage').textContent = stage || 'Processando';
+    box.querySelector('#uploadProgressElapsed').textContent = formatElapsed();
+    box.querySelector('#uploadProgressMode').textContent = `${selectedMode() === 'somente_novos' ? 'Somente novos' : 'Atualizar existentes'} · ${routineLabel()}`;
   }
 
   function setLoading(loading) {
@@ -137,116 +70,81 @@
     if (!button) return;
     button.disabled = loading;
     button.classList.toggle('is-loading', loading);
-    if (loading) button.textContent = 'Importando planilha...';
-    else updateModeUi();
-  }
-
-  function updateModeUi() {
-    const mode = selectedMode();
-    const help = document.querySelector('#uploadModeHelp');
-    const button = document.querySelector('#btnUpload');
-
-    if (help) {
-      help.textContent = mode === 'somente_novos'
-        ? 'Executa sp_importar_somente_leads_novos: importa novos e ignora integralmente os existentes.'
-        : 'Executa sp_processar_stg_leads_site: inclui novos e atualiza os registros já existentes.';
-    }
-
-    if (button && !button.classList.contains('is-loading')) {
-      button.textContent = mode === 'somente_novos'
-        ? 'Importar somente novos'
-        : 'Atualizar base existente';
-    }
+    button.textContent = loading ? 'Importação em andamento...' : (selectedMode() === 'somente_novos' ? 'Importar somente novos' : 'Atualizar base existente');
   }
 
   function reportMessage(body) {
     const report = body?.report || {};
-    const received = report.linhas_recebidas ?? 0;
-    const inserted = report.linhas_inseridas ?? report.linhas_novas ?? report.linhas_processadas ?? 0;
-    const ignoredExisting = (report.existentes_por_celular ?? 0) + (report.existentes_por_cpf ?? 0);
-    const duplicates = report.duplicados_arquivo ?? 0;
-    const rejected = report.linhas_rejeitadas ?? 0;
+    return `Concluído. Recebidas: ${report.linhas_recebidas || 0} | Inseridas: ${report.linhas_inseridas || 0} | Ignoradas: ${report.linhas_ignoradas || 0} | Rejeitadas: ${report.linhas_rejeitadas || 0}.`;
+  }
 
-    if (body?.mode === 'somente_novos') {
-      return `Concluído. Recebidas: ${received} | Inseridas: ${inserted} | Existentes ignoradas: ${ignoredExisting} | Duplicadas no arquivo: ${duplicates} | Rejeitadas: ${rejected}.`;
+  async function pollProgress(uploadId) {
+    while (activeUploadId === uploadId) {
+      const response = await fetch(`/api/upload/progresso/${encodeURIComponent(uploadId)}`, {credentials: 'same-origin', cache: 'no-store'});
+      const body = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(body?.error?.message || 'Falha ao consultar o progresso.');
+
+      const stageLabels = {
+        AGUARDANDO: 'Aguardando processamento',
+        GRAVANDO_STAGING: 'Gravando linhas na staging',
+        STAGING_CONCLUIDA: 'Staging concluída',
+        LOCALIZANDO_ROTINA: 'Preparando rotina do banco',
+        EXECUTANDO_SP: selectedMode() === 'somente_novos' ? 'Comparando e inserindo somente novos' : 'Atualizando a base existente',
+        CONCLUIDO: 'Importação concluída',
+        ERRO: 'Importação com erro',
+      };
+      renderProgress(body.progress, stageLabels[body.stage] || body.stage || 'Processando', body.status === 'ERRO');
+
+      if (body.done) {
+        if (!body.ok || body.status === 'ERRO') throw new Error(body.error || body.message || 'Falha na importação.');
+        renderProgress(100, 'Importação concluída');
+        setStatus(reportMessage(body), 'success');
+        activeUploadId = '';
+        window.setTimeout(() => window.location.reload(), 2000);
+        return;
+      }
+      await new Promise(resolve => setTimeout(resolve, 2000));
     }
-    return `Concluído. Recebidas: ${received} | Processadas: ${inserted} | Rejeitadas: ${rejected}.`;
   }
 
   async function executeUpload() {
-    if (requestInProgress) {
-      setStatus('Já existe uma importação em andamento.', 'warning');
-      return;
-    }
-
-    const input = document.querySelector('#uploadFile');
-    const file = input?.files?.[0];
-    if (!file) {
-      setStatus('Selecione um arquivo CSV, XLS ou XLSX.', 'error');
-      return;
-    }
-    if (!/\.(csv|xlsx|xls)$/i.test(file.name || '')) {
-      setStatus('Formato inválido. Envie CSV, XLS ou XLSX.', 'error');
-      return;
-    }
+    if (requestInProgress) return setStatus('Já existe uma importação em andamento.', 'warning');
+    const file = document.querySelector('#uploadFile')?.files?.[0];
+    if (!file) return setStatus('Selecione um arquivo CSV, XLS ou XLSX.', 'error');
 
     requestInProgress = true;
+    progressStartedAt = Date.now();
     setLoading(true);
-    startProgress();
-    setStatus(`Modo selecionado: ${selectedMode() === 'somente_novos' ? 'Somente leads novos' : 'Atualizar base existente'}. Não feche esta página até a conclusão.`, 'info');
+    renderProgress(5, 'Enviando arquivo');
+    setStatus('Enviando arquivo para a staging...', 'info');
 
     const formData = new FormData();
     formData.append('file', file);
+    formData.append('import_mode', selectedMode());
     const source = document.querySelector('#uploadSource')?.value?.trim();
     if (source) formData.append('source', source);
-    formData.append('import_mode', selectedMode());
 
     try {
-      const response = await fetch(endpointForMode(), {
-        method: 'POST',
-        body: formData,
-        credentials: 'same-origin',
-        cache: 'no-store',
-      });
-
-      const raw = await response.text();
-      let body = {};
-      try { body = raw ? JSON.parse(raw) : {}; }
-      catch (_) { body = {message: raw || ''}; }
-
-      if (!response.ok || body?.ok === false) {
-        const error = body?.error;
-        const message = typeof error === 'string'
-          ? error
-          : error?.message || error?.details || body?.message || `Falha no upload (HTTP ${response.status}).`;
-        throw new Error(message);
-      }
-
-      const expectedMode = selectedMode() === 'somente_novos' ? 'somente_novos' : 'atualizar_existentes';
-      if (body?.mode !== expectedMode) {
-        throw new Error(`Resposta inconsistente: esperado modo ${expectedMode}, recebido ${body?.mode || 'não informado'}.`);
-      }
-
-      const message = reportMessage(body);
-      finishProgress(true, 'Importação concluída');
-      setStatus(message, 'success');
-      try {
-        window.dispatchEvent(new CustomEvent('gestao:upload-concluido', {
-          detail: {type: 'upload-concluido', at: new Date().toISOString(), mode: body.mode},
-        }));
-      } catch (_) {}
-      window.setTimeout(() => window.location.reload(), 2500);
+      const response = await fetch(endpointForMode(), {method: 'POST', body: formData, credentials: 'same-origin', cache: 'no-store'});
+      const body = await response.json().catch(() => ({}));
+      if (!response.ok || !body.ok) throw new Error(body?.error?.details || body?.error?.message || body?.message || `Falha HTTP ${response.status}.`);
+      activeUploadId = body.upload_id || body.job_id;
+      if (!activeUploadId) throw new Error('O servidor não retornou o upload_id.');
+      renderProgress(20, 'Staging concluída');
+      setStatus(`Arquivo recebido. Processando em segundo plano: ${activeUploadId}.`, 'info');
+      await pollProgress(activeUploadId);
     } catch (error) {
       console.error('upload_flow_error', error);
-      finishProgress(false, 'Falha na importação');
+      renderProgress(100, 'Importação com erro', true);
       setStatus(error?.message || 'Não foi possível concluir a importação.', 'error');
+      activeUploadId = '';
     } finally {
       requestInProgress = false;
       setLoading(false);
     }
   }
 
-  document.addEventListener('click', (event) => {
+  document.addEventListener('click', event => {
     const button = event.target?.closest?.('#btnUpload');
     if (!button) return;
     event.preventDefault();
@@ -255,19 +153,11 @@
     executeUpload();
   }, true);
 
-  document.addEventListener('change', (event) => {
+  document.addEventListener('change', event => {
     if (event.target?.id !== 'uploadMode') return;
-    updateModeUi();
-    window.dispatchEvent(new CustomEvent('upload:mode-changed', {
-      detail: {mode: selectedMode()},
-    }));
+    setLoading(false);
+    window.dispatchEvent(new CustomEvent('upload:mode-changed', {detail: {mode: selectedMode()}}));
   });
-
-  if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', updateModeUi, {once: true});
-  } else {
-    updateModeUi();
-  }
 
   window.executeLeadsUpload = executeUpload;
 })();
