@@ -53,8 +53,10 @@ try:
     from upload_new_only_routes import register_upload_new_only_routes
     from upload_update_existing_routes import register_upload_update_existing_routes
     from upload_progress_routes import register_upload_progress_routes
+    from institution_routes import register_institution_routes
 
     application = create_app()
+    register_institution_routes(application)
     register_upload_preview_routes(application)
     register_upload_new_only_routes(application)
     register_upload_update_existing_routes(application)
