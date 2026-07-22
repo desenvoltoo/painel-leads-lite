@@ -11,9 +11,30 @@ from typing import Any, Dict
 from sqlalchemy import text
 
 from . import database as db
-from .upload_pipeline import _execute_routine, _find_routine, _log_snapshot, _staging_count
+from .upload_pipeline import _execute_routine, _find_routine
 
 logger = logging.getLogger(__name__)
+
+
+STAGING_COLUMNS = {
+    "anhanguera": {
+        "status_inscricao", "data_inscricao", "origem", "unidade", "tipo_negocio",
+        "curso", "modalidade", "turno", "nome", "cpf", "celular", "email",
+        "data_ultima_acao", "qtd_acionamentos", "status", "data_disparo",
+        "peca_disparo", "texto_disparo", "consultor_disparo", "tipo_disparo",
+        "campanha", "observacao", "data_matricula", "matriculado", "canal",
+        "acao_comercial", "consultor_comercial", "upload_id", "linha_arquivo",
+        "nome_arquivo", "dt_upload",
+    },
+    "unifecaf": {
+        "data_inscricao", "origem", "unidade", "tipo_negocio", "curso",
+        "modalidade", "nome", "cpf", "celular", "email",
+        "data_ultima_interacao", "qtd_acionamentos", "status", "data_disparo",
+        "peca_disparo", "texto_disparo", "consultor_disparo", "tipo_disparo",
+        "campanha", "data_matricula", "matriculado", "consultor_comercial",
+        "observacao", "upload_id", "linha_arquivo", "nome_arquivo",
+    },
+}
 
 
 def _config(institution: str = "anhanguera") -> Dict[str, str]:
@@ -140,6 +161,12 @@ def _prepare_for_unifecaf(prepared):
 def enqueue_upload_dataframe(df, filename: str, mode: str, routine_name: str, institution: str = "anhanguera") -> Dict[str, Any]:
     cfg = _config(institution)
     upload_id = uuid.uuid4().hex
+    started = time.monotonic()
+    logger.info(
+        "upload_stage_prepare_start institution=%s upload_id=%s arquivo=%s linhas_entrada=%s",
+        cfg["institution"], upload_id, filename, len(df),
+    )
+
     prepared = db._prepare_upload_dataframe(df, filename, upload_id)
     if cfg["institution"] == "unifecaf":
         prepared = _prepare_for_unifecaf(prepared)
@@ -147,8 +174,12 @@ def enqueue_upload_dataframe(df, filename: str, mode: str, routine_name: str, in
     if total_rows <= 0:
         raise ValueError("A planilha não possui linhas para importar.")
 
-    stg_cols = set(db._table_columns(cfg["schema"], cfg["staging"]))
-    prepared = prepared[[column for column in prepared.columns if column in stg_cols]]
+    # Evita consulta a information_schema nesta etapa crítica. As colunas são
+    # conhecidas e versionadas junto com cada staging.
+    stg_cols = STAGING_COLUMNS[cfg["institution"]]
+    selected_columns = [column for column in prepared.columns if column in stg_cols]
+    prepared = prepared[selected_columns].copy()
+
     if "upload_id" not in prepared.columns:
         prepared["upload_id"] = upload_id
     if "nome_arquivo" in stg_cols and "nome_arquivo" not in prepared.columns:
@@ -156,12 +187,18 @@ def enqueue_upload_dataframe(df, filename: str, mode: str, routine_name: str, in
     if "linha_arquivo" in stg_cols and "linha_arquivo" not in prepared.columns:
         prepared["linha_arquivo"] = range(2, total_rows + 2)
 
+    logger.info(
+        "upload_stage_columns_ready institution=%s upload_id=%s staging=%s colunas=%s elapsed_s=%.2f",
+        cfg["institution"], upload_id, cfg["staging"], len(prepared.columns), time.monotonic() - started,
+    )
+
     with db.get_engine().begin() as conn:
         conn.execute(text(f"""
             INSERT INTO {cfg['schema_ident']}.{cfg['progress']}
                 (upload_id, modo, rotina, arquivo, status, etapa, linhas_total, progresso)
             VALUES (:upload_id,:modo,:rotina,:arquivo,'STAGING','GRAVANDO_STAGING',:total,10)
         """), {"upload_id": upload_id, "modo": mode, "rotina": routine_name, "arquivo": filename, "total": total_rows})
+
         if cfg["institution"] == "unifecaf":
             conn.execute(text(f"""
                 INSERT INTO {cfg['schema_ident']}.logs_importacoes
@@ -169,12 +206,49 @@ def enqueue_upload_dataframe(df, filename: str, mode: str, routine_name: str, in
                 VALUES (:upload_id,:arquivo,'RECEBIDO','STAGING',:total,:total)
                 ON CONFLICT (upload_id) DO NOTHING
             """), {"upload_id": upload_id, "arquivo": filename, "total": total_rows})
-        prepared.to_sql(cfg["staging"], con=conn, schema=cfg["schema_ident"], if_exists="append", index=False, method="multi", chunksize=1000)
-        conn.execute(text(f"UPDATE {cfg['schema_ident']}.{cfg['progress']} SET status='AGUARDANDO',etapa='STAGING_CONCLUIDA',progresso=20,atualizado_em=now() WHERE upload_id=:upload_id"), {"upload_id": upload_id})
 
-    thread = threading.Thread(target=_worker, args=(cfg, upload_id, routine_name, total_rows), daemon=True, name=f"upload-{cfg['institution']}-{upload_id[:8]}")
+        logger.info(
+            "upload_stage_insert_start institution=%s upload_id=%s staging=%s linhas=%s",
+            cfg["institution"], upload_id, cfg["staging"], total_rows,
+        )
+        # method=None usa executemany do driver e evita uma instrução SQL gigante.
+        prepared.to_sql(
+            cfg["staging"],
+            con=conn,
+            schema=cfg["schema_ident"],
+            if_exists="append",
+            index=False,
+            method=None,
+            chunksize=500,
+        )
+        logger.info(
+            "upload_stage_insert_complete institution=%s upload_id=%s staging=%s linhas=%s elapsed_s=%.2f",
+            cfg["institution"], upload_id, cfg["staging"], total_rows, time.monotonic() - started,
+        )
+        conn.execute(text(
+            f"UPDATE {cfg['schema_ident']}.{cfg['progress']} "
+            "SET status='AGUARDANDO',etapa='STAGING_CONCLUIDA',progresso=20,atualizado_em=now() "
+            "WHERE upload_id=:upload_id"
+        ), {"upload_id": upload_id})
+
+    thread = threading.Thread(
+        target=_worker,
+        args=(cfg, upload_id, routine_name, total_rows),
+        daemon=True,
+        name=f"upload-{cfg['institution']}-{upload_id[:8]}",
+    )
     thread.start()
-    return {"job_id": upload_id, "upload_id": upload_id, "institution": cfg["institution"], "status": "AGUARDANDO", "done": False,
-            "mode": "somente_novos" if mode == "SOMENTE_NOVOS" else "atualizar_existentes",
-            "progress_url": f"/api/upload/progresso/{upload_id}",
-            "report": {"linhas_recebidas": total_rows, "linhas_gravadas_staging": total_rows}}
+    logger.info(
+        "upload_async_queued institution=%s upload_id=%s rotina=%s linhas=%s elapsed_s=%.2f",
+        cfg["institution"], upload_id, routine_name, total_rows, time.monotonic() - started,
+    )
+    return {
+        "job_id": upload_id,
+        "upload_id": upload_id,
+        "institution": cfg["institution"],
+        "status": "AGUARDANDO",
+        "done": False,
+        "mode": "somente_novos" if mode == "SOMENTE_NOVOS" else "atualizar_existentes",
+        "progress_url": f"/api/upload/progresso/{upload_id}",
+        "report": {"linhas_recebidas": total_rows, "linhas_gravadas_staging": total_rows},
+    }
