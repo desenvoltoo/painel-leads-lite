@@ -144,7 +144,6 @@
     }
   }
 
-  // Captura o clique antes do listener antigo do app.js e executa um único fluxo.
   document.addEventListener('click', (event) => {
     const button = event.target?.closest?.('#btnUpload');
     if (!button) return;
@@ -155,7 +154,11 @@
   }, true);
 
   document.addEventListener('change', (event) => {
-    if (event.target?.id === 'uploadMode') updateModeUi();
+    if (event.target?.id !== 'uploadMode') return;
+    updateModeUi();
+    window.dispatchEvent(new CustomEvent('upload:mode-changed', {
+      detail: {mode: selectedMode()},
+    }));
   });
 
   if (document.readyState === 'loading') {
