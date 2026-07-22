@@ -2,6 +2,9 @@
   'use strict';
 
   let requestInProgress = false;
+  let progressTimer = null;
+  let progressValue = 0;
+  let progressStartedAt = 0;
 
   function selectedMode() {
     return document.querySelector('#uploadMode')?.value === 'somente_novos'
@@ -12,7 +15,13 @@
   function endpointForMode() {
     return selectedMode() === 'somente_novos'
       ? '/api/upload/somente-novos'
-      : '/api/upload';
+      : '/api/upload/atualizar-existentes';
+  }
+
+  function routineLabel() {
+    return selectedMode() === 'somente_novos'
+      ? 'sp_importar_somente_leads_novos'
+      : 'sp_processar_stg_leads_site';
   }
 
   function setStatus(message, type = 'info') {
@@ -23,16 +32,101 @@
     status.className = `alert alert-${normalized}`;
   }
 
+  function ensureProgress() {
+    let box = document.querySelector('#uploadLiveProgress');
+    if (box) return box;
+
+    box = document.createElement('div');
+    box.id = 'uploadLiveProgress';
+    box.className = 'upload-live-progress';
+    box.hidden = true;
+    box.innerHTML = `
+      <div class="upload-live-progress-head">
+        <strong id="uploadProgressStage">Preparando importação</strong>
+        <span id="uploadProgressPercent">0%</span>
+      </div>
+      <div class="upload-live-progress-track" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+        <div id="uploadProgressBar" class="upload-live-progress-bar"></div>
+      </div>
+      <div class="upload-live-progress-meta">
+        <span id="uploadProgressMode">—</span>
+        <span id="uploadProgressElapsed">0s</span>
+      </div>
+    `;
+    document.querySelector('#uploadStatus')?.insertAdjacentElement('afterend', box);
+
+    if (!document.querySelector('#uploadProgressStyle')) {
+      const style = document.createElement('style');
+      style.id = 'uploadProgressStyle';
+      style.textContent = `
+        .upload-live-progress{margin-top:10px;padding:12px;border:1px solid #dbe4f0;border-radius:12px;background:#fff;color:#172033}
+        .upload-live-progress-head,.upload-live-progress-meta{display:flex;justify-content:space-between;gap:12px;align-items:center}
+        .upload-live-progress-head{margin-bottom:8px}.upload-live-progress-head span{font-weight:700;color:#2457c5}
+        .upload-live-progress-track{height:12px;border-radius:999px;background:#e8eef8;overflow:hidden}
+        .upload-live-progress-bar{height:100%;width:0;border-radius:inherit;background:linear-gradient(90deg,#2563eb,#60a5fa);transition:width .45s ease}
+        .upload-live-progress-meta{margin-top:7px;font-size:.78rem;color:#64748b}
+      `;
+      document.head.appendChild(style);
+    }
+    return box;
+  }
+
+  function renderProgress(value, stage) {
+    progressValue = Math.max(0, Math.min(100, Math.round(value)));
+    const box = ensureProgress();
+    const bar = box.querySelector('#uploadProgressBar');
+    const track = box.querySelector('.upload-live-progress-track');
+    const percent = box.querySelector('#uploadProgressPercent');
+    const stageEl = box.querySelector('#uploadProgressStage');
+    const elapsed = box.querySelector('#uploadProgressElapsed');
+    const mode = box.querySelector('#uploadProgressMode');
+    box.hidden = false;
+    if (bar) bar.style.width = `${progressValue}%`;
+    if (track) track.setAttribute('aria-valuenow', String(progressValue));
+    if (percent) percent.textContent = `${progressValue}%`;
+    if (stageEl) stageEl.textContent = stage;
+    if (elapsed) elapsed.textContent = `${Math.max(0, Math.floor((Date.now() - progressStartedAt) / 1000))}s`;
+    if (mode) mode.textContent = `${selectedMode() === 'somente_novos' ? 'Somente novos' : 'Atualizar existentes'} · ${routineLabel()}`;
+  }
+
+  function startProgress() {
+    window.clearInterval(progressTimer);
+    progressStartedAt = Date.now();
+    renderProgress(5, 'Validando arquivo');
+    progressTimer = window.setInterval(() => {
+      const elapsed = (Date.now() - progressStartedAt) / 1000;
+      let next = progressValue;
+      let stage = 'Enviando arquivo para staging';
+      if (elapsed < 3) {
+        next = Math.min(25, progressValue + 4);
+      } else if (elapsed < 10) {
+        stage = 'Gravando linhas na staging';
+        next = Math.min(48, progressValue + 2);
+      } else {
+        stage = selectedMode() === 'somente_novos'
+          ? 'Comparando e inserindo somente os novos'
+          : 'Inserindo novos e atualizando existentes';
+        next = Math.min(92, progressValue + (progressValue < 75 ? 1.5 : 0.5));
+      }
+      renderProgress(next, stage);
+    }, 1000);
+  }
+
+  function finishProgress(success, message) {
+    window.clearInterval(progressTimer);
+    progressTimer = null;
+    renderProgress(success ? 100 : progressValue, message);
+    const bar = document.querySelector('#uploadProgressBar');
+    if (bar && !success) bar.style.background = '#dc2626';
+  }
+
   function setLoading(loading) {
     const button = document.querySelector('#btnUpload');
     if (!button) return;
     button.disabled = loading;
     button.classList.toggle('is-loading', loading);
-    if (loading) {
-      button.textContent = 'Importando planilha...';
-    } else {
-      updateModeUi();
-    }
+    if (loading) button.textContent = 'Importando planilha...';
+    else updateModeUi();
   }
 
   function updateModeUi() {
@@ -42,14 +136,14 @@
 
     if (help) {
       help.textContent = mode === 'somente_novos'
-        ? 'Somente novos: telefone primeiro e CPF depois. Leads existentes serão ignorados. Limite de 10.000 linhas.'
-        : 'Importação normal: insere novos e atualiza registros existentes conforme o arquivo.';
+        ? 'Executa sp_importar_somente_leads_novos: importa novos e ignora integralmente os existentes.'
+        : 'Executa sp_processar_stg_leads_site: inclui novos e atualiza os registros já existentes.';
     }
 
     if (button && !button.classList.contains('is-loading')) {
       button.textContent = mode === 'somente_novos'
         ? 'Importar somente novos'
-        : 'Importar planilha';
+        : 'Atualizar base existente';
     }
   }
 
@@ -60,7 +154,7 @@
     const ignored = (report.existentes_por_celular ?? 0) + (report.existentes_por_cpf ?? 0);
     const rejected = report.linhas_rejeitadas ?? 0;
 
-    if (selectedMode() === 'somente_novos') {
+    if (body?.mode === 'somente_novos') {
       return `Concluído. Recebidas: ${received} | Novas: ${inserted} | Existentes ignoradas: ${ignored} | Rejeitadas: ${rejected}.`;
     }
     return `Concluído. Recebidas: ${received} | Processadas: ${inserted} | Rejeitadas: ${rejected}.`;
@@ -78,7 +172,6 @@
       setStatus('Selecione um arquivo CSV, XLS ou XLSX.', 'error');
       return;
     }
-
     if (!/\.(csv|xlsx|xls)$/i.test(file.name || '')) {
       setStatus('Formato inválido. Envie CSV, XLS ou XLSX.', 'error');
       return;
@@ -86,7 +179,8 @@
 
     requestInProgress = true;
     setLoading(true);
-    setStatus('Enviando arquivo e processando no PostgreSQL...', 'info');
+    startProgress();
+    setStatus(`Modo selecionado: ${selectedMode() === 'somente_novos' ? 'Somente leads novos' : 'Atualizar base existente'}.`, 'info');
 
     const controller = new AbortController();
     const timeoutId = window.setTimeout(() => controller.abort(), 10 * 60 * 1000);
@@ -107,11 +201,8 @@
 
       const raw = await response.text();
       let body = {};
-      try {
-        body = raw ? JSON.parse(raw) : {};
-      } catch (_) {
-        body = {message: raw || ''};
-      }
+      try { body = raw ? JSON.parse(raw) : {}; }
+      catch (_) { body = {message: raw || ''}; }
 
       if (!response.ok || body?.ok === false) {
         const error = body?.error;
@@ -121,19 +212,25 @@
         throw new Error(message);
       }
 
-      setStatus(reportMessage(body), 'success');
+      const expectedMode = selectedMode() === 'somente_novos' ? 'somente_novos' : 'atualizar_existentes';
+      if (body?.mode !== expectedMode) {
+        throw new Error(`Resposta inconsistente: esperado modo ${expectedMode}, recebido ${body?.mode || 'não informado'}.`);
+      }
 
+      const message = reportMessage(body);
+      finishProgress(true, 'Importação concluída');
+      setStatus(message, 'success');
       try {
         window.dispatchEvent(new CustomEvent('gestao:upload-concluido', {
-          detail: {type: 'upload-concluido', at: new Date().toISOString()},
+          detail: {type: 'upload-concluido', at: new Date().toISOString(), mode: body.mode},
         }));
       } catch (_) {}
-
-      window.setTimeout(() => window.location.reload(), 1200);
+      window.setTimeout(() => window.location.reload(), 1800);
     } catch (error) {
       console.error('upload_flow_error', error);
+      finishProgress(false, 'Importação interrompida');
       if (error?.name === 'AbortError') {
-        setStatus('A importação ultrapassou 10 minutos. Verifique os logs e o histórico antes de tentar novamente.', 'error');
+        setStatus('A importação ultrapassou 10 minutos. Verifique os logs antes de tentar novamente.', 'error');
       } else {
         setStatus(error?.message || 'Não foi possível concluir a importação.', 'error');
       }
