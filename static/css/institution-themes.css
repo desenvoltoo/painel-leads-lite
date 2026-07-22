@@ -1,0 +1,166 @@
+/* Temas institucionais: Anhanguera sem azul; UniFECAF azul, branco e verde. */
+
+body.theme-anhanguera {
+  --institution-primary: #f37021;
+  --institution-primary-dark: #c94d0b;
+  --institution-primary-soft: #fff2e8;
+  --institution-accent: #ff8a3d;
+  --institution-accent-dark: #9a3f08;
+  --institution-accent-soft: #fff7f0;
+  --institution-accent-border: #ffd1b1;
+  --institution-border: #fed7bd;
+  --institution-shadow: rgba(243, 112, 33, .28);
+  --ops-primary: #f37021;
+  --ops-primary-strong: #c94d0b;
+  --ops-primary-soft: #fff2e8;
+  --ops-border: #f2d5c2;
+  --ops-surface-soft: #fffaf6;
+}
+
+body.theme-anhanguera,
+body.theme-anhanguera .ops-body,
+body.theme-anhanguera .ops-shell {
+  background: #fffaf6 !important;
+}
+
+body.theme-anhanguera .ops-topbar {
+  background: #ffffff !important;
+  border-bottom-color: #f2d5c2 !important;
+}
+
+body.theme-anhanguera .ops-logo,
+body.theme-anhanguera .btn-primary,
+body.theme-anhanguera .quick-action.active,
+body.theme-anhanguera .progress-bar,
+body.theme-anhanguera .upload-live-progress-bar {
+  background: #f37021 !important;
+  border-color: #f37021 !important;
+  color: #ffffff !important;
+}
+
+body.theme-anhanguera .progress-bar,
+body.theme-anhanguera .upload-live-progress-bar {
+  background-image: linear-gradient(90deg, #c94d0b, #f37021, #ff9b59) !important;
+}
+
+body.theme-anhanguera .btn-primary:hover,
+body.theme-anhanguera .quick-action.active:hover {
+  background: #c94d0b !important;
+  border-color: #c94d0b !important;
+}
+
+body.theme-anhanguera .ops-eyebrow,
+body.theme-anhanguera .upload-icon,
+body.theme-anhanguera a,
+body.theme-anhanguera .ops-table-footer strong,
+body.theme-anhanguera .priority-summary strong,
+body.theme-anhanguera .ops-kpi strong {
+  color: #c94d0b !important;
+}
+
+body.theme-anhanguera .ops-card,
+body.theme-anhanguera .ops-kpi,
+body.theme-anhanguera .ops-insights,
+body.theme-anhanguera .ops-filter-card,
+body.theme-anhanguera .ops-table-card,
+body.theme-anhanguera .institution-switch,
+body.theme-anhanguera .field input,
+body.theme-anhanguera .field select,
+body.theme-anhanguera .ts-wrapper .ts-control,
+body.theme-anhanguera .upload-dropzone,
+body.theme-anhanguera .progress-track {
+  border-color: #f2d5c2 !important;
+}
+
+body.theme-anhanguera .ops-kpi-primary,
+body.theme-anhanguera .ops-kpi-success,
+body.theme-anhanguera .ops-kpi-warning {
+  background: linear-gradient(145deg, #ffffff, #fff2e8) !important;
+  border-color: #f37021 !important;
+}
+
+body.theme-anhanguera .ops-pill,
+body.theme-anhanguera .alert-info,
+body.theme-anhanguera .import-policy,
+body.theme-anhanguera .priority-summary,
+body.theme-anhanguera .ops-hero,
+body.theme-anhanguera .quick-action:hover,
+body.theme-anhanguera .upload-dropzone:hover,
+body.theme-anhanguera .ts-dropdown .active,
+body.theme-anhanguera .ts-dropdown [data-selectable]:hover {
+  background: #fff2e8 !important;
+  border-color: #ffd1b1 !important;
+  color: #9a3f08 !important;
+}
+
+body.theme-anhanguera .btn-ghost,
+body.theme-anhanguera .quick-action,
+body.theme-anhanguera .pagination-bar .btn {
+  background: #ffffff !important;
+  border-color: #efc8ad !important;
+  color: #9a3f08 !important;
+}
+
+body.theme-anhanguera .btn-ghost:hover,
+body.theme-anhanguera .pagination-bar .btn:hover {
+  background: #fff2e8 !important;
+  border-color: #f37021 !important;
+  color: #c94d0b !important;
+}
+
+body.theme-anhanguera input:focus,
+body.theme-anhanguera select:focus,
+body.theme-anhanguera .ts-wrapper.focus .ts-control {
+  border-color: #f37021 !important;
+  box-shadow: 0 0 0 3px rgba(243, 112, 33, .16) !important;
+  outline: none !important;
+}
+
+body.theme-anhanguera table thead th {
+  background: #fff2e8 !important;
+  color: #7d360a !important;
+  border-bottom-color: #efc8ad !important;
+}
+
+body.theme-anhanguera table tbody tr:hover {
+  background: #fff8f2 !important;
+}
+
+body.theme-anhanguera .legend-dot.ready,
+body.theme-anhanguera .legend-dot.sent,
+body.theme-anhanguera .spinner {
+  border-color: #f37021 !important;
+  color: #f37021 !important;
+}
+
+body.theme-anhanguera .institution-button {
+  color: #8a4a22 !important;
+}
+
+body.theme-anhanguera .institution-button:hover {
+  background: #fff2e8 !important;
+  color: #c94d0b !important;
+}
+
+body.theme-anhanguera .institution-button .institution-mark {
+  background: #ffe0cb !important;
+  color: #9a3f08 !important;
+}
+
+body.theme-anhanguera .institution-button.is-active,
+body.theme-anhanguera .institution-button.is-active .institution-mark {
+  background: #f37021 !important;
+  color: #ffffff !important;
+}
+
+body.theme-unifecaf {
+  --institution-primary: #0b5ed7;
+  --institution-primary-dark: #084298;
+  --institution-primary-soft: #eaf3ff;
+  --institution-accent: #20a464;
+  --institution-accent-dark: #0f6b3d;
+  --institution-accent-soft: #eaf9f1;
+  --institution-accent-border: #afe4c9;
+  --institution-border: #bdd6f5;
+  --institution-shadow: rgba(11, 94, 215, .26);
+}
