@@ -71,10 +71,12 @@ try:
     from app import create_app
     from upload_preview_routes import register_upload_preview_routes
     from upload_new_only_routes import register_upload_new_only_routes
+    from upload_update_existing_routes import register_upload_update_existing_routes
 
     application = create_app()
     register_upload_preview_routes(application)
     register_upload_new_only_routes(application)
+    register_upload_update_existing_routes(application)
 except Exception as exc:
     log_startup_failure(exc)
     diagnostic_payload = build_error_payload(
