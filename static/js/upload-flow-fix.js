@@ -71,6 +71,16 @@
     return box;
   }
 
+  function formatElapsed(seconds) {
+    const total = Math.max(0, Math.floor(seconds));
+    const hours = Math.floor(total / 3600);
+    const minutes = Math.floor((total % 3600) / 60);
+    const secs = total % 60;
+    if (hours > 0) return `${hours}h ${String(minutes).padStart(2, '0')}m ${String(secs).padStart(2, '0')}s`;
+    if (minutes > 0) return `${minutes}m ${String(secs).padStart(2, '0')}s`;
+    return `${secs}s`;
+  }
+
   function renderProgress(value, stage) {
     progressValue = Math.max(0, Math.min(100, Math.round(value)));
     const box = ensureProgress();
@@ -85,13 +95,15 @@
     if (track) track.setAttribute('aria-valuenow', String(progressValue));
     if (percent) percent.textContent = `${progressValue}%`;
     if (stageEl) stageEl.textContent = stage;
-    if (elapsed) elapsed.textContent = `${Math.max(0, Math.floor((Date.now() - progressStartedAt) / 1000))}s`;
+    if (elapsed) elapsed.textContent = formatElapsed((Date.now() - progressStartedAt) / 1000);
     if (mode) mode.textContent = `${selectedMode() === 'somente_novos' ? 'Somente novos' : 'Atualizar existentes'} · ${routineLabel()}`;
   }
 
   function startProgress() {
     window.clearInterval(progressTimer);
     progressStartedAt = Date.now();
+    const bar = ensureProgress().querySelector('#uploadProgressBar');
+    if (bar) bar.style.background = 'linear-gradient(90deg,#2563eb,#60a5fa)';
     renderProgress(5, 'Validando arquivo');
     progressTimer = window.setInterval(() => {
       const elapsed = (Date.now() - progressStartedAt) / 1000;
@@ -104,9 +116,9 @@
         next = Math.min(48, progressValue + 2);
       } else {
         stage = selectedMode() === 'somente_novos'
-          ? 'Comparando e inserindo somente os novos'
-          : 'Inserindo novos e atualizando existentes';
-        next = Math.min(92, progressValue + (progressValue < 75 ? 1.5 : 0.5));
+          ? 'Processando somente os leads novos no PostgreSQL'
+          : 'Inserindo novos e atualizando existentes no PostgreSQL';
+        next = Math.min(92, progressValue + (progressValue < 75 ? 1.5 : 0.15));
       }
       renderProgress(next, stage);
     }, 1000);
@@ -151,11 +163,12 @@
     const report = body?.report || {};
     const received = report.linhas_recebidas ?? 0;
     const inserted = report.linhas_inseridas ?? report.linhas_novas ?? report.linhas_processadas ?? 0;
-    const ignored = (report.existentes_por_celular ?? 0) + (report.existentes_por_cpf ?? 0);
+    const ignoredExisting = (report.existentes_por_celular ?? 0) + (report.existentes_por_cpf ?? 0);
+    const duplicates = report.duplicados_arquivo ?? 0;
     const rejected = report.linhas_rejeitadas ?? 0;
 
     if (body?.mode === 'somente_novos') {
-      return `Concluído. Recebidas: ${received} | Novas: ${inserted} | Existentes ignoradas: ${ignored} | Rejeitadas: ${rejected}.`;
+      return `Concluído. Recebidas: ${received} | Inseridas: ${inserted} | Existentes ignoradas: ${ignoredExisting} | Duplicadas no arquivo: ${duplicates} | Rejeitadas: ${rejected}.`;
     }
     return `Concluído. Recebidas: ${received} | Processadas: ${inserted} | Rejeitadas: ${rejected}.`;
   }
@@ -180,10 +193,8 @@
     requestInProgress = true;
     setLoading(true);
     startProgress();
-    setStatus(`Modo selecionado: ${selectedMode() === 'somente_novos' ? 'Somente leads novos' : 'Atualizar base existente'}.`, 'info');
+    setStatus(`Modo selecionado: ${selectedMode() === 'somente_novos' ? 'Somente leads novos' : 'Atualizar base existente'}. Não feche esta página até a conclusão.`, 'info');
 
-    const controller = new AbortController();
-    const timeoutId = window.setTimeout(() => controller.abort(), 10 * 60 * 1000);
     const formData = new FormData();
     formData.append('file', file);
     const source = document.querySelector('#uploadSource')?.value?.trim();
@@ -196,7 +207,6 @@
         body: formData,
         credentials: 'same-origin',
         cache: 'no-store',
-        signal: controller.signal,
       });
 
       const raw = await response.text();
@@ -225,17 +235,12 @@
           detail: {type: 'upload-concluido', at: new Date().toISOString(), mode: body.mode},
         }));
       } catch (_) {}
-      window.setTimeout(() => window.location.reload(), 1800);
+      window.setTimeout(() => window.location.reload(), 2500);
     } catch (error) {
       console.error('upload_flow_error', error);
-      finishProgress(false, 'Importação interrompida');
-      if (error?.name === 'AbortError') {
-        setStatus('A importação ultrapassou 10 minutos. Verifique os logs antes de tentar novamente.', 'error');
-      } else {
-        setStatus(error?.message || 'Não foi possível concluir a importação.', 'error');
-      }
+      finishProgress(false, 'Falha na importação');
+      setStatus(error?.message || 'Não foi possível concluir a importação.', 'error');
     } finally {
-      window.clearTimeout(timeoutId);
       requestInProgress = false;
       setLoading(false);
     }
