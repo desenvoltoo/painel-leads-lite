@@ -1,6 +1,8 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 
+import csv
+import io
 import logging
 import os
 import threading
@@ -158,6 +160,106 @@ def _prepare_for_unifecaf(prepared):
     return prepared.rename(columns={k: v for k, v in rename.items() if k in prepared.columns})
 
 
+def _copy_dataframe_to_staging(cfg: Dict[str, str], prepared, upload_id: str, mode: str, routine_name: str, filename: str) -> None:
+    """Grava progresso + staging em uma transação usando COPY FROM STDIN."""
+    engine = db.get_engine()
+    raw = engine.raw_connection()
+    cursor = None
+    try:
+        cursor = raw.cursor()
+        cursor.execute("SET LOCAL lock_timeout = '5s'")
+        cursor.execute("SET LOCAL statement_timeout = '180s'")
+
+        # Lock transacional entre processos/containers: uma gravação de staging
+        # por instituição. Falha imediatamente em vez de ficar pendurada.
+        cursor.execute(
+            "SELECT pg_try_advisory_xact_lock(hashtext(%s))",
+            (f"upload-staging:{cfg['institution']}",),
+        )
+        locked = bool(cursor.fetchone()[0])
+        if not locked:
+            raise RuntimeError(
+                f"Já existe um arquivo sendo gravado na staging da {cfg['institution']}. Aguarde a conclusão e tente novamente."
+            )
+
+        cursor.execute(
+            f"""
+            INSERT INTO {cfg['schema_ident']}.{cfg['progress']}
+                (upload_id, modo, rotina, arquivo, status, etapa, linhas_total, progresso)
+            VALUES (%s,%s,%s,%s,'STAGING','GRAVANDO_STAGING',%s,10)
+            """,
+            (upload_id, mode, routine_name, filename, len(prepared)),
+        )
+
+        if cfg["institution"] == "unifecaf":
+            cursor.execute(
+                f"""
+                INSERT INTO {cfg['schema_ident']}.logs_importacoes
+                    (upload_id,nome_arquivo,status,etapa,total_linhas,linhas_recebidas)
+                VALUES (%s,%s,'RECEBIDO','STAGING',%s,%s)
+                ON CONFLICT (upload_id) DO NOTHING
+                """,
+                (upload_id, filename, len(prepared), len(prepared)),
+            )
+
+        columns = list(prepared.columns)
+        buffer = io.StringIO()
+        prepared.to_csv(
+            buffer,
+            index=False,
+            header=False,
+            sep="\t",
+            na_rep="\\N",
+            quoting=csv.QUOTE_MINIMAL,
+            quotechar='"',
+            escapechar="\\",
+            lineterminator="\n",
+        )
+        buffer.seek(0)
+
+        column_sql = ",".join(db._safe_ident(column) for column in columns)
+        copy_sql = (
+            f"COPY {cfg['schema_ident']}.{db._safe_ident(cfg['staging'])} ({column_sql}) "
+            "FROM STDIN WITH (FORMAT CSV, DELIMITER E'\\t', NULL '\\N', QUOTE '\"', ESCAPE '\"')"
+        )
+
+        logger.info(
+            "upload_stage_copy_start institution=%s upload_id=%s staging=%s linhas=%s bytes=%s",
+            cfg["institution"], upload_id, cfg["staging"], len(prepared), buffer.tell(),
+        )
+
+        if hasattr(cursor, "copy_expert"):
+            cursor.copy_expert(copy_sql, buffer)
+        elif hasattr(cursor, "copy"):
+            # Compatibilidade com psycopg 3.
+            with cursor.copy(copy_sql) as copy:
+                while True:
+                    chunk = buffer.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    copy.write(chunk)
+        else:
+            raise RuntimeError("O driver PostgreSQL não oferece suporte a COPY FROM STDIN.")
+
+        cursor.execute(
+            f"""
+            UPDATE {cfg['schema_ident']}.{cfg['progress']}
+               SET status='AGUARDANDO', etapa='STAGING_CONCLUIDA', progresso=20,
+                   atualizado_em=now()
+             WHERE upload_id=%s
+            """,
+            (upload_id,),
+        )
+        raw.commit()
+    except Exception:
+        raw.rollback()
+        raise
+    finally:
+        if cursor is not None:
+            cursor.close()
+        raw.close()
+
+
 def enqueue_upload_dataframe(df, filename: str, mode: str, routine_name: str, institution: str = "anhanguera") -> Dict[str, Any]:
     cfg = _config(institution)
     upload_id = uuid.uuid4().hex
@@ -174,8 +276,6 @@ def enqueue_upload_dataframe(df, filename: str, mode: str, routine_name: str, in
     if total_rows <= 0:
         raise ValueError("A planilha não possui linhas para importar.")
 
-    # Evita consulta a information_schema nesta etapa crítica. As colunas são
-    # conhecidas e versionadas junto com cada staging.
     stg_cols = STAGING_COLUMNS[cfg["institution"]]
     selected_columns = [column for column in prepared.columns if column in stg_cols]
     prepared = prepared[selected_columns].copy()
@@ -192,45 +292,18 @@ def enqueue_upload_dataframe(df, filename: str, mode: str, routine_name: str, in
         cfg["institution"], upload_id, cfg["staging"], len(prepared.columns), time.monotonic() - started,
     )
 
-    with db.get_engine().begin() as conn:
-        conn.execute(text(f"""
-            INSERT INTO {cfg['schema_ident']}.{cfg['progress']}
-                (upload_id, modo, rotina, arquivo, status, etapa, linhas_total, progresso)
-            VALUES (:upload_id,:modo,:rotina,:arquivo,'STAGING','GRAVANDO_STAGING',:total,10)
-        """), {"upload_id": upload_id, "modo": mode, "rotina": routine_name, "arquivo": filename, "total": total_rows})
+    logger.info(
+        "upload_stage_connection_start institution=%s upload_id=%s",
+        cfg["institution"], upload_id,
+    )
+    _copy_dataframe_to_staging(cfg, prepared, upload_id, mode, routine_name, filename)
+    logger.info(
+        "upload_stage_copy_complete institution=%s upload_id=%s staging=%s linhas=%s elapsed_s=%.2f",
+        cfg["institution"], upload_id, cfg["staging"], total_rows, time.monotonic() - started,
+    )
 
-        if cfg["institution"] == "unifecaf":
-            conn.execute(text(f"""
-                INSERT INTO {cfg['schema_ident']}.logs_importacoes
-                  (upload_id,nome_arquivo,status,etapa,total_linhas,linhas_recebidas)
-                VALUES (:upload_id,:arquivo,'RECEBIDO','STAGING',:total,:total)
-                ON CONFLICT (upload_id) DO NOTHING
-            """), {"upload_id": upload_id, "arquivo": filename, "total": total_rows})
-
-        logger.info(
-            "upload_stage_insert_start institution=%s upload_id=%s staging=%s linhas=%s",
-            cfg["institution"], upload_id, cfg["staging"], total_rows,
-        )
-        # method=None usa executemany do driver e evita uma instrução SQL gigante.
-        prepared.to_sql(
-            cfg["staging"],
-            con=conn,
-            schema=cfg["schema_ident"],
-            if_exists="append",
-            index=False,
-            method=None,
-            chunksize=500,
-        )
-        logger.info(
-            "upload_stage_insert_complete institution=%s upload_id=%s staging=%s linhas=%s elapsed_s=%.2f",
-            cfg["institution"], upload_id, cfg["staging"], total_rows, time.monotonic() - started,
-        )
-        conn.execute(text(
-            f"UPDATE {cfg['schema_ident']}.{cfg['progress']} "
-            "SET status='AGUARDANDO',etapa='STAGING_CONCLUIDA',progresso=20,atualizado_em=now() "
-            "WHERE upload_id=:upload_id"
-        ), {"upload_id": upload_id})
-
+    # A SP só começa depois que o COPY foi commitado. A requisição retorna 202
+    # imediatamente após iniciar a thread; todo o processamento restante é assíncrono.
     thread = threading.Thread(
         target=_worker,
         args=(cfg, upload_id, routine_name, total_rows),
