@@ -70,12 +70,41 @@
       body.theme-unifecaf .quick-action.active{background:var(--institution-primary)!important;border-color:var(--institution-primary)!important;color:#fff!important}
       body.theme-anhanguera .upload-dropzone:hover,
       body.theme-unifecaf .upload-dropzone:hover{border-color:var(--institution-primary)!important;background:var(--institution-primary-soft)!important}
-      body.theme-anhanguera .upload-icon,
-      body.theme-unifecaf .upload-icon{color:var(--institution-primary)!important}
       body.theme-anhanguera .progress-bar,
       body.theme-anhanguera .upload-live-progress-bar,
       body.theme-unifecaf .progress-bar,
       body.theme-unifecaf .upload-live-progress-bar{background:linear-gradient(90deg,var(--institution-primary),var(--institution-accent))!important}
+
+      body.theme-anhanguera .upload-dropzone{border-color:#ffd1b1!important;background:#fffaf6!important}
+      body.theme-anhanguera .upload-dropzone:hover{border-color:#f37021!important;background:#fff2e8!important}
+      body.theme-anhanguera .upload-icon{background:linear-gradient(135deg,#f37021,#ff8a3d)!important;color:#fff!important;box-shadow:0 10px 24px rgba(243,112,33,.28)!important}
+      body.theme-anhanguera .upload-title{color:#1f2937!important}
+      body.theme-anhanguera .upload-copy{color:#6b7280!important}
+      body.theme-anhanguera .upload-file-name,
+      body.theme-anhanguera #uploadFileName{background:#fff2e8!important;color:#9a3f08!important;border:1px solid #ffd1b1!important;box-shadow:none!important}
+      body.theme-anhanguera .import-policy{background:#fff7f1!important;border-color:#ffd1b1!important;color:#9a3f08!important}
+      body.theme-anhanguera .import-policy strong{color:#c94d0b!important}
+      body.theme-anhanguera .ops-pill{background:#fff2e8!important;color:#9a3f08!important;border-color:#ffd1b1!important}
+      body.theme-anhanguera .ops-user{background:#fff7f1!important;color:#9a3f08!important;border-color:#ffd1b1!important}
+      body.theme-anhanguera .btn-ghost{background:#fff!important;color:#c94d0b!important;border-color:#f3b486!important}
+      body.theme-anhanguera .btn-ghost:hover{background:#fff2e8!important;color:#9a3f08!important;border-color:#f37021!important}
+      body.theme-anhanguera .quick-action:not(.active){background:#fff!important;color:#c94d0b!important;border-color:#f3b486!important}
+      body.theme-anhanguera .priority-list li strong,
+      body.theme-anhanguera .priority-summary strong,
+      body.theme-anhanguera .ops-table-footer strong,
+      body.theme-anhanguera #lblPage{color:#c94d0b!important}
+      body.theme-anhanguera .priority-list li strong{background:#fff2e8!important}
+      body.theme-anhanguera .priority-summary{background:#fff7f1!important}
+      body.theme-anhanguera .legend-dot.ready{background:#f37021!important}
+      body.theme-anhanguera .alert-info{background:#fff7f1!important;border-color:#ffd1b1!important;color:#9a3f08!important}
+      body.theme-anhanguera a{color:#c94d0b!important}
+      body.theme-anhanguera a:hover{color:#9a3f08!important}
+      body.theme-anhanguera input:focus,
+      body.theme-anhanguera select:focus,
+      body.theme-anhanguera .ts-wrapper.focus .ts-control{border-color:#f37021!important;box-shadow:0 0 0 3px rgba(243,112,33,.14)!important}
+      body.theme-anhanguera .ts-control .item{background:#fff2e8!important;color:#9a3f08!important;border-color:#ffd1b1!important}
+
+      body.theme-unifecaf .upload-icon{color:var(--institution-primary)!important}
       body.theme-unifecaf .ops-kpi-success{border-color:#20a464!important;background:linear-gradient(145deg,#fff,#edf9f3)!important}
       body.theme-unifecaf .legend-dot.ready{background:#20a464!important}
       body.theme-unifecaf a{--link-theme:#0b5ed7}
