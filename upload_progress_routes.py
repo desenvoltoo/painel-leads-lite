@@ -6,6 +6,18 @@ from flask import jsonify
 from services.upload_async import get_upload_progress
 
 
+# Para a interface, o upload termina quando o arquivo foi integralmente gravado
+# na staging. A procedure continua como processamento interno e não deve manter
+# a barra de upload presa em 35% por vários minutos.
+UPLOAD_COMPLETE_STATUSES = {"AGUARDANDO", "PROCESSANDO", "CONCLUIDO"}
+UPLOAD_COMPLETE_STAGES = {
+    "STAGING_CONCLUIDA",
+    "LOCALIZANDO_ROTINA",
+    "EXECUTANDO_SP",
+    "CONCLUIDO",
+}
+
+
 def register_upload_progress_routes(app) -> None:
     if "api_upload_progresso" in app.view_functions:
         return
@@ -13,19 +25,54 @@ def register_upload_progress_routes(app) -> None:
     def api_upload_progresso(upload_id: str):
         try:
             row = get_upload_progress(upload_id)
-            status = str(row.get("status") or "AGUARDANDO").upper()
-            done = status in {"CONCLUIDO", "ERRO"}
-            ok = status != "ERRO"
+            internal_status = str(row.get("status") or "AGUARDANDO").upper()
+            internal_stage = str(row.get("etapa") or "").upper()
+            upload_complete = (
+                internal_status in UPLOAD_COMPLETE_STATUSES
+                or internal_stage in UPLOAD_COMPLETE_STAGES
+            )
+            failed_before_staging = internal_status == "ERRO" and internal_stage not in UPLOAD_COMPLETE_STAGES
+
+            # Semântica exibida ao usuário: staging confirmada = upload 100%.
+            # Mantemos os campos internal_* para diagnóstico e acompanhamento
+            # do processamento que segue no PostgreSQL.
+            if upload_complete:
+                status = "UPLOAD_CONCLUIDO"
+                stage = "STAGING_CONCLUIDA"
+                progress = 100.0
+                done = True
+                ok = True
+                message = row.get("mensagem") or "Arquivo gravado na staging. Processamento interno iniciado."
+            elif failed_before_staging:
+                status = "ERRO"
+                stage = internal_stage or "ERRO"
+                progress = 100.0
+                done = True
+                ok = False
+                message = row.get("mensagem") or "Falha ao gravar o arquivo na staging."
+            else:
+                status = internal_status
+                stage = internal_stage
+                progress = float(row.get("progresso") or 0)
+                done = False
+                ok = True
+                message = row.get("mensagem") or ""
+
             return jsonify({
                 "ok": ok,
                 "done": done,
+                "upload_complete": upload_complete,
                 "upload_id": upload_id,
                 "mode": "somente_novos" if row.get("modo") == "SOMENTE_NOVOS" else "atualizar_existentes",
                 "status": status,
-                "stage": row.get("etapa"),
-                "progress": float(row.get("progresso") or 0),
-                "message": row.get("mensagem") or "",
+                "stage": stage,
+                "progress": progress,
+                "message": message,
                 "error": row.get("erro") or "",
+                "internal_status": internal_status,
+                "internal_stage": internal_stage,
+                "internal_progress": float(row.get("progresso") or 0),
+                "processing_in_background": upload_complete and internal_status != "CONCLUIDO",
                 "report": {
                     "linhas_recebidas": int(row.get("linhas_total") or 0),
                     "linhas_processadas": int(row.get("linhas_processadas") or 0),
