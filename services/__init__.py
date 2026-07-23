@@ -7,6 +7,9 @@ mudanças amplas nas rotas Flask.
 from __future__ import annotations
 
 import re
+import sys
+import threading
+import time
 from typing import Any, Dict
 
 from . import database as _database
@@ -86,6 +89,34 @@ if not any(output == "telefone2" for _, output in _database.EXPORT_COLUMNS):
     )
     _database.EXPORT_COLUMNS.insert(position, ("telefone2", "telefone2"))
 _database.EXPORT_ORDER = [output for _, output in _database.EXPORT_COLUMNS]
+
+
+# O app possui uma lista histórica própria usada no CSV em lote. Como o módulo
+# services é carregado enquanto app.py ainda está sendo importado, aguardamos a
+# conclusão da importação e acrescentamos telefone2 sem alterar as rotas.
+def _patch_app_export_order() -> None:
+    for _ in range(200):
+        patched = False
+        for module_name in ("app", "__main__"):
+            module = sys.modules.get(module_name)
+            order = getattr(module, "EXPORT_ORDER", None) if module else None
+            if isinstance(order, list):
+                if "telefone2" not in order:
+                    try:
+                        order.insert(order.index("celular") + 1, "telefone2")
+                    except ValueError:
+                        order.append("telefone2")
+                patched = True
+        if patched:
+            return
+        time.sleep(0.05)
+
+
+threading.Thread(
+    target=_patch_app_export_order,
+    name="patch-app-export-telefone2",
+    daemon=True,
+).start()
 
 
 # Garante que ``from services.database import process_upload_dataframe`` use
