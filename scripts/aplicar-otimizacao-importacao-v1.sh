@@ -51,15 +51,15 @@ SELECT pg_get_functiondef(
 done
 
 echo "[4/10] Validando a chave unica operacional..."
-docker exec -i "$DB_CONTAINER" psql -U "$DB_USER" -d "$DB_NAME" -v ON_ERROR_STOP=1 -c "
-DO \\$\\$
+docker exec -i "$DB_CONTAINER" psql -U "$DB_USER" -d "$DB_NAME" -v ON_ERROR_STOP=1 <<'SQL'
+DO $validate$
 BEGIN
   IF to_regclass('modelo_estrela.ux_leads_painel_sk_pessoa_dim') IS NULL THEN
     RAISE EXCEPTION 'Indice ux_leads_painel_sk_pessoa_dim ausente';
   END IF;
-END
-\$\\$;
-"
+END;
+$validate$;
+SQL
 
 echo "[5/10] Aplicando a migration de funcoes..."
 docker exec -i "$DB_CONTAINER" psql -U "$DB_USER" -d "$DB_NAME" -v ON_ERROR_STOP=1 < "$MIGRATION"
