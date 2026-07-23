@@ -13,6 +13,81 @@ from . import database as _database
 from .upload_pipeline import process_upload_dataframe
 
 
+_BLANK_MARKERS = {
+    "",
+    "\\n",
+    "\\\\n",
+    "\\N",
+    "\\\\N",
+    "null",
+    "none",
+    "nan",
+    "nat",
+}
+
+
+def _normalize_blank_value(value: Any) -> Any:
+    if value is None:
+        return None
+    try:
+        if _database.pd.isna(value):
+            return None
+    except Exception:
+        pass
+    if isinstance(value, str):
+        cleaned = value.strip()
+        if cleaned.lower() in {item.lower() for item in _BLANK_MARKERS}:
+            return None
+        return cleaned
+    return value
+
+
+# Aceita telefone2 no upload e elimina marcadores artificiais antes da staging.
+_database.UPLOAD_ALIASES.setdefault(
+    "telefone2",
+    [
+        "telefone2",
+        "telefone_2",
+        "telefone_secundario",
+        "telefone_secundário",
+        "celular2",
+        "celular_2",
+        "whatsapp2",
+    ],
+)
+
+_original_prepare_upload_dataframe = _database._prepare_upload_dataframe
+
+
+def _prepare_upload_dataframe_sem_marcadores(df, filename: str, upload_id: str):
+    if df is not None and not df.empty:
+        df = df.copy()
+        for column in df.columns:
+            df[column] = df[column].map(_normalize_blank_value)
+    prepared = _original_prepare_upload_dataframe(df, filename, upload_id)
+    if prepared is not None and not prepared.empty:
+        for column in prepared.columns:
+            prepared[column] = prepared[column].map(_normalize_blank_value)
+    return prepared
+
+
+_database._prepare_upload_dataframe = _prepare_upload_dataframe_sem_marcadores
+
+
+# Inclui telefone2 imediatamente depois de celular nas exportações.
+if not any(output == "telefone2" for _, output in _database.EXPORT_COLUMNS):
+    position = next(
+        (
+            index + 1
+            for index, (_, output) in enumerate(_database.EXPORT_COLUMNS)
+            if output == "celular"
+        ),
+        len(_database.EXPORT_COLUMNS),
+    )
+    _database.EXPORT_COLUMNS.insert(position, ("telefone2", "telefone2"))
+_database.EXPORT_ORDER = [output for _, output in _database.EXPORT_COLUMNS]
+
+
 # Garante que ``from services.database import process_upload_dataframe`` use
 # a implementação compatível com FUNCTION e PROCEDURE do PostgreSQL.
 _database.process_upload_dataframe = process_upload_dataframe
@@ -38,9 +113,17 @@ def _normalize_quick_search_filters(filters: Dict[str, Any] | None) -> Dict[str,
     return normalized
 
 
+def _clean_export_rows(rows):
+    cleaned = []
+    for row in rows or []:
+        cleaned.append({key: _normalize_blank_value(value) for key, value in dict(row).items()})
+    return cleaned
+
+
 _original_query_leads = _database.query_leads
 _original_query_leads_count = _database.query_leads_count
 _original_export_leads_rows = _database.export_leads_rows
+_original_rows_dataframe_export_order = _database._rows_dataframe_export_order
 
 
 def query_leads(filters=None, *args, **kwargs):
@@ -56,14 +139,28 @@ def query_leads_count(filters=None, *args, **kwargs):
 
 
 def export_leads_rows(filters=None, *args, **kwargs):
-    return _original_export_leads_rows(
+    rows = _original_export_leads_rows(
         _normalize_quick_search_filters(filters), *args, **kwargs
     )
+    return _clean_export_rows(rows)
+
+
+def export_leads_rows_iter(filters=None, *args, **kwargs):
+    yield from export_leads_rows(filters, *args, **kwargs)
+
+
+def _rows_dataframe_export_order(rows):
+    df = _original_rows_dataframe_export_order(_clean_export_rows(rows))
+    for column in df.columns:
+        df[column] = df[column].map(_normalize_blank_value)
+    return df
 
 
 _database.query_leads = query_leads
 _database.query_leads_count = query_leads_count
 _database.export_leads_rows = export_leads_rows
+_database.export_leads_rows_iter = export_leads_rows_iter
+_database._rows_dataframe_export_order = _rows_dataframe_export_order
 
 
 # Substitui apenas o fluxo de lotes por uma implementação transacional. As rotas
