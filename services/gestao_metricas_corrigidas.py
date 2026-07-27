@@ -3,7 +3,7 @@
 
 - remove consultores artificiais/sem identificação;
 - mantém disparos no período de data_disparo;
-- contabiliza matrícula somente quando matriculado é positivo E data_matricula está no período;
+- contabiliza matrícula somente quando matriculado IS TRUE e data_matricula está no período;
 - recalcula totais, funil, campanha, negócio e detalhamento de forma consistente.
 """
 from __future__ import annotations
@@ -58,7 +58,7 @@ def _dimension_filters() -> tuple[str, Dict[str, Any]]:
 
 def _matriculation_period() -> tuple[str, Dict[str, Any]]:
     clauses = [
-        "COALESCE(matriculado::text,'') ~* '^(true|t|1|sim|s)$'",
+        "matriculado IS TRUE",
         "data_matricula IS NOT NULL",
     ]
     params: Dict[str, Any] = {}
@@ -80,7 +80,6 @@ def _correct_payload() -> Dict[str, Any]:
     mat_where, mat_params = _matriculation_period()
     params = {**dim_params, **mat_params}
 
-    # Exclui qualquer linha artificial que ainda tenha vindo da camada antiga.
     items = [row for row in (payload.get("items") or []) if _valid_name(row.get("consultor_disparo"))]
     payload["items"] = items
     payload["total"] = len(items)
@@ -107,7 +106,6 @@ def _correct_payload() -> Dict[str, Any]:
         row["taxa_matricula_pct"] = round(matriculas / total * 100, 2) if total else 0
         total_matriculas += matriculas
 
-    # Detalhamento por consultor/campanha também respeita a data da matrícula.
     detail_rows = _rows(
         f"""
         SELECT BTRIM(consultor_disparo::text) AS consultor_disparo,
