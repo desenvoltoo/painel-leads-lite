@@ -76,8 +76,9 @@ def _where_filters() -> tuple[str, Dict[str, Any]]:
 
 
 def _matriculated_sql() -> str:
-    # Regra oficial: data_matricula isolada nunca confirma matrícula atual.
-    return "COALESCE(matriculado::text,'') ~* '^(true|t|1|sim|s)$'"
+    # Regra oficial: somente a flag booleana verdadeira confirma matrícula atual.
+    # data_matricula, status e textos como "sim" não contam como matrícula.
+    return "matriculado IS TRUE"
 
 
 def _consultants_payload() -> Dict[str, Any]:
