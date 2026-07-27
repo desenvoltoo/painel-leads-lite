@@ -62,14 +62,13 @@ def _relation() -> tuple[str, set[str]]:
         {"schema": schema, "name": name},
         "qualidade_columns",
     )
-    return f"{db._safe_ident(schema)}.{db._safe_ident(name)}", {str(r["column_name"]) for r in cols}
+    relation = f"{db._safe_ident(schema)}.{db._safe_ident(name)}"
+    return relation, {str(row["column_name"]) for row in cols}
 
 
-def _issue_queries(relation: str, columns: set[str]) -> list[tuple[str, str, str]]:
-    del relation
+def _issue_queries(columns: set[str]) -> list[tuple[str, str, str]]:
     issues: list[tuple[str, str, str]] = []
-    escaped_markers = [marker.replace("'", "''") for marker in MARKERS]
-    marker_sql = ", ".join("'" + marker + "'" for marker in escaped_markers)
+    marker_sql = ", ".join("'" + marker.replace("'", "''") + "'" for marker in MARKERS)
 
     for field in FIELDS:
         if field not in columns:
@@ -81,19 +80,16 @@ def _issue_queries(relation: str, columns: set[str]) -> list[tuple[str, str, str
         issues.append((field, "ESPACOS_EXTRAS", f"{text} <> '' AND {text} <> BTRIM({text})"))
 
     if "cpf" in columns:
-        issues.append(("cpf", "CPF_INVALIDO", "BTRIM(COALESCE(cpf::text,'')) <> '' AND regexp_replace(cpf::text, '[^0-9]', '', 'g') <> '' AND length(regexp_replace(cpf::text, '[^0-9]', '', 'g')) <> 11"))
+        issues.append(("cpf", "CPF_INVALIDO", "BTRIM(COALESCE(cpf::text,'')) <> '' AND length(regexp_replace(cpf::text, '[^0-9]', '', 'g')) <> 11"))
     if "celular" in columns:
         issues.append(("celular", "CELULAR_INVALIDO", "BTRIM(COALESCE(celular::text,'')) <> '' AND length(regexp_replace(celular::text, '[^0-9]', '', 'g')) NOT IN (10,11)"))
     if "email" in columns:
         issues.append(("email", "EMAIL_INVALIDO", "BTRIM(COALESCE(email::text,'')) <> '' AND email::text !~* '^[A-Z0-9._%+-]+@[A-Z0-9.-]+\\.[A-Z]{2,}$'"))
     if "nome" in columns:
         issues.append(("nome", "NOME_CURTO", "BTRIM(COALESCE(nome::text,'')) <> '' AND length(BTRIM(nome::text)) < 3"))
-    if "data_disparo" in columns:
-        issues.append(("data_disparo", "DATA_FUTURA", "data_disparo::date > CURRENT_DATE + 1"))
-    if "data_matricula" in columns:
-        issues.append(("data_matricula", "DATA_FUTURA", "data_matricula::date > CURRENT_DATE + 1"))
-    if "data_inscricao" in columns:
-        issues.append(("data_inscricao", "DATA_FUTURA", "data_inscricao::date > CURRENT_DATE + 1"))
+    for field in ("data_disparo", "data_matricula", "data_inscricao"):
+        if field in columns:
+            issues.append((field, "DATA_FUTURA", f"{db._safe_ident(field)}::date > CURRENT_DATE + 1"))
     if "matriculado" in columns:
         issues.append(("matriculado", "BOOLEANO_INVALIDO", "BTRIM(COALESCE(matriculado::text,'')) <> '' AND UPPER(BTRIM(matriculado::text)) NOT IN ('TRUE','FALSE','T','F','1','0','SIM','NAO','NÃO','S','N')"))
     if "matriculado" in columns and "data_matricula" in columns:
@@ -104,38 +100,27 @@ def _issue_queries(relation: str, columns: set[str]) -> list[tuple[str, str, str
 
 def _diagnose(limit: int) -> Dict[str, Any]:
     relation, columns = _relation()
-    definitions = _issue_queries(relation, columns)
+    definitions = _issue_queries(columns)
+    identity_columns = [column for column in ("nome", "cpf", "celular", "email", "consultor_disparo") if column in columns]
+    identity_select = ", ".join(f"COALESCE({db._safe_ident(column)}::text, '') AS {db._safe_ident(column)}" for column in identity_columns)
     items = []
     total = 0
-    sample_name = "COALESCE(nome::text, '')" if "nome" in columns else "''"
-    sample_cpf = "COALESCE(cpf::text, '')" if "cpf" in columns else "''"
-    sample_phone = "COALESCE(celular::text, '')" if "celular" in columns else "''"
 
     for field, issue, condition in definitions:
         ident = db._safe_ident(field)
         result = _rows(
-            f"""
-            SELECT COUNT(*)::bigint AS quantidade,
-                   MIN({ident}::text) FILTER (WHERE {ident} IS NOT NULL) AS exemplo
-            FROM {relation}
-            WHERE {condition}
-            """,
+            f"SELECT COUNT(*)::bigint AS quantidade, MIN({ident}::text) FILTER (WHERE {ident} IS NOT NULL) AS exemplo FROM {relation} WHERE {condition}",
             name=f"qualidade_{field}_{issue}"[:60],
         )
         quantity = int((result[0].get("quantidade") if result else 0) or 0)
         if quantity <= 0:
             continue
         total += quantity
+        select_parts = [f"{ident}::text AS valor"]
+        if identity_select:
+            select_parts.append(identity_select)
         samples = _rows(
-            f"""
-            SELECT {ident}::text AS valor,
-                   {sample_name} AS nome,
-                   {sample_cpf} AS cpf,
-                   {sample_phone} AS celular
-            FROM {relation}
-            WHERE {condition}
-            LIMIT :limit
-            """,
+            f"SELECT {', '.join(select_parts)} FROM {relation} WHERE {condition} LIMIT :limit",
             {"limit": limit},
             f"qualidade_amostra_{field}_{issue}"[:60],
         )
