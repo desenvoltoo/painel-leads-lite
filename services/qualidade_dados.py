@@ -93,15 +93,17 @@ def _issue_queries(columns: set[str]) -> list[tuple[str, str, str]]:
     if "matriculado" in columns:
         issues.append(("matriculado", "BOOLEANO_INVALIDO", "BTRIM(COALESCE(matriculado::text,'')) <> '' AND UPPER(BTRIM(matriculado::text)) NOT IN ('TRUE','FALSE','T','F','1','0','SIM','NAO','NÃO','S','N')"))
     if "matriculado" in columns and "data_matricula" in columns:
-        issues.append(("matriculado", "MATRICULA_SEM_DATA", "UPPER(BTRIM(COALESCE(matriculado::text,''))) IN ('TRUE','T','1','SIM','S') AND data_matricula IS NULL"))
-        issues.append(("data_matricula", "DATA_SEM_MATRICULA", "data_matricula IS NOT NULL AND UPPER(BTRIM(COALESCE(matriculado::text,''))) IN ('FALSE','F','0','NAO','NÃO','N')"))
+        # Quando matriculado está positivo, a ausência da data continua sendo inconsistente.
+        issues.append(("matriculado", "MATRICULA_CONFIRMADA_SEM_DATA", "UPPER(BTRIM(COALESCE(matriculado::text,''))) IN ('TRUE','T','1','SIM','S') AND data_matricula IS NULL"))
+        # Data preenchida com matriculado negativo NÃO é erro: pode ser matrícula histórica,
+        # especialmente em Pós, egressos e campanhas de recompra.
     return issues
 
 
 def _diagnose(limit: int) -> Dict[str, Any]:
     relation, columns = _relation()
     definitions = _issue_queries(columns)
-    identity_columns = [column for column in ("nome", "cpf", "celular", "email", "consultor_disparo") if column in columns]
+    identity_columns = [column for column in ("nome", "cpf", "celular", "email", "consultor_disparo", "tipo_negocio") if column in columns]
     identity_select = ", ".join(f"COALESCE({db._safe_ident(column)}::text, '') AS {db._safe_ident(column)}" for column in identity_columns)
     items = []
     total = 0
