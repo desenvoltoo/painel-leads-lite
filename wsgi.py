@@ -79,6 +79,7 @@ try:
     from services.gestao_multi_instituicao import apply_multi_institution_metrics
     from services.query_performance_guard import apply_query_performance_guard
     from services.gestao_response_cache import apply_gestao_response_cache
+    from services.unifecaf_import_recovery import start_unifecaf_import_recovery
 
     produtividade_export_module._is_matriculated = _matriculado_explicito
     multi_result = apply_multi_institution_metrics()
@@ -96,6 +97,12 @@ try:
     register_metricas_corrigidas(application)
     register_produtividade_export(application)
     register_qualidade_dados(application)
+
+    try:
+        recovery_result = start_unifecaf_import_recovery()
+        application.logger.info("Recuperação automática UniFECAF ativada: %s", recovery_result)
+    except Exception:
+        application.logger.exception("Não foi possível iniciar a recuperação automática UniFECAF")
 
     try:
         performance_result = apply_query_performance_guard()
