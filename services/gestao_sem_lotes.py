@@ -47,7 +47,9 @@ def _relation() -> str:
 
 
 def _where_filters() -> tuple[str, Dict[str, Any]]:
-    clauses = ["data_disparo IS NOT NULL"]
+    # Entram na análise todos os disparos e também qualquer registro marcado
+    # explicitamente como matriculado, mesmo sem data_disparo.
+    clauses = ["(data_disparo IS NOT NULL OR matriculado IS TRUE)"]
     params: Dict[str, Any] = {}
     mapping = {
         "consultor_disparo": "consultor_disparo",
@@ -67,17 +69,15 @@ def _where_filters() -> tuple[str, Dict[str, Any]]:
     start = str(request.args.get("data_ini") or "").strip()
     end = str(request.args.get("data_fim") or "").strip()
     if start:
-        clauses.append("data_disparo >= CAST(:data_ini AS timestamp)")
+        clauses.append("(matriculado IS TRUE OR data_disparo >= CAST(:data_ini AS timestamp))")
         params["data_ini"] = start
     if end:
-        clauses.append("data_disparo < (CAST(:data_fim AS date) + INTERVAL '1 day')")
+        clauses.append("(matriculado IS TRUE OR data_disparo < (CAST(:data_fim AS date) + INTERVAL '1 day'))")
         params["data_fim"] = end
     return " AND ".join(clauses), params
 
 
 def _matriculated_sql() -> str:
-    # Regra oficial: somente a flag booleana verdadeira confirma matrícula atual.
-    # data_matricula, status e textos como "sim" não contam como matrícula.
     return "matriculado IS TRUE"
 
 
@@ -98,15 +98,15 @@ def _consultants_payload() -> Dict[str, Any]:
         )
         SELECT
           BTRIM(consultor_disparo::text) AS consultor_disparo,
-          COUNT(*)::bigint AS total_disparado,
+          COUNT(*) FILTER (WHERE data_disparo IS NOT NULL)::bigint AS total_disparado,
           COUNT(*) FILTER (WHERE data_disparo::date = CURRENT_DATE)::bigint AS disparado_hoje,
           COUNT(*) FILTER (WHERE data_disparo >= date_trunc('week', CURRENT_TIMESTAMP))::bigint AS disparado_semana,
           COUNT(*) FILTER (WHERE data_disparo >= date_trunc('month', CURRENT_TIMESTAMP))::bigint AS disparado_mes,
-          COUNT(*) FILTER (WHERE {text_status} ~ '(RETOR|CONTATO|RESPONDEU)')::bigint AS retornos,
-          COUNT(*) FILTER (WHERE {text_status} ~ '(POSIT|INTERESS|CONVERT|FECHOU)' OR {matriculated})::bigint AS positivos,
-          COUNT(*) FILTER (WHERE {text_status} ~ '(NEGAT|SEM INTERESSE|NAO INTERESS|NÃO INTERESS)')::bigint AS negativos,
+          COUNT(*) FILTER (WHERE data_disparo IS NOT NULL AND {text_status} ~ '(RETOR|CONTATO|RESPONDEU)')::bigint AS retornos,
+          COUNT(*) FILTER (WHERE (data_disparo IS NOT NULL AND {text_status} ~ '(POSIT|INTERESS|CONVERT|FECHOU)') OR {matriculated})::bigint AS positivos,
+          COUNT(*) FILTER (WHERE data_disparo IS NOT NULL AND {text_status} ~ '(NEGAT|SEM INTERESSE|NAO INTERESS|NÃO INTERESS)')::bigint AS negativos,
           COUNT(*) FILTER (WHERE {matriculated})::bigint AS matriculas,
-          COUNT(*) FILTER (WHERE {text_status} ~ '(NEGOCIA|EM ANDAMENTO|PROPOSTA)')::bigint AS em_negociacao,
+          COUNT(*) FILTER (WHERE data_disparo IS NOT NULL AND {text_status} ~ '(NEGOCIA|EM ANDAMENTO|PROPOSTA)')::bigint AS em_negociacao,
           MAX(data_disparo) AS ultimo_disparo
         FROM valid
         GROUP BY BTRIM(consultor_disparo::text)
@@ -124,7 +124,7 @@ def _consultants_payload() -> Dict[str, Any]:
           COALESCE(NULLIF(BTRIM(campanha::text), ''), 'SEM CAMPANHA') AS campanha,
           COALESCE(NULLIF(BTRIM(canal::text), ''), 'SEM CANAL') AS canal,
           COALESCE(NULLIF(BTRIM(peca_disparo::text), ''), 'SEM PEÇA') AS peca_disparo,
-          COUNT(*)::bigint AS total,
+          COUNT(*) FILTER (WHERE data_disparo IS NOT NULL)::bigint AS total,
           COUNT(*) FILTER (WHERE data_disparo >= date_trunc('week', CURRENT_TIMESTAMP))::bigint AS semana,
           COUNT(*) FILTER (WHERE {matriculated})::bigint AS matriculas,
           MAX(data_disparo) AS ultimo_disparo
@@ -141,16 +141,16 @@ def _consultants_payload() -> Dict[str, Any]:
     summary_rows = _rows(
         f"""
         SELECT
-          COUNT(*)::bigint AS total_disparado,
+          COUNT(*) FILTER (WHERE data_disparo IS NOT NULL)::bigint AS total_disparado,
           COUNT(*) FILTER (WHERE data_disparo::date = CURRENT_DATE)::bigint AS disparado_hoje,
           COUNT(*) FILTER (WHERE data_disparo >= date_trunc('week', CURRENT_TIMESTAMP))::bigint AS disparado_semana,
           COUNT(*) FILTER (WHERE data_disparo >= date_trunc('week', CURRENT_TIMESTAMP) - INTERVAL '7 days' AND data_disparo < date_trunc('week', CURRENT_TIMESTAMP))::bigint AS semana_anterior,
           COUNT(*) FILTER (WHERE data_disparo >= date_trunc('month', CURRENT_TIMESTAMP))::bigint AS disparado_mes,
           COUNT(*) FILTER (WHERE data_disparo >= date_trunc('month', CURRENT_TIMESTAMP) - INTERVAL '1 month' AND data_disparo < date_trunc('month', CURRENT_TIMESTAMP))::bigint AS mes_anterior,
-          COUNT(*) FILTER (WHERE {text_status} ~ '(RETOR|CONTATO|RESPONDEU)')::bigint AS retornos,
-          COUNT(*) FILTER (WHERE {text_status} ~ '(POSIT|INTERESS|CONVERT|FECHOU)' OR {matriculated})::bigint AS positivos,
-          COUNT(*) FILTER (WHERE {text_status} ~ '(NEGOCIA|EM ANDAMENTO|PROPOSTA)')::bigint AS em_negociacao,
-          COUNT(*) FILTER (WHERE {text_status} ~ '(NEGAT|SEM INTERESSE|NAO INTERESS|NÃO INTERESS)')::bigint AS negativos,
+          COUNT(*) FILTER (WHERE data_disparo IS NOT NULL AND {text_status} ~ '(RETOR|CONTATO|RESPONDEU)')::bigint AS retornos,
+          COUNT(*) FILTER (WHERE (data_disparo IS NOT NULL AND {text_status} ~ '(POSIT|INTERESS|CONVERT|FECHOU)') OR {matriculated})::bigint AS positivos,
+          COUNT(*) FILTER (WHERE data_disparo IS NOT NULL AND {text_status} ~ '(NEGOCIA|EM ANDAMENTO|PROPOSTA)')::bigint AS em_negociacao,
+          COUNT(*) FILTER (WHERE data_disparo IS NOT NULL AND {text_status} ~ '(NEGAT|SEM INTERESSE|NAO INTERESS|NÃO INTERESS)')::bigint AS negativos,
           COUNT(*) FILTER (WHERE {matriculated})::bigint AS matriculas
         FROM {relation}
         WHERE {where_sql}
@@ -163,9 +163,9 @@ def _consultants_payload() -> Dict[str, Any]:
     by_business = _rows(
         f"""
         SELECT COALESCE(NULLIF(BTRIM(tipo_negocio::text),''),'SEM TIPO DE NEGÓCIO') AS nome,
-               COUNT(*)::bigint AS disparos,
-               COUNT(*) FILTER (WHERE {text_status} ~ '(RETOR|CONTATO|RESPONDEU)')::bigint AS retornos,
-               COUNT(*) FILTER (WHERE {text_status} ~ '(POSIT|INTERESS|CONVERT|FECHOU)' OR {matriculated})::bigint AS positivos,
+               COUNT(*) FILTER (WHERE data_disparo IS NOT NULL)::bigint AS disparos,
+               COUNT(*) FILTER (WHERE data_disparo IS NOT NULL AND {text_status} ~ '(RETOR|CONTATO|RESPONDEU)')::bigint AS retornos,
+               COUNT(*) FILTER (WHERE (data_disparo IS NOT NULL AND {text_status} ~ '(POSIT|INTERESS|CONVERT|FECHOU)') OR {matriculated})::bigint AS positivos,
                COUNT(*) FILTER (WHERE {matriculated})::bigint AS matriculas
         FROM {relation}
         WHERE {where_sql}
@@ -178,9 +178,9 @@ def _consultants_payload() -> Dict[str, Any]:
     by_campaign = _rows(
         f"""
         SELECT COALESCE(NULLIF(BTRIM(campanha::text),''),'SEM CAMPANHA') AS nome,
-               COUNT(*)::bigint AS disparos,
-               COUNT(*) FILTER (WHERE {text_status} ~ '(RETOR|CONTATO|RESPONDEU)')::bigint AS retornos,
-               COUNT(*) FILTER (WHERE {text_status} ~ '(POSIT|INTERESS|CONVERT|FECHOU)' OR {matriculated})::bigint AS positivos,
+               COUNT(*) FILTER (WHERE data_disparo IS NOT NULL)::bigint AS disparos,
+               COUNT(*) FILTER (WHERE data_disparo IS NOT NULL AND {text_status} ~ '(RETOR|CONTATO|RESPONDEU)')::bigint AS retornos,
+               COUNT(*) FILTER (WHERE (data_disparo IS NOT NULL AND {text_status} ~ '(POSIT|INTERESS|CONVERT|FECHOU)') OR {matriculated})::bigint AS positivos,
                COUNT(*) FILTER (WHERE {matriculated})::bigint AS matriculas
         FROM {relation}
         WHERE {where_sql}
@@ -198,7 +198,7 @@ def _consultants_payload() -> Dict[str, Any]:
           ARRAY_REMOVE(ARRAY_AGG(DISTINCT NULLIF(BTRIM(canal::text),'')), NULL) AS canais,
           ARRAY_REMOVE(ARRAY_AGG(DISTINCT NULLIF(BTRIM(unidade::text),'')), NULL) AS unidades
         FROM {relation}
-        WHERE data_disparo IS NOT NULL
+        WHERE data_disparo IS NOT NULL OR matriculado IS TRUE
         """,
         name="gestao_sem_lotes_options",
     ) or [{}]
