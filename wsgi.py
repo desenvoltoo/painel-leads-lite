@@ -76,10 +76,13 @@ try:
     from services.produtividade_export import register_produtividade_export
     from services.qualidade_dados import register_qualidade_dados
     from services.date_monotonic_guard import apply_date_monotonic_guards
+    from services.gestao_multi_instituicao import apply_multi_institution_metrics
 
     produtividade_export_module._is_matriculated = _matriculado_explicito
+    multi_result = apply_multi_institution_metrics()
 
     application = create_app()
+    application.logger.info("Gestão multi-instituição ativada: %s", multi_result)
     register_institution_routes(application)
     register_upload_preview_routes(application)
     register_upload_new_only_routes(application)
