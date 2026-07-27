@@ -110,7 +110,7 @@ def combined_relation() -> str:
         selects.append(_select_part(relation, columns, institution))
     if not selects:
         raise RuntimeError("Nenhuma fonte de leads encontrada para Anhanguera ou UniFECAF.")
-    return "(" + " UNION ALL ".join(selects) + ")"
+    return "(" + " UNION ALL ".join(selects) + ") AS leads_unificados"
 
 
 def _patch_export_dates(produtividade_export) -> None:
