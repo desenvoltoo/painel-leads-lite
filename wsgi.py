@@ -76,6 +76,7 @@ try:
     from services import produtividade_export as produtividade_export_module
     from services.produtividade_export import register_produtividade_export
     from services.qualidade_dados import register_qualidade_dados
+    from services.date_monotonic_guard import apply_date_monotonic_guards
 
     produtividade_export_module._is_matriculated = _matriculado_explicito
 
@@ -88,6 +89,14 @@ try:
     register_gestao_sem_lotes(application)
     register_produtividade_export(application)
     register_qualidade_dados(application)
+
+    try:
+        protected_targets = apply_date_monotonic_guards()
+        application.logger.info("Proteção de datas ativada: %s", protected_targets)
+    except Exception:
+        # O painel continua disponível mesmo se o usuário do banco não puder criar triggers.
+        # O erro fica explícito no log para aplicação posterior da migration SQL.
+        application.logger.exception("Não foi possível instalar automaticamente a proteção de datas")
 except Exception as exc:
     log_startup_failure(exc)
     diagnostic_payload = build_error_payload(exc, public_message="Falha ao inicializar aplicação.", phase="application_startup", include_trace=True)
