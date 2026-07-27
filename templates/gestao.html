@@ -3,24 +3,13 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Gestão Operacional | Leads Educação</title>
+  <title>Gestão Executiva | Leads Educação</title>
   <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
   <link href="{{ url_for('static', filename='css/gestao.css') }}?v={{ asset_version }}" rel="stylesheet">
 </head>
-<body
-  data-permissions="{{ (current_user_context.permissions if current_user_context else [])|join(',') }}"
-  data-user-email="{{ current_user or '' }}"
-  data-user-profile="{{ current_user_context.nome_perfil if current_user_context else '' }}"
->
+<body data-permissions="{{ (current_user_context.permissions if current_user_context else [])|join(',') }}" data-user-email="{{ current_user or '' }}" data-user-profile="{{ current_user_context.nome_perfil if current_user_context else '' }}">
 <header class="management-topbar">
-  <div class="brand-block">
-    <div class="brand-mark">D</div>
-    <div>
-      <span class="eyebrow">GESTÃO OPERACIONAL</span>
-      <h1>Central de Gestão</h1>
-      <p>Equipe, disparos, conversão e qualidade da operação educacional.</p>
-    </div>
-  </div>
+  <div class="brand-block"><div class="brand-mark">D</div><div><span class="eyebrow">GESTÃO EXECUTIVA</span><h1>Central de Gestão</h1><p>Produtividade, conversão e qualidade da operação.</p></div></div>
   <div class="topbar-actions">
     <span class="sync-pill"><i id="syncDot"></i><span id="syncText">Atualizado</span></span>
     <span class="user-pill"><strong>{{ current_user_context.nome_perfil if current_user_context else 'Usuário' }}</strong><small>{{ current_user or '' }}</small></span>
@@ -29,125 +18,82 @@
     <form method="post" action="/logout"><button class="btn btn-outline-danger" type="submit">Sair</button></form>
   </div>
 </header>
-
 <div class="management-layout">
   <aside class="side-nav" aria-label="Navegação da gestão">
     <div class="nav-label">Módulo</div>
-    <button class="active" data-page="overview"><span>01</span><div><strong>Visão geral</strong><small>Resumo executivo</small></div></button>
-    <button data-page="team"><span>02</span><div><strong>Minha equipe</strong><small>Disparos e produtividade</small></div></button>
-    <button data-page="imports"><span>03</span><div><strong>Importações</strong><small>Histórico e qualidade</small></div></button>
-    <button data-page="leads"><span>04</span><div><strong>Localizar lead</strong><small>Busca individual</small></div></button>
-    <button data-page="quality"><span>05</span><div><strong>Qualidade dos dados</strong><small>Inconsistências por campo</small></div></button>
-    <div class="nav-footer"><span>PostgreSQL</span><span>Modelo Estrela</span></div>
+    <button class="active" data-page="overview"><span>01</span><div><strong>Visão geral</strong><small>Decisões e alertas</small></div></button>
+    <button data-page="team"><span>02</span><div><strong>Minha equipe</strong><small>Produtividade</small></div></button>
+    <button data-page="performance"><span>03</span><div><strong>Desempenho</strong><small>Campanhas e negócios</small></div></button>
+    <button data-page="imports"><span>04</span><div><strong>Importações</strong><small>Histórico da base</small></div></button>
+    <button data-page="leads"><span>05</span><div><strong>Localizar lead</strong><small>Busca individual</small></div></button>
+    <button data-page="quality"><span>06</span><div><strong>Qualidade dos dados</strong><small>Inconsistências</small></div></button>
+    <div class="nav-footer"><span>PostgreSQL</span><span>Modelo Estrela</span><span>Sem lotes</span></div>
   </aside>
-
   <main class="content-area">
     <div id="globalError" class="alert alert-danger d-none"></div>
 
+    <section class="global-filter-panel panel">
+      <div class="global-filter-head"><div><span class="panel-kicker">FILTROS GLOBAIS</span><h3>Recorte da análise</h3></div><button id="btnClearFilters" class="link-button" type="button">Limpar filtros</button></div>
+      <div class="global-filters">
+        <input id="filterDateStart" type="date" class="form-control" aria-label="Data inicial">
+        <input id="filterDateEnd" type="date" class="form-control" aria-label="Data final">
+        <select id="filterBusiness" class="form-select"><option value="">Todos os tipos de negócio</option></select>
+        <select id="filterDispatchType" class="form-select"><option value="">Todos os tipos de disparo</option></select>
+        <select id="filterChannel" class="form-select"><option value="">Todos os canais</option></select>
+        <select id="filterUnit" class="form-select"><option value="">Todas as unidades</option></select>
+        <input id="filterCampaign" class="form-control" placeholder="Campanha">
+        <input id="filterCourse" class="form-control" placeholder="Curso">
+        <button id="btnApplyFilters" class="btn btn-primary" type="button">Aplicar filtros</button>
+      </div>
+      <div id="activeFilterSummary" class="active-filter-summary">Exibindo toda a operação.</div>
+    </section>
+
     <section class="page active" id="page-overview">
-      <div class="page-heading">
-        <div><span class="page-kicker">OPERAÇÃO DE DISPAROS</span><h2>Visão geral</h2><p>Indicadores calculados diretamente pelos disparos registrados no banco.</p></div>
-        <div class="page-heading-meta"><small id="lastUpdated">Aguardando atualização</small><span id="dataHealth" class="health-pill">Dados disponíveis</span></div>
-      </div>
+      <div class="page-heading"><div><span class="page-kicker">OPERAÇÃO EM TEMPO REAL</span><h2>Visão geral</h2><p>Os números que precisam de acompanhamento agora.</p></div><div class="page-heading-meta"><small id="lastUpdated">Aguardando atualização</small><span id="dataHealth" class="health-pill">Dados disponíveis</span></div></div>
       <div id="executiveKpis" class="executive-kpis" aria-live="polite"></div>
-      <div class="overview-grid">
-        <article class="panel panel-ranking">
-          <div class="panel-title"><div><span class="panel-kicker">DESEMPENHO</span><h3>Ranking da equipe</h3><p>Volume semanal e matrículas por consultor.</p></div><button class="link-button" data-go="team">Ver equipe</button></div>
-          <div id="teamRanking" class="ranking-list"></div>
-        </article>
-        <article class="panel panel-alerts">
-          <div class="panel-title"><div><span class="panel-kicker">PRIORIDADES</span><h3>Pontos de atenção</h3><p>Alertas gerados a partir dos dados de disparo.</p></div></div>
-          <div id="managementAlerts" class="alert-list"></div>
-        </article>
+      <div class="comparison-grid">
+        <article class="comparison-card"><span>Semana atual x anterior</span><strong id="weekComparison">—</strong><small id="weekComparisonHelp">Aguardando dados</small></article>
+        <article class="comparison-card"><span>Mês atual x anterior</span><strong id="monthComparison">—</strong><small id="monthComparisonHelp">Aguardando dados</small></article>
+        <article class="comparison-card"><span>Taxa de retorno</span><strong id="returnRate">—</strong><small>Retornos sobre disparos</small></article>
+        <article class="comparison-card"><span>Conversão</span><strong id="conversionRate">—</strong><small>Matrículas confirmadas sobre disparos</small></article>
       </div>
+      <div class="overview-grid">
+        <article class="panel panel-ranking"><div class="panel-title"><div><span class="panel-kicker">DESEMPENHO</span><h3>Ranking da equipe</h3><p>Volume semanal e matrículas confirmadas.</p></div><button class="link-button" data-go="team">Ver equipe</button></div><div id="teamRanking" class="ranking-list"></div></article>
+        <article class="panel panel-alerts"><div class="panel-title"><div><span class="panel-kicker">PRIORIDADES</span><h3>Pontos de atenção</h3><p>Alertas automáticos da operação.</p></div></div><div id="managementAlerts" class="alert-list"></div></article>
+      </div>
+      <article class="panel mt-3"><div class="panel-title"><div><span class="panel-kicker">FUNIL COMERCIAL</span><h3>Passagem entre as etapas</h3><p>Do disparo até a matrícula confirmada.</p></div></div><div id="managementFunnel" class="funnel-grid"></div></article>
     </section>
 
     <section class="page" id="page-team">
-      <div class="page-heading">
-        <div><span class="page-kicker">DISPAROS DA EQUIPE</span><h2>Minha equipe</h2><p>Totais por consultor, sem qualquer dependência de lote.</p></div>
-        <small id="teamCount">—</small>
-      </div>
-
-      <div id="teamSummaryCards" class="executive-kpis mb-3" aria-live="polite"></div>
-
+      <div class="page-heading"><div><span class="page-kicker">DISPAROS DA EQUIPE</span><h2>Minha equipe</h2><p>Produtividade sem dependência de lote.</p></div><small id="teamCount">—</small></div>
+      <div id="teamSummaryCards" class="executive-kpis mb-3"></div>
       <div class="toolbar toolbar-team">
         <div class="search-box"><span>⌕</span><input id="teamSearch" class="form-control" placeholder="Buscar consultor"></div>
-        <select id="teamPeriod" class="form-select">
-          <option value="total_disparado">Todo o período</option>
-          <option value="disparado_hoje">Hoje</option>
-          <option value="disparado_semana" selected>Esta semana</option>
-          <option value="disparado_mes">Este mês</option>
-        </select>
-        <select id="teamSort" class="form-select">
-          <option value="disparado_semana" selected>Mais disparos na semana</option>
-          <option value="total_disparado">Mais disparos no total</option>
-          <option value="disparado_hoje">Mais disparos hoje</option>
-          <option value="disparado_mes">Mais disparos no mês</option>
-          <option value="matriculas">Mais matrículas</option>
-          <option value="taxa_matricula_pct">Maior conversão</option>
-        </select>
-        <input id="teamExportMonth" type="month" class="form-control" style="max-width:170px" aria-label="Mês da exportação">
+        <select id="teamPeriod" class="form-select"><option value="total_disparado">Todo o período</option><option value="disparado_hoje">Hoje</option><option value="disparado_semana" selected>Esta semana</option><option value="disparado_mes">Este mês</option></select>
+        <select id="teamSort" class="form-select"><option value="disparado_semana" selected>Mais disparos na semana</option><option value="total_disparado">Mais disparos no total</option><option value="matriculas">Mais matrículas</option><option value="taxa_matricula_pct">Maior conversão</option><option value="taxa_retorno_pct">Maior retorno</option></select>
+        <input id="teamExportMonth" type="month" class="form-control" aria-label="Mês da exportação">
         <button id="btnExportTeamProductivity" type="button" class="btn btn-success">Exportar produtividade</button>
       </div>
-
       <div id="teamCards" class="team-cards"></div>
-
-      <article class="panel mt-3">
-        <div class="panel-title"><div><span class="panel-kicker">RESUMO POR CONSULTOR</span><h3>Disparos e resultados</h3><p>Todo o período, hoje, semana e mês.</p></div></div>
-        <div class="table-responsive table-shell tall">
-          <table class="management-table wide">
-            <thead><tr><th>Consultor</th><th>Total disparado</th><th>Hoje</th><th>Semana</th><th>Mês</th><th>Retornos</th><th>Positivos</th><th>Negativos</th><th>Matrículas</th><th>Taxa retorno</th><th>Conversão</th><th>Último disparo</th></tr></thead>
-            <tbody id="teamTableBody"></tbody>
-          </table>
-        </div>
-      </article>
-
-      <article class="panel mt-3">
-        <div class="panel-title"><div><span class="panel-kicker">DETALHAMENTO</span><h3>Disparos separados pelos dados do banco</h3><p>Consultor, tipo, campanha, canal e peça.</p></div></div>
-        <div class="table-responsive table-shell tall">
-          <table class="management-table wide">
-            <thead><tr><th>Consultor</th><th>Tipo</th><th>Campanha</th><th>Canal</th><th>Peça</th><th>Total</th><th>Semana</th><th>Último disparo</th></tr></thead>
-            <tbody id="teamBreakdownBody"></tbody>
-          </table>
-        </div>
-      </article>
+      <article class="panel mt-3"><div class="panel-title"><div><span class="panel-kicker">RESUMO POR CONSULTOR</span><h3>Disparos e resultados</h3></div></div><div class="table-responsive table-shell tall"><table class="management-table wide"><thead><tr><th>Consultor</th><th>Total</th><th>Hoje</th><th>Semana</th><th>Mês</th><th>Retornos</th><th>Positivos</th><th>Negociação</th><th>Negativos</th><th>Matrículas</th><th>Retorno</th><th>Conversão</th><th>Último disparo</th></tr></thead><tbody id="teamTableBody"></tbody></table></div></article>
+      <article class="panel mt-3"><div class="panel-title"><div><span class="panel-kicker">DETALHAMENTO</span><h3>Campanhas e canais por consultor</h3></div></div><div class="table-responsive table-shell tall"><table class="management-table wide"><thead><tr><th>Consultor</th><th>Tipo</th><th>Campanha</th><th>Canal</th><th>Peça</th><th>Total</th><th>Semana</th><th>Matrículas</th><th>Último disparo</th></tr></thead><tbody id="teamBreakdownBody"></tbody></table></div></article>
     </section>
 
-    <section class="page" id="page-imports">
-      <div class="page-heading"><div><span class="page-kicker">QUALIDADE DA BASE</span><h2>Importações</h2><p>Envio de bases, processamento, rejeições e histórico.</p></div><button id="btnReloadImports" class="btn btn-outline-secondary" type="button">Atualizar histórico</button></div>
-      <div class="imports-layout">
-        <article class="panel upload-panel"><div class="panel-title"><div><span class="panel-kicker">NOVA BASE</span><h3>Importar planilha</h3><p>CSV, XLS ou XLSX com deduplicação no banco.</p></div></div><form id="uploadForm"><label class="file-drop" for="managementFile"><strong>Selecionar arquivo</strong><small>Arraste ou clique para escolher</small><input id="managementFile" type="file" name="file" accept=".csv,.xlsx,.xls" required><span id="managementFileName">Nenhum arquivo selecionado</span></label><input type="hidden" name="usuario" value="{{ current_user or '' }}"><button class="btn btn-primary w-100 mt-3" type="submit">Importar planilha</button></form><div id="uploadResult" class="mt-3"></div></article>
-        <article class="panel"><div class="panel-title"><div><span class="panel-kicker">RESUMO</span><h3>Últimos processamentos</h3><p>Volume processado e qualidade da entrada.</p></div></div><div id="importSummary" class="summary-grid"></div></article>
+    <section class="page" id="page-performance">
+      <div class="page-heading"><div><span class="page-kicker">ANÁLISE DE RESULTADOS</span><h2>Desempenho</h2><p>Compare tipos de negócio e campanhas.</p></div></div>
+      <div class="performance-grid">
+        <article class="panel"><div class="panel-title"><div><span class="panel-kicker">TIPO DE NEGÓCIO</span><h3>Resultado por operação</h3></div></div><div class="table-responsive table-shell"><table class="management-table"><thead><tr><th>Tipo</th><th>Disparos</th><th>Retornos</th><th>Positivos</th><th>Matrículas</th><th>Conversão</th></tr></thead><tbody id="businessTableBody"></tbody></table></div></article>
+        <article class="panel"><div class="panel-title"><div><span class="panel-kicker">CAMPANHAS</span><h3>Eficiência das campanhas</h3></div></div><div class="table-responsive table-shell"><table class="management-table"><thead><tr><th>Campanha</th><th>Disparos</th><th>Retornos</th><th>Positivos</th><th>Matrículas</th><th>Conversão</th></tr></thead><tbody id="campaignTableBody"></tbody></table></div></article>
       </div>
-      <article class="panel mt-3"><div class="table-responsive table-shell tall"><table class="management-table wide"><thead><tr><th>Arquivo</th><th>Usuário</th><th>Status</th><th>Etapa</th><th>Recebidas</th><th>Válidas</th><th>Inseridas</th><th>Atualizadas</th><th>Rejeitadas</th><th>Mensagem</th><th>Data</th></tr></thead><tbody id="importsTableBody"></tbody></table></div></article>
     </section>
 
-    <section class="page" id="page-leads">
-      <div class="page-heading"><div><span class="page-kicker">CONSULTA INDIVIDUAL</span><h2>Localizar lead</h2><p>Busque por nome, CPF, telefone ou identificador.</p></div></div>
-      <div class="lead-search-bar"><div class="search-box"><span>⌕</span><input id="leadSearch" class="form-control" placeholder="Digite nome, CPF ou telefone" autocomplete="off"></div><button id="btnLeadSearch" class="btn btn-primary">Buscar</button></div>
-      <article class="panel"><div id="leadResults" class="lead-results"><div class="empty-state">Faça uma busca para localizar o lead.</div></div></article>
-    </section>
+    <section class="page" id="page-imports"><div class="page-heading"><div><span class="page-kicker">QUALIDADE DA BASE</span><h2>Importações</h2><p>Envio, processamento e rejeições.</p></div><button id="btnReloadImports" class="btn btn-outline-secondary" type="button">Atualizar histórico</button></div><div class="imports-layout"><article class="panel upload-panel"><div class="panel-title"><div><span class="panel-kicker">NOVA BASE</span><h3>Importar planilha</h3></div></div><form id="uploadForm"><label class="file-drop" for="managementFile"><strong>Selecionar arquivo</strong><small>CSV, XLS ou XLSX</small><input id="managementFile" type="file" name="file" accept=".csv,.xlsx,.xls" required><span id="managementFileName">Nenhum arquivo selecionado</span></label><input type="hidden" name="usuario" value="{{ current_user or '' }}"><button class="btn btn-primary w-100 mt-3" type="submit">Importar planilha</button></form><div id="uploadResult" class="mt-3"></div></article><article class="panel"><div class="panel-title"><div><span class="panel-kicker">RESUMO</span><h3>Últimos processamentos</h3></div></div><div id="importSummary" class="summary-grid"></div></article></div><article class="panel mt-3"><div class="table-responsive table-shell tall"><table class="management-table wide"><thead><tr><th>Arquivo</th><th>Usuário</th><th>Status</th><th>Etapa</th><th>Recebidas</th><th>Válidas</th><th>Inseridas</th><th>Atualizadas</th><th>Rejeitadas</th><th>Mensagem</th><th>Data</th></tr></thead><tbody id="importsTableBody"></tbody></table></div></article></section>
 
-    <section class="page" id="page-quality">
-      <div class="page-heading">
-        <div><span class="page-kicker">QUALIDADE DA BASE</span><h2>Qualidade dos dados</h2><p>Campos com marcadores inválidos, formatos incorretos ou combinações inconsistentes.</p></div>
-        <button id="btnReloadQuality" class="btn btn-outline-secondary" type="button">Analisar novamente</button>
-      </div>
-      <div id="qualityError" class="alert alert-danger d-none"></div>
-      <div id="qualitySummary" class="summary-grid mb-3"></div>
-      <article class="panel">
-        <div class="panel-title"><div><span class="panel-kicker">INCONSISTÊNCIAS</span><h3>Problemas encontrados por coluna</h3><p>Exemplos para localizar e corrigir os registros.</p></div></div>
-        <div class="table-responsive table-shell tall">
-          <table class="management-table wide">
-            <thead><tr><th>Campo</th><th>Problema</th><th>Quantidade</th><th>Exemplo</th><th>Registros para localizar</th></tr></thead>
-            <tbody id="qualityTableBody"><tr><td colspan="5" class="empty-cell">Clique em analisar novamente.</td></tr></tbody>
-          </table>
-        </div>
-      </article>
-    </section>
+    <section class="page" id="page-leads"><div class="page-heading"><div><span class="page-kicker">CONSULTA INDIVIDUAL</span><h2>Localizar lead</h2><p>Busque por nome, CPF ou telefone.</p></div></div><div class="lead-search-bar"><div class="search-box"><span>⌕</span><input id="leadSearch" class="form-control" placeholder="Digite nome, CPF ou telefone" autocomplete="off"></div><button id="btnLeadSearch" class="btn btn-primary">Buscar</button></div><article class="panel"><div id="leadResults" class="lead-results"><div class="empty-state">Faça uma busca para localizar o lead.</div></div></article></section>
+
+    <section class="page" id="page-quality"><div class="page-heading"><div><span class="page-kicker">QUALIDADE DA BASE</span><h2>Qualidade dos dados</h2><p>Formatos incorretos, marcadores inválidos e combinações inconsistentes.</p></div><button id="btnReloadQuality" class="btn btn-outline-secondary" type="button">Analisar novamente</button></div><div id="qualityError" class="alert alert-danger d-none"></div><div id="qualitySummary" class="summary-grid mb-3"></div><article class="panel"><div class="panel-title"><div><span class="panel-kicker">INCONSISTÊNCIAS</span><h3>Problemas encontrados por coluna</h3></div></div><div class="table-responsive table-shell tall"><table class="management-table wide"><thead><tr><th>Campo</th><th>Problema</th><th>Quantidade</th><th>Exemplo</th><th>Registros para localizar</th></tr></thead><tbody id="qualityTableBody"><tr><td colspan="5" class="empty-cell">Clique em analisar novamente.</td></tr></tbody></table></div></article></section>
   </main>
 </div>
-
 <div id="toastRegion" class="toast-region"></div>
 <script src="{{ url_for('static', filename='js/gestao.js') }}?v={{ asset_version }}"></script>
 </body>
