@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Recupera cargas Anhanguera que ficaram paradas na staging."""
+"""Recupera continuamente cargas Anhanguera que ficaram paradas na staging."""
 from __future__ import annotations
 
 import logging
@@ -73,25 +73,29 @@ def _ensure_progress_row(upload_id: str, total_rows: int, routine_name: str) -> 
 
 def _run_recovery() -> None:
     delay = max(2, int(os.getenv("ANHANGUERA_RECOVERY_START_DELAY_SECONDS", "8") or 8))
+    interval = max(10, int(os.getenv("ANHANGUERA_RECOVERY_INTERVAL_SECONDS", "30") or 30))
     time.sleep(delay)
-    try:
-        pending = _pending_uploads()
-        logger.warning(
-            "anhanguera_recovery_found uploads=%s total_rows=%s",
-            len(pending),
-            sum(int(row.get("total_rows") or 0) for row in pending),
-        )
-        for row in pending:
-            upload_id = str(row.get("upload_id") or "").strip()
-            total_rows = int(row.get("total_rows") or 0)
-            routine_name = str(row.get("routine_name") or "sp_processar_stg_leads_site").strip()
-            if not upload_id or total_rows <= 0:
-                continue
-            _ensure_progress_row(upload_id, total_rows, routine_name)
-            worker = start_upload_worker("anhanguera", upload_id, routine_name, total_rows)
-            worker.join()
-    except Exception:
-        logger.exception("anhanguera_recovery_error")
+    while True:
+        try:
+            pending = _pending_uploads()
+            if pending:
+                logger.warning(
+                    "anhanguera_recovery_found uploads=%s total_rows=%s",
+                    len(pending),
+                    sum(int(row.get("total_rows") or 0) for row in pending),
+                )
+            for row in pending:
+                upload_id = str(row.get("upload_id") or "").strip()
+                total_rows = int(row.get("total_rows") or 0)
+                routine_name = str(row.get("routine_name") or "sp_processar_stg_leads_site").strip()
+                if not upload_id or total_rows <= 0:
+                    continue
+                _ensure_progress_row(upload_id, total_rows, routine_name)
+                worker = start_upload_worker("anhanguera", upload_id, routine_name, total_rows)
+                worker.join()
+        except Exception:
+            logger.exception("anhanguera_recovery_error")
+        time.sleep(interval)
 
 
 def start_anhanguera_import_recovery() -> dict[str, Any]:
@@ -108,4 +112,5 @@ def start_anhanguera_import_recovery() -> dict[str, Any]:
     return {
         "status": "iniciado",
         "delay_seconds": int(os.getenv("ANHANGUERA_RECOVERY_START_DELAY_SECONDS", "8") or 8),
+        "interval_seconds": int(os.getenv("ANHANGUERA_RECOVERY_INTERVAL_SECONDS", "30") or 30),
     }
