@@ -80,6 +80,7 @@ try:
     from services.query_performance_guard import apply_query_performance_guard
     from services.gestao_response_cache import apply_gestao_response_cache
     from services.unifecaf_import_recovery import start_unifecaf_import_recovery
+    from services.anhanguera_import_recovery import start_anhanguera_import_recovery
     from services.unifecaf_serial_guard import apply_unifecaf_serial_guard
 
     produtividade_export_module._is_matriculated = _matriculado_explicito
@@ -102,10 +103,16 @@ try:
     register_qualidade_dados(application)
 
     try:
-        recovery_result = start_unifecaf_import_recovery()
-        application.logger.info("Recuperação automática UniFECAF ativada: %s", recovery_result)
+        unifecaf_recovery = start_unifecaf_import_recovery()
+        application.logger.info("Recuperação automática UniFECAF ativada: %s", unifecaf_recovery)
     except Exception:
         application.logger.exception("Não foi possível iniciar a recuperação automática UniFECAF")
+
+    try:
+        anhanguera_recovery = start_anhanguera_import_recovery()
+        application.logger.info("Recuperação automática Anhanguera ativada: %s", anhanguera_recovery)
+    except Exception:
+        application.logger.exception("Não foi possível iniciar a recuperação automática Anhanguera")
 
     try:
         performance_result = apply_query_performance_guard()
