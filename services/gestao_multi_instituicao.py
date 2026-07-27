@@ -2,6 +2,7 @@
 """Unifica Anhanguera e UniFECAF nas métricas e exportações da Gestão."""
 from __future__ import annotations
 
+from functools import lru_cache
 from typing import Any
 
 from . import database as db
@@ -16,6 +17,11 @@ REQUIRED_COLUMNS = [
 ]
 
 DATE_COLUMNS = {"data_inscricao", "data_ultima_acao", "data_disparo", "data_matricula"}
+NATIVE_DATE_TYPES = {
+    "date",
+    "timestamp without time zone",
+    "timestamp with time zone",
+}
 
 ALIASES = {
     "unidade": ("unidade", "polo"),
@@ -28,7 +34,8 @@ def _rows(sql: str, params: dict[str, Any] | None = None, name: str = "gestao_mu
     return db._run_gestao_query(sql, params or {}, name)
 
 
-def _find_relation(schema: str) -> tuple[str, set[str]] | None:
+@lru_cache(maxsize=8)
+def _find_relation(schema: str) -> tuple[str, dict[str, str]] | None:
     rows = _rows(
         """
         SELECT table_name
@@ -54,24 +61,25 @@ def _find_relation(schema: str) -> tuple[str, set[str]] | None:
     table = str(rows[0]["table_name"])
     cols = _rows(
         """
-        SELECT column_name
+        SELECT column_name, data_type
         FROM information_schema.columns
         WHERE table_schema=:schema AND table_name=:table
         """,
         {"schema": schema, "table": table},
         f"multi_columns_{schema}",
     )
-    return f"{db._safe_ident(schema)}.{db._safe_ident(table)}", {str(r["column_name"]) for r in cols}
+    column_types = {str(r["column_name"]): str(r.get("data_type") or "") for r in cols}
+    return f"{db._safe_ident(schema)}.{db._safe_ident(table)}", column_types
 
 
-def _source_for(target: str, available: set[str]) -> str | None:
+def _source_for(target: str, available: dict[str, str]) -> str | None:
     for candidate in ALIASES.get(target, (target,)):
         if candidate in available:
             return candidate
     return None
 
 
-def _select_part(relation: str, available: set[str], institution: str) -> str:
+def _select_part(relation: str, available: dict[str, str], institution: str) -> str:
     parts: list[str] = []
     for target in REQUIRED_COLUMNS:
         source = _source_for(target, available)
@@ -87,12 +95,22 @@ def _select_part(relation: str, available: set[str], institution: str) -> str:
                 expr = "NULL::text"
         else:
             col = db._safe_ident(source)
+            data_type = available.get(source, "")
             if target in DATE_COLUMNS:
-                expr = f"modelo_estrela.parse_ts_any({col}::text)"
+                if data_type in NATIVE_DATE_TYPES:
+                    expr = f"{col}::timestamp"
+                else:
+                    expr = f"modelo_estrela.parse_ts_any({col}::text)"
             elif target == "qtd_acionamentos":
-                expr = f"NULLIF(regexp_replace(COALESCE({col}::text,''),'[^0-9]','','g'),'')::bigint"
+                if data_type in {"smallint", "integer", "bigint", "numeric"}:
+                    expr = f"{col}::bigint"
+                else:
+                    expr = f"NULLIF(regexp_replace(COALESCE({col}::text,''),'[^0-9]','','g'),'')::bigint"
             elif target == "matriculado":
-                expr = f"CASE WHEN UPPER(BTRIM(COALESCE({col}::text,''))) IN ('TRUE','T','1','SIM','S') THEN TRUE ELSE FALSE END"
+                if data_type == "boolean":
+                    expr = f"COALESCE({col}, FALSE)"
+                else:
+                    expr = f"CASE WHEN UPPER(BTRIM(COALESCE({col}::text,''))) IN ('TRUE','T','1','SIM','S') THEN TRUE ELSE FALSE END"
             else:
                 expr = f"NULLIF(BTRIM({col}::text),'')"
         parts.append(f"{expr} AS {alias}")
@@ -100,6 +118,7 @@ def _select_part(relation: str, available: set[str], institution: str) -> str:
     return f"SELECT {', '.join(parts)} FROM {relation}"
 
 
+@lru_cache(maxsize=1)
 def combined_relation() -> str:
     selects: list[str] = []
     for schema, institution in (("modelo_estrela", "ANHANGUERA"), ("unifecaf", "UNIFECAF")):
@@ -111,6 +130,11 @@ def combined_relation() -> str:
     if not selects:
         raise RuntimeError("Nenhuma fonte de leads encontrada para Anhanguera ou UniFECAF.")
     return "(" + " UNION ALL ".join(selects) + ") AS leads_unificados"
+
+
+def clear_relation_cache() -> None:
+    _find_relation.cache_clear()
+    combined_relation.cache_clear()
 
 
 def _patch_export_dates(produtividade_export) -> None:
@@ -136,6 +160,7 @@ def apply_multi_institution_metrics() -> dict[str, Any]:
     from . import gestao_sem_lotes
     from . import produtividade_export
 
+    clear_relation_cache()
     gestao_sem_lotes._relation = combined_relation
     produtividade_export._relation = combined_relation
     _patch_export_dates(produtividade_export)
@@ -145,4 +170,5 @@ def apply_multi_institution_metrics() -> dict[str, Any]:
         "fontes": ["modelo_estrela", "unifecaf"],
         "uso": ["gestao", "ranking", "funil", "campanhas", "exportacao"],
         "datas_exportacao": "DD/MM/AAAA",
+        "otimizacoes": ["cache_relacao", "tipos_nativos", "menos_parse_por_linha"],
     }
