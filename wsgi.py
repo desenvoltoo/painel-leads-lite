@@ -60,6 +60,9 @@ try:
     from upload_update_existing_routes import register_upload_update_existing_routes
     from upload_progress_routes import register_upload_progress_routes
     from institution_routes import register_institution_routes
+    from services.gestao_sem_lotes import register_gestao_sem_lotes
+    from services.produtividade_export import register_produtividade_export
+    from services.qualidade_dados import register_qualidade_dados
 
     application = create_app()
     register_institution_routes(application)
@@ -67,6 +70,9 @@ try:
     register_upload_new_only_routes(application)
     register_upload_update_existing_routes(application)
     register_upload_progress_routes(application)
+    register_gestao_sem_lotes(application)
+    register_produtividade_export(application)
+    register_qualidade_dados(application)
 except Exception as exc:
     log_startup_failure(exc)
     diagnostic_payload = build_error_payload(exc, public_message="Falha ao inicializar aplicação.", phase="application_startup", include_trace=True)
