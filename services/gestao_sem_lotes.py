@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Gestão de produtividade baseada diretamente nos disparos, sem lotes."""
+"""Gestão executiva baseada diretamente nos disparos, sem dependência de lotes."""
 from __future__ import annotations
 
 from typing import Any, Dict
@@ -46,60 +46,73 @@ def _relation() -> str:
     return f"{db._safe_ident(schema)}.{db._safe_ident(str(found[0]['table_name']))}"
 
 
+def _where_filters() -> tuple[str, Dict[str, Any]]:
+    clauses = ["data_disparo IS NOT NULL"]
+    params: Dict[str, Any] = {}
+    mapping = {
+        "consultor_disparo": "consultor_disparo",
+        "tipo_negocio": "tipo_negocio",
+        "tipo_disparo": "tipo_disparo",
+        "campanha": "campanha",
+        "canal": "canal",
+        "curso": "curso",
+        "unidade": "unidade",
+    }
+    for arg, column in mapping.items():
+        value = str(request.args.get(arg) or "").strip()
+        if value:
+            clauses.append(f"COALESCE({db._safe_ident(column)}::text, '') ILIKE :{arg}")
+            params[arg] = f"%{value}%"
+
+    start = str(request.args.get("data_ini") or "").strip()
+    end = str(request.args.get("data_fim") or "").strip()
+    if start:
+        clauses.append("data_disparo >= :data_ini")
+        params["data_ini"] = start
+    if end:
+        clauses.append("data_disparo < (:data_fim::date + INTERVAL '1 day')")
+        params["data_fim"] = end
+    return " AND ".join(clauses), params
+
+
+def _matriculated_sql() -> str:
+    # Regra oficial: data_matricula isolada nunca confirma matrícula atual.
+    return "COALESCE(matriculado::text,'') ~* '^(true|t|1|sim|s)$'"
+
+
 def _consultants_payload() -> Dict[str, Any]:
     relation = _relation()
+    where_sql, params = _where_filters()
+    matriculated = _matriculated_sql()
+    valid_consultant = "UPPER(BTRIM(REPLACE(COALESCE(consultor_disparo::text, ''), chr(92), ''))) NOT IN ('', 'N', 'NULL', 'N/A', 'NA', 'NONE', 'UNDEFINED', '-')"
+    text_status = "UPPER(COALESCE(status::text,'') || ' ' || COALESCE(status_inscricao::text,'') || ' ' || COALESCE(observacao::text,'') || ' ' || COALESCE(acao_comercial::text,''))"
+
     items = _rows(
         f"""
-        WITH base AS (
-          SELECT
-            CASE
-              WHEN UPPER(BTRIM(REPLACE(COALESCE(consultor_disparo::text, ''), chr(92), ''))) IN
-                   ('', 'N', 'NULL', 'N/A', 'NA', 'NONE', 'UNDEFINED', '-')
-                THEN NULL
-              ELSE BTRIM(consultor_disparo::text)
-            END AS consultor_disparo,
-            data_disparo,
-            data_matricula,
-            matriculado,
-            status,
-            observacao,
-            acao_comercial,
-            tipo_disparo,
-            campanha,
-            canal,
-            peca_disparo
+        WITH valid AS (
+          SELECT *
           FROM {relation}
-          WHERE data_disparo IS NOT NULL
-        ), valid AS (
-          SELECT * FROM base WHERE consultor_disparo IS NOT NULL
+          WHERE {where_sql}
+            AND {valid_consultant}
         )
         SELECT
-          consultor_disparo,
+          BTRIM(consultor_disparo::text) AS consultor_disparo,
           COUNT(*)::bigint AS total_disparado,
           COUNT(*) FILTER (WHERE data_disparo::date = CURRENT_DATE)::bigint AS disparado_hoje,
           COUNT(*) FILTER (WHERE data_disparo >= date_trunc('week', CURRENT_TIMESTAMP))::bigint AS disparado_semana,
           COUNT(*) FILTER (WHERE data_disparo >= date_trunc('month', CURRENT_TIMESTAMP))::bigint AS disparado_mes,
-          COUNT(*) FILTER (
-            WHERE UPPER(COALESCE(status::text,'') || ' ' || COALESCE(observacao::text,'') || ' ' || COALESCE(acao_comercial::text,''))
-                  ~ '(RETOR|CONTATO|RESPONDEU)'
-          )::bigint AS retornos,
-          COUNT(*) FILTER (
-            WHERE UPPER(COALESCE(status::text,'') || ' ' || COALESCE(observacao::text,'') || ' ' || COALESCE(acao_comercial::text,''))
-                  ~ '(POSIT|INTERESS|MATRIC|CONVERT|FECHOU)'
-          )::bigint AS positivos,
-          COUNT(*) FILTER (
-            WHERE UPPER(COALESCE(status::text,'') || ' ' || COALESCE(observacao::text,'') || ' ' || COALESCE(acao_comercial::text,''))
-                  ~ '(NEGAT|SEM INTERESSE|NAO INTERESS|NÃO INTERESS)'
-          )::bigint AS negativos,
-          COUNT(*) FILTER (
-            WHERE COALESCE(matriculado::text,'') ~* '^(true|t|1|sim|s)$' OR data_matricula IS NOT NULL
-          )::bigint AS matriculas,
+          COUNT(*) FILTER (WHERE {text_status} ~ '(RETOR|CONTATO|RESPONDEU)')::bigint AS retornos,
+          COUNT(*) FILTER (WHERE {text_status} ~ '(POSIT|INTERESS|CONVERT|FECHOU)' OR {matriculated})::bigint AS positivos,
+          COUNT(*) FILTER (WHERE {text_status} ~ '(NEGAT|SEM INTERESSE|NAO INTERESS|NÃO INTERESS)')::bigint AS negativos,
+          COUNT(*) FILTER (WHERE {matriculated})::bigint AS matriculas,
+          COUNT(*) FILTER (WHERE {text_status} ~ '(NEGOCIA|EM ANDAMENTO|PROPOSTA)')::bigint AS em_negociacao,
           MAX(data_disparo) AS ultimo_disparo
         FROM valid
-        GROUP BY consultor_disparo
+        GROUP BY BTRIM(consultor_disparo::text)
         ORDER BY disparado_semana DESC, total_disparado DESC, consultor_disparo
         """,
-        name="gestao_sem_lotes_consultores",
+        params,
+        "gestao_sem_lotes_consultores",
     ) or []
 
     breakdown = _rows(
@@ -112,17 +125,82 @@ def _consultants_payload() -> Dict[str, Any]:
           COALESCE(NULLIF(BTRIM(peca_disparo::text), ''), 'SEM PEÇA') AS peca_disparo,
           COUNT(*)::bigint AS total,
           COUNT(*) FILTER (WHERE data_disparo >= date_trunc('week', CURRENT_TIMESTAMP))::bigint AS semana,
+          COUNT(*) FILTER (WHERE {matriculated})::bigint AS matriculas,
           MAX(data_disparo) AS ultimo_disparo
         FROM {relation}
-        WHERE data_disparo IS NOT NULL
-          AND UPPER(BTRIM(REPLACE(COALESCE(consultor_disparo::text, ''), chr(92), ''))) NOT IN
-              ('', 'N', 'NULL', 'N/A', 'NA', 'NONE', 'UNDEFINED', '-')
+        WHERE {where_sql} AND {valid_consultant}
         GROUP BY 1,2,3,4,5
         ORDER BY semana DESC, total DESC
-        LIMIT 1000
+        LIMIT 1500
         """,
-        name="gestao_sem_lotes_breakdown",
+        params,
+        "gestao_sem_lotes_breakdown",
     ) or []
+
+    summary_rows = _rows(
+        f"""
+        SELECT
+          COUNT(*)::bigint AS total_disparado,
+          COUNT(*) FILTER (WHERE data_disparo::date = CURRENT_DATE)::bigint AS disparado_hoje,
+          COUNT(*) FILTER (WHERE data_disparo >= date_trunc('week', CURRENT_TIMESTAMP))::bigint AS disparado_semana,
+          COUNT(*) FILTER (WHERE data_disparo >= date_trunc('week', CURRENT_TIMESTAMP) - INTERVAL '7 days' AND data_disparo < date_trunc('week', CURRENT_TIMESTAMP))::bigint AS semana_anterior,
+          COUNT(*) FILTER (WHERE data_disparo >= date_trunc('month', CURRENT_TIMESTAMP))::bigint AS disparado_mes,
+          COUNT(*) FILTER (WHERE data_disparo >= date_trunc('month', CURRENT_TIMESTAMP) - INTERVAL '1 month' AND data_disparo < date_trunc('month', CURRENT_TIMESTAMP))::bigint AS mes_anterior,
+          COUNT(*) FILTER (WHERE {text_status} ~ '(RETOR|CONTATO|RESPONDEU)')::bigint AS retornos,
+          COUNT(*) FILTER (WHERE {text_status} ~ '(POSIT|INTERESS|CONVERT|FECHOU)' OR {matriculated})::bigint AS positivos,
+          COUNT(*) FILTER (WHERE {text_status} ~ '(NEGOCIA|EM ANDAMENTO|PROPOSTA)')::bigint AS em_negociacao,
+          COUNT(*) FILTER (WHERE {text_status} ~ '(NEGAT|SEM INTERESSE|NAO INTERESS|NÃO INTERESS)')::bigint AS negativos,
+          COUNT(*) FILTER (WHERE {matriculated})::bigint AS matriculas
+        FROM {relation}
+        WHERE {where_sql}
+        """,
+        params,
+        "gestao_sem_lotes_summary",
+    ) or [{}]
+    summary = summary_rows[0] if summary_rows else {}
+
+    by_business = _rows(
+        f"""
+        SELECT COALESCE(NULLIF(BTRIM(tipo_negocio::text),''),'SEM TIPO DE NEGÓCIO') AS nome,
+               COUNT(*)::bigint AS disparos,
+               COUNT(*) FILTER (WHERE {text_status} ~ '(RETOR|CONTATO|RESPONDEU)')::bigint AS retornos,
+               COUNT(*) FILTER (WHERE {text_status} ~ '(POSIT|INTERESS|CONVERT|FECHOU)' OR {matriculated})::bigint AS positivos,
+               COUNT(*) FILTER (WHERE {matriculated})::bigint AS matriculas
+        FROM {relation}
+        WHERE {where_sql}
+        GROUP BY 1 ORDER BY disparos DESC LIMIT 30
+        """,
+        params,
+        "gestao_sem_lotes_business",
+    ) or []
+
+    by_campaign = _rows(
+        f"""
+        SELECT COALESCE(NULLIF(BTRIM(campanha::text),''),'SEM CAMPANHA') AS nome,
+               COUNT(*)::bigint AS disparos,
+               COUNT(*) FILTER (WHERE {text_status} ~ '(RETOR|CONTATO|RESPONDEU)')::bigint AS retornos,
+               COUNT(*) FILTER (WHERE {text_status} ~ '(POSIT|INTERESS|CONVERT|FECHOU)' OR {matriculated})::bigint AS positivos,
+               COUNT(*) FILTER (WHERE {matriculated})::bigint AS matriculas
+        FROM {relation}
+        WHERE {where_sql}
+        GROUP BY 1 ORDER BY disparos DESC LIMIT 30
+        """,
+        params,
+        "gestao_sem_lotes_campaign",
+    ) or []
+
+    options = _rows(
+        f"""
+        SELECT
+          ARRAY_REMOVE(ARRAY_AGG(DISTINCT NULLIF(BTRIM(tipo_negocio::text),'')), NULL) AS tipos_negocio,
+          ARRAY_REMOVE(ARRAY_AGG(DISTINCT NULLIF(BTRIM(tipo_disparo::text),'')), NULL) AS tipos_disparo,
+          ARRAY_REMOVE(ARRAY_AGG(DISTINCT NULLIF(BTRIM(canal::text),'')), NULL) AS canais,
+          ARRAY_REMOVE(ARRAY_AGG(DISTINCT NULLIF(BTRIM(unidade::text),'')), NULL) AS unidades
+        FROM {relation}
+        WHERE data_disparo IS NOT NULL
+        """,
+        name="gestao_sem_lotes_options",
+    ) or [{}]
 
     for row in items:
         total = int(row.get("total_disparado") or 0)
@@ -131,7 +209,33 @@ def _consultants_payload() -> Dict[str, Any]:
         row["taxa_retorno_pct"] = round((retornos / total * 100), 2) if total else 0
         row["taxa_matricula_pct"] = round((matriculas / total * 100), 2) if total else 0
 
-    return {"items": items, "breakdown": breakdown, "total": len(items)}
+    total = int(summary.get("total_disparado") or 0)
+    summary["taxa_retorno_pct"] = round(int(summary.get("retornos") or 0) / total * 100, 2) if total else 0
+    summary["taxa_matricula_pct"] = round(int(summary.get("matriculas") or 0) / total * 100, 2) if total else 0
+    current_week = int(summary.get("disparado_semana") or 0)
+    previous_week = int(summary.get("semana_anterior") or 0)
+    current_month = int(summary.get("disparado_mes") or 0)
+    previous_month = int(summary.get("mes_anterior") or 0)
+    summary["variacao_semana_pct"] = round((current_week - previous_week) / previous_week * 100, 2) if previous_week else None
+    summary["variacao_mes_pct"] = round((current_month - previous_month) / previous_month * 100, 2) if previous_month else None
+
+    return {
+        "items": items,
+        "breakdown": breakdown,
+        "summary": summary,
+        "funnel": {
+            "disparados": total,
+            "retornos": int(summary.get("retornos") or 0),
+            "positivos": int(summary.get("positivos") or 0),
+            "em_negociacao": int(summary.get("em_negociacao") or 0),
+            "matriculas": int(summary.get("matriculas") or 0),
+            "negativos": int(summary.get("negativos") or 0),
+        },
+        "by_business": by_business,
+        "by_campaign": by_campaign,
+        "options": options[0] if options else {},
+        "total": len(items),
+    }
 
 
 def register_gestao_sem_lotes(app) -> None:
