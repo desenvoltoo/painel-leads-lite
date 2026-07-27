@@ -66,8 +66,10 @@ def _relation() -> tuple[str, set[str]]:
 
 
 def _issue_queries(relation: str, columns: set[str]) -> list[tuple[str, str, str]]:
+    del relation
     issues: list[tuple[str, str, str]] = []
-    marker_sql = ", ".join(f"'{m.replace("'", "''")}'" for m in MARKERS)
+    escaped_markers = [marker.replace("'", "''") for marker in MARKERS]
+    marker_sql = ", ".join("'" + marker + "'" for marker in escaped_markers)
 
     for field in FIELDS:
         if field not in columns:
@@ -75,7 +77,6 @@ def _issue_queries(relation: str, columns: set[str]) -> list[tuple[str, str, str
         ident = db._safe_ident(field)
         text = f"COALESCE({ident}::text, '')"
         trimmed = f"BTRIM({text})"
-
         issues.append((field, "MARCADOR_LITERAL", f"UPPER({trimmed}) IN ({marker_sql})"))
         issues.append((field, "ESPACOS_EXTRAS", f"{text} <> '' AND {text} <> BTRIM({text})"))
 
@@ -106,6 +107,9 @@ def _diagnose(limit: int) -> Dict[str, Any]:
     definitions = _issue_queries(relation, columns)
     items = []
     total = 0
+    sample_name = "COALESCE(nome::text, '')" if "nome" in columns else "''"
+    sample_cpf = "COALESCE(cpf::text, '')" if "cpf" in columns else "''"
+    sample_phone = "COALESCE(celular::text, '')" if "celular" in columns else "''"
 
     for field, issue, condition in definitions:
         ident = db._safe_ident(field)
@@ -125,9 +129,9 @@ def _diagnose(limit: int) -> Dict[str, Any]:
         samples = _rows(
             f"""
             SELECT {ident}::text AS valor,
-                   COALESCE(nome::text, '') AS nome,
-                   COALESCE(cpf::text, '') AS cpf,
-                   COALESCE(celular::text, '') AS celular
+                   {sample_name} AS nome,
+                   {sample_cpf} AS cpf,
+                   {sample_phone} AS celular
             FROM {relation}
             WHERE {condition}
             LIMIT :limit
@@ -143,11 +147,11 @@ def _diagnose(limit: int) -> Dict[str, Any]:
             "amostras": samples or [],
         })
 
-    items.sort(key=lambda x: (-x["quantidade"], x["campo"], x["problema"]))
+    items.sort(key=lambda item: (-item["quantidade"], item["campo"], item["problema"]))
     return {
         "items": items,
         "total_inconsistencias": total,
-        "campos_analisados": len([f for f in FIELDS if f in columns]),
+        "campos_analisados": len([field for field in FIELDS if field in columns]),
         "campos_com_problema": len({item["campo"] for item in items}),
         "fonte": relation,
     }
