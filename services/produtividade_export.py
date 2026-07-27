@@ -5,7 +5,7 @@ from __future__ import annotations
 from calendar import monthrange
 from datetime import date, datetime
 from io import BytesIO
-from typing import Any, Dict, Iterable
+from typing import Any, Dict
 
 from flask import jsonify, request, send_file
 from openpyxl import Workbook
@@ -13,7 +13,6 @@ from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 
 from . import database as db
-
 
 EXPORT_HEADERS = [
     "status_inscricao", "data_inscricao", "origem", "unidade", "tipo_negocio",
@@ -30,27 +29,36 @@ def _rows(sql: str, params: Dict[str, Any] | None = None, name: str = "export_pr
 
 
 def _relation() -> str:
-    schema = db._safe_ident((getattr(db, "DB_SCHEMA", None) or "modelo_estrela").strip())
+    schema_raw = (getattr(db, "DB_SCHEMA", None) or "modelo_estrela").strip()
+    schema_ident = db._safe_ident(schema_raw)
     found = _rows(
-        f"""
+        """
         SELECT table_name
-        FROM information_schema.tables
-        WHERE table_schema = :schema
-          AND table_name IN ('vw_leads_painel_lite', 'leads_painel_lite')
-        UNION ALL
-        SELECT table_name
-        FROM information_schema.views
-        WHERE table_schema = :schema
-          AND table_name IN ('vw_leads_painel_lite', 'leads_painel_lite')
-        ORDER BY CASE WHEN table_name = 'vw_leads_painel_lite' THEN 0 ELSE 1 END
+        FROM (
+            SELECT table_name, 0 AS prioridade
+            FROM information_schema.views
+            WHERE table_schema = :schema
+              AND table_name = 'vw_leads_painel_lite'
+            UNION ALL
+            SELECT table_name, 1 AS prioridade
+            FROM information_schema.views
+            WHERE table_schema = :schema
+              AND table_name = 'leads_painel_lite'
+            UNION ALL
+            SELECT table_name, 2 AS prioridade
+            FROM information_schema.tables
+            WHERE table_schema = :schema
+              AND table_name = 'leads_painel_lite'
+        ) origem
+        ORDER BY prioridade
         LIMIT 1
         """,
-        {"schema": schema},
+        {"schema": schema_raw},
         "export_produtividade_relation",
     )
     if not found:
         raise RuntimeError("View de leads não encontrada no banco.")
-    return f"{schema}.{db._safe_ident(str(found[0]['table_name']))}"
+    return f"{schema_ident}.{db._safe_ident(str(found[0]['table_name']))}"
 
 
 def _parse_month(value: str | None) -> tuple[date, date, str]:
@@ -58,10 +66,9 @@ def _parse_month(value: str | None) -> tuple[date, date, str]:
     try:
         year, month = [int(part) for part in raw.split("-", 1)]
         start = date(year, month, 1)
+        end = date(year + (month == 12), 1 if month == 12 else month + 1, 1)
     except Exception as exc:
         raise ValueError("Mês inválido. Use AAAA-MM.") from exc
-    last_day = monthrange(year, month)[1]
-    end = date(year + (month == 12), 1 if month == 12 else month + 1, 1)
     return start, end, f"{month:02d}/{year}"
 
 
@@ -84,13 +91,36 @@ def _as_date(value: Any) -> date | None:
         return value.date()
     if isinstance(value, date):
         return value
-    if value:
-        for fmt in ("%Y-%m-%d", "%d/%m/%Y", "%Y-%m-%d %H:%M:%S"):
-            try:
-                return datetime.strptime(str(value)[:19], fmt).date()
-            except ValueError:
-                continue
+    if not value:
+        return None
+    text = str(value).strip()
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d", "%d/%m/%Y"):
+        try:
+            return datetime.strptime(text[:19], fmt).date()
+        except ValueError:
+            continue
     return None
+
+
+def _category_date(row: Dict[str, Any], category: str) -> date | None:
+    if category == "MATRÍCULAS":
+        return _as_date(row.get("data_matricula")) or _as_date(row.get("data_disparo"))
+    return _as_date(row.get("data_disparo"))
+
+
+def _matches_category(row: Dict[str, Any], category: str) -> bool:
+    kind = _normalize(row.get("tipo_disparo"))
+    if category == "URA":
+        return "URA" in kind
+    if category == "ROBO":
+        return "ROBO" in kind
+    if category == "RETORNO POSITIVO / URA":
+        return "URA" in kind and _is_positive(row)
+    if category == "RETORNO POSITIVO / ROBO":
+        return "ROBO" in kind and _is_positive(row)
+    if category == "MATRÍCULAS":
+        return _is_matriculated(row)
+    return False
 
 
 def _make_workbook(rows: list[Dict[str, Any]], start: date, month_label: str) -> BytesIO:
@@ -105,36 +135,30 @@ def _make_workbook(rows: list[Dict[str, Any]], start: date, month_label: str) ->
     fill_yellow = PatternFill("solid", fgColor="FFD966")
     fill_green = PatternFill("solid", fgColor="00B050")
     fill_red = PatternFill("solid", fgColor="FF0000")
-    fill_light = PatternFill("solid", fgColor="E2F0D9")
     fill_orange = PatternFill("solid", fgColor="C65911")
     white_font = Font(color="FFFFFF", bold=True)
     bold = Font(bold=True)
 
     days = monthrange(start.year, start.month)[1]
+    categories = ["URA", "ROBO", "RETORNO POSITIVO / URA", "RETORNO POSITIVO / ROBO", "MATRÍCULAS"]
     by_consultant: dict[str, list[Dict[str, Any]]] = {}
     for row in rows:
         consultant = str(row.get("consultor_disparo") or "SEM CONSULTOR").strip().upper()
         by_consultant.setdefault(consultant, []).append(row)
 
     current_row = 1
-    categories = ["URA", "ROBO", "RETORNO POSITIVO / URA", "RETORNO POSITIVO / ROBO", "MATRÍCULAS"]
-
     for consultant in sorted(by_consultant):
         data = by_consultant[consultant]
         ws.merge_cells(start_row=current_row, start_column=4, end_row=current_row, end_column=days + 3)
         title = ws.cell(current_row, 4, "ANÁLISE DESEMPENHO ROBO")
-        title.fill = fill_blue
-        title.font = bold
-        title.alignment = Alignment(horizontal="center")
+        title.fill, title.font, title.alignment = fill_blue, bold, Alignment(horizontal="center")
         current_row += 1
 
         ws.cell(current_row, 3, "Disparos realizados").fill = fill_yellow
         ws.cell(current_row, 3).font = bold
         ws.merge_cells(start_row=current_row, start_column=4, end_row=current_row, end_column=days + 3)
         month_cell = ws.cell(current_row, 4, month_label.upper())
-        month_cell.fill = fill_yellow
-        month_cell.font = bold
-        month_cell.alignment = Alignment(horizontal="center")
+        month_cell.fill, month_cell.font, month_cell.alignment = fill_yellow, bold, Alignment(horizontal="center")
         current_row += 2
 
         ws.cell(current_row, 1, consultant).fill = fill_yellow
@@ -143,10 +167,10 @@ def _make_workbook(rows: list[Dict[str, Any]], start: date, month_label: str) ->
         ws.cell(current_row, 2).font = bold
         for day in range(1, days + 1):
             cell = ws.cell(current_row, day + 3, day)
-            cell.fill = fill_green if day % 7 not in (2, 3) else fill_red
-            cell.font = white_font if cell.fill == fill_red else bold
-            cell.alignment = Alignment(horizontal="center")
-            cell.border = border
+            weekday = date(start.year, start.month, day).weekday()
+            cell.fill = fill_red if weekday >= 5 else fill_green
+            cell.font = white_font if weekday >= 5 else bold
+            cell.alignment, cell.border = Alignment(horizontal="center"), border
         header_row = current_row
         current_row += 1
 
@@ -154,26 +178,15 @@ def _make_workbook(rows: list[Dict[str, Any]], start: date, month_label: str) ->
             ws.cell(current_row, 1, category).font = bold
             daily = []
             for day in range(1, days + 1):
-                count = 0
-                for row in data:
-                    d = _as_date(row.get("data_disparo") or row.get("data_matricula"))
-                    if not d or d.day != day:
-                        continue
-                    kind = _normalize(row.get("tipo_disparo"))
-                    if category == "URA" and "URA" in kind:
-                        count += 1
-                    elif category == "ROBO" and "ROBO" in kind:
-                        count += 1
-                    elif category == "RETORNO POSITIVO / URA" and "URA" in kind and _is_positive(row):
-                        count += 1
-                    elif category == "RETORNO POSITIVO / ROBO" and "ROBO" in kind and _is_positive(row):
-                        count += 1
-                    elif category == "MATRÍCULAS" and _is_matriculated(row):
-                        count += 1
+                count = sum(
+                    1 for row in data
+                    if _matches_category(row, category)
+                    and (_category_date(row, category) is not None)
+                    and _category_date(row, category).day == day
+                )
                 daily.append(count)
                 cell = ws.cell(current_row, day + 3, count if count else None)
-                cell.alignment = Alignment(horizontal="center")
-                cell.border = border
+                cell.alignment, cell.border = Alignment(horizontal="center"), border
             ws.cell(current_row, 2, sum(daily)).font = bold
             if category == "MATRÍCULAS":
                 for col in range(1, days + 4):
@@ -183,14 +196,12 @@ def _make_workbook(rows: list[Dict[str, Any]], start: date, month_label: str) ->
         ws.cell(header_row, 2, sum(1 for row in data if row.get("data_disparo"))).font = bold
         current_row += 3
 
-    # Resumo da equipe
     ws.cell(current_row, 1, "Mês").fill = fill_blue
     ws.cell(current_row, 2, month_label.upper()).fill = fill_blue
     current_row += 1
-    ws.cell(current_row, 1, "EQUIPE").fill = fill_orange
-    ws.cell(current_row, 2, "TOTAL").fill = fill_orange
-    ws.cell(current_row, 1).font = white_font
-    ws.cell(current_row, 2).font = white_font
+    for col, value in ((1, "EQUIPE"), (2, "TOTAL")):
+        ws.cell(current_row, col, value).fill = fill_orange
+        ws.cell(current_row, col).font = white_font
     current_row += 1
     total_team = 0
     for consultant in sorted(by_consultant):
@@ -199,10 +210,9 @@ def _make_workbook(rows: list[Dict[str, Any]], start: date, month_label: str) ->
         ws.cell(current_row, 1, consultant)
         ws.cell(current_row, 2, total)
         current_row += 1
-    ws.cell(current_row, 1, "TOTAL").fill = fill_orange
-    ws.cell(current_row, 2, total_team).fill = fill_orange
-    ws.cell(current_row, 1).font = white_font
-    ws.cell(current_row, 2).font = white_font
+    for col, value in ((1, "TOTAL"), (2, total_team)):
+        ws.cell(current_row, col, value).fill = fill_orange
+        ws.cell(current_row, col).font = white_font
 
     ws.freeze_panes = "D1"
     ws.column_dimensions["A"].width = 28
@@ -211,12 +221,9 @@ def _make_workbook(rows: list[Dict[str, Any]], start: date, month_label: str) ->
     for col in range(4, days + 4):
         ws.column_dimensions[get_column_letter(col)].width = 5
 
-    # Aba com os leads que fecharam matrícula
     for col, header in enumerate(EXPORT_HEADERS, 1):
         cell = leads_ws.cell(1, col, header)
-        cell.fill = fill_blue
-        cell.font = bold
-        cell.border = border
+        cell.fill, cell.font, cell.border = fill_blue, bold, border
         cell.alignment = Alignment(horizontal="center")
 
     matriculated = [row for row in rows if _is_matriculated(row)]
@@ -231,9 +238,7 @@ def _make_workbook(rows: list[Dict[str, Any]], start: date, month_label: str) ->
     leads_ws.freeze_panes = "A2"
     leads_ws.auto_filter.ref = leads_ws.dimensions
     for idx, header in enumerate(EXPORT_HEADERS, 1):
-        width = min(45, max(12, len(header) + 2))
-        if header in {"nome", "curso", "campanha", "texto_disparo", "observacao"}:
-            width = 30
+        width = 30 if header in {"nome", "curso", "campanha", "texto_disparo", "observacao"} else min(45, max(12, len(header) + 2))
         leads_ws.column_dimensions[get_column_letter(idx)].width = width
 
     stream = BytesIO()
