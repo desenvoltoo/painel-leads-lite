@@ -80,14 +80,17 @@ try:
     from services.query_performance_guard import apply_query_performance_guard
     from services.gestao_response_cache import apply_gestao_response_cache
     from services.unifecaf_import_recovery import start_unifecaf_import_recovery
+    from services.unifecaf_serial_guard import apply_unifecaf_serial_guard
 
     produtividade_export_module._is_matriculated = _matriculado_explicito
     multi_result = apply_multi_institution_metrics()
     cache_result = apply_gestao_response_cache()
+    serial_result = apply_unifecaf_serial_guard()
 
     application = create_app()
     application.logger.info("Gestão multi-instituição ativada: %s", multi_result)
     application.logger.info("Cache da Gestão ativado: %s", cache_result)
+    application.logger.info("Serialização da SP UniFECAF ativada: %s", serial_result)
     register_institution_routes(application)
     register_upload_preview_routes(application)
     register_upload_new_only_routes(application)
