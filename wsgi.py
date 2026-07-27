@@ -78,12 +78,15 @@ try:
     from services.date_monotonic_guard import apply_date_monotonic_guards
     from services.gestao_multi_instituicao import apply_multi_institution_metrics
     from services.query_performance_guard import apply_query_performance_guard
+    from services.gestao_response_cache import apply_gestao_response_cache
 
     produtividade_export_module._is_matriculated = _matriculado_explicito
     multi_result = apply_multi_institution_metrics()
+    cache_result = apply_gestao_response_cache()
 
     application = create_app()
     application.logger.info("Gestão multi-instituição ativada: %s", multi_result)
+    application.logger.info("Cache da Gestão ativado: %s", cache_result)
     register_institution_routes(application)
     register_upload_preview_routes(application)
     register_upload_new_only_routes(application)
