@@ -73,6 +73,7 @@ try:
     from upload_progress_routes import register_upload_progress_routes
     from institution_routes import register_institution_routes
     from services.gestao_sem_lotes import register_gestao_sem_lotes
+    from services.gestao_metricas_corrigidas import register_metricas_corrigidas
     from services import produtividade_export as produtividade_export_module
     from services.produtividade_export import register_produtividade_export
     from services.qualidade_dados import register_qualidade_dados
@@ -87,6 +88,7 @@ try:
     register_upload_update_existing_routes(application)
     register_upload_progress_routes(application)
     register_gestao_sem_lotes(application)
+    register_metricas_corrigidas(application)
     register_produtividade_export(application)
     register_qualidade_dados(application)
 
@@ -94,8 +96,6 @@ try:
         protected_targets = apply_date_monotonic_guards()
         application.logger.info("Proteção de datas ativada: %s", protected_targets)
     except Exception:
-        # O painel continua disponível mesmo se o usuário do banco não puder criar triggers.
-        # O erro fica explícito no log para aplicação posterior da migration SQL.
         application.logger.exception("Não foi possível instalar automaticamente a proteção de datas")
 except Exception as exc:
     log_startup_failure(exc)
