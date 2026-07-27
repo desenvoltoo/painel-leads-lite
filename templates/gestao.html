@@ -35,12 +35,9 @@
     <div class="nav-label">Módulo</div>
     <button class="active" data-page="overview"><span>01</span><div><strong>Visão geral</strong><small>Resumo executivo</small></div></button>
     <button data-page="team"><span>02</span><div><strong>Minha equipe</strong><small>Disparos e produtividade</small></div></button>
-    <button data-page="lots"><span>03</span><div><strong>Lotes</strong><small>Fluxo operacional</small></div></button>
-    <button data-page="imports"><span>04</span><div><strong>Importações</strong><small>Histórico e qualidade</small></div></button>
-    <button data-page="leads"><span>05</span><div><strong>Localizar lead</strong><small>Busca individual</small></div></button>
-    {% if current_user_context and 'logs:view' in current_user_context.permissions %}
-    <button data-page="audit"><span>06</span><div><strong>Auditoria</strong><small>Eventos e ações</small></div></button>
-    {% endif %}
+    <button data-page="imports"><span>03</span><div><strong>Importações</strong><small>Histórico e qualidade</small></div></button>
+    <button data-page="leads"><span>04</span><div><strong>Localizar lead</strong><small>Busca individual</small></div></button>
+    <button data-page="quality"><span>05</span><div><strong>Qualidade dos dados</strong><small>Inconsistências por campo</small></div></button>
     <div class="nav-footer"><span>PostgreSQL</span><span>Modelo Estrela</span></div>
   </aside>
 
@@ -49,31 +46,27 @@
 
     <section class="page active" id="page-overview">
       <div class="page-heading">
-        <div><span class="page-kicker">HOJE NA OPERAÇÃO</span><h2>Visão geral</h2><p>Indicadores que exigem decisão ou acompanhamento imediato.</p></div>
+        <div><span class="page-kicker">OPERAÇÃO DE DISPAROS</span><h2>Visão geral</h2><p>Indicadores calculados diretamente pelos disparos registrados no banco.</p></div>
         <div class="page-heading-meta"><small id="lastUpdated">Aguardando atualização</small><span id="dataHealth" class="health-pill">Dados disponíveis</span></div>
       </div>
-
       <div id="executiveKpis" class="executive-kpis" aria-live="polite"></div>
-
       <div class="overview-grid">
         <article class="panel panel-ranking">
-          <div class="panel-title"><div><span class="panel-kicker">DESEMPENHO</span><h3>Ranking da equipe</h3><p>Volume de disparos e matrículas por consultor.</p></div><button class="link-button" data-go="team">Ver equipe</button></div>
+          <div class="panel-title"><div><span class="panel-kicker">DESEMPENHO</span><h3>Ranking da equipe</h3><p>Volume semanal e matrículas por consultor.</p></div><button class="link-button" data-go="team">Ver equipe</button></div>
           <div id="teamRanking" class="ranking-list"></div>
         </article>
         <article class="panel panel-alerts">
-          <div class="panel-title"><div><span class="panel-kicker">PRIORIDADES</span><h3>Pontos de atenção</h3><p>Alertas gerados a partir dos dados atuais.</p></div></div>
+          <div class="panel-title"><div><span class="panel-kicker">PRIORIDADES</span><h3>Pontos de atenção</h3><p>Alertas gerados a partir dos dados de disparo.</p></div></div>
           <div id="managementAlerts" class="alert-list"></div>
         </article>
       </div>
-
-      <article class="panel mt-3">
-        <div class="panel-title"><div><span class="panel-kicker">LOTEAMENTO</span><h3>Lotes ativos</h3><p>Andamento, retorno e conversão dos lotes em operação.</p></div><button class="link-button" data-go="lots">Abrir operação</button></div>
-        <div class="table-responsive table-shell"><table class="management-table"><thead><tr><th>Lote</th><th>Consultor</th><th>Status</th><th>Leads</th><th>Retornos</th><th>Positivos</th><th>Matrículas</th><th>Conversão</th><th>Próxima ação</th></tr></thead><tbody id="overviewLotsBody"></tbody></table></div>
-      </article>
     </section>
 
     <section class="page" id="page-team">
-      <div class="page-heading"><div><span class="page-kicker">DISPAROS DA EQUIPE</span><h2>Minha equipe</h2><p>Totais calculados diretamente pelos dados de disparo no banco, sem dependência de lote.</p></div><small id="teamCount">—</small></div>
+      <div class="page-heading">
+        <div><span class="page-kicker">DISPAROS DA EQUIPE</span><h2>Minha equipe</h2><p>Totais por consultor, sem qualquer dependência de lote.</p></div>
+        <small id="teamCount">—</small>
+      </div>
 
       <div id="teamSummaryCards" class="executive-kpis mb-3" aria-live="polite"></div>
 
@@ -92,14 +85,15 @@
           <option value="disparado_mes">Mais disparos no mês</option>
           <option value="matriculas">Mais matrículas</option>
           <option value="taxa_matricula_pct">Maior conversão</option>
-          <option value="taxa_retorno_pct">Maior retorno</option>
         </select>
+        <input id="teamExportMonth" type="month" class="form-control" style="max-width:170px" aria-label="Mês da exportação">
+        <button id="btnExportTeamProductivity" type="button" class="btn btn-success">Exportar produtividade</button>
       </div>
 
       <div id="teamCards" class="team-cards"></div>
 
       <article class="panel mt-3">
-        <div class="panel-title"><div><span class="panel-kicker">RESUMO POR CONSULTOR</span><h3>Disparos e resultados</h3><p>Visão consolidada de todo o período, hoje, semana e mês.</p></div></div>
+        <div class="panel-title"><div><span class="panel-kicker">RESUMO POR CONSULTOR</span><h3>Disparos e resultados</h3><p>Todo o período, hoje, semana e mês.</p></div></div>
         <div class="table-responsive table-shell tall">
           <table class="management-table wide">
             <thead><tr><th>Consultor</th><th>Total disparado</th><th>Hoje</th><th>Semana</th><th>Mês</th><th>Retornos</th><th>Positivos</th><th>Negativos</th><th>Matrículas</th><th>Taxa retorno</th><th>Conversão</th><th>Último disparo</th></tr></thead>
@@ -109,7 +103,7 @@
       </article>
 
       <article class="panel mt-3">
-        <div class="panel-title"><div><span class="panel-kicker">DETALHAMENTO</span><h3>Disparos separados pelos dados do banco</h3><p>Quebra por consultor, tipo, campanha, canal e peça de disparo.</p></div></div>
+        <div class="panel-title"><div><span class="panel-kicker">DETALHAMENTO</span><h3>Disparos separados pelos dados do banco</h3><p>Consultor, tipo, campanha, canal e peça.</p></div></div>
         <div class="table-responsive table-shell tall">
           <table class="management-table wide">
             <thead><tr><th>Consultor</th><th>Tipo</th><th>Campanha</th><th>Canal</th><th>Peça</th><th>Total</th><th>Semana</th><th>Último disparo</th></tr></thead>
@@ -117,12 +111,6 @@
           </table>
         </div>
       </article>
-    </section>
-
-    <section class="page" id="page-lots">
-      <div class="page-heading"><div><span class="page-kicker">OPERAÇÃO</span><h2>Lotes</h2><p>Fluxo, produtividade e gargalos dos lotes enviados.</p></div><small id="lotCount">—</small></div>
-      <div class="toolbar"><div class="search-box"><span>⌕</span><input id="lotSearch" class="form-control" placeholder="Buscar lote, campanha ou consultor"></div><select id="lotStatus" class="form-select"><option value="">Todos os status</option><option>ABERTO</option><option>EM_ANDAMENTO</option><option>IMPORTADO</option><option>CONCLUIDO</option><option>CANCELADO</option></select></div>
-      <article class="panel"><div class="table-responsive table-shell tall"><table class="management-table wide"><thead><tr><th>Lote</th><th>Consultor</th><th>Campanha</th><th>Tipo</th><th>Status</th><th>Leads</th><th>Retornos</th><th>Positivos</th><th>Negativos</th><th>Matrículas</th><th>Taxa retorno</th><th>Taxa matrícula</th><th>Exportado em</th><th>Próxima ação</th></tr></thead><tbody id="lotsTableBody"></tbody></table></div></article>
     </section>
 
     <section class="page" id="page-imports">
@@ -140,17 +128,27 @@
       <article class="panel"><div id="leadResults" class="lead-results"><div class="empty-state">Faça uma busca para localizar o lead.</div></div></article>
     </section>
 
-    {% if current_user_context and 'logs:view' in current_user_context.permissions %}
-    <section class="page" id="page-audit">
-      <div class="page-heading"><div><span class="page-kicker">RASTREABILIDADE</span><h2>Auditoria</h2><p>Eventos técnicos e movimentações relevantes.</p></div><button id="btnReloadAudit" class="btn btn-outline-secondary" type="button">Atualizar</button></div>
-      <article class="panel"><div class="table-responsive table-shell tall"><table class="management-table wide"><thead><tr><th>Data</th><th>Usuário</th><th>Ação</th><th>Módulo</th><th>Entidade</th><th>Lote</th><th>Lead</th><th>Descrição</th></tr></thead><tbody id="auditTableBody"></tbody></table></div></article>
+    <section class="page" id="page-quality">
+      <div class="page-heading">
+        <div><span class="page-kicker">QUALIDADE DA BASE</span><h2>Qualidade dos dados</h2><p>Campos com marcadores inválidos, formatos incorretos ou combinações inconsistentes.</p></div>
+        <button id="btnReloadQuality" class="btn btn-outline-secondary" type="button">Analisar novamente</button>
+      </div>
+      <div id="qualityError" class="alert alert-danger d-none"></div>
+      <div id="qualitySummary" class="summary-grid mb-3"></div>
+      <article class="panel">
+        <div class="panel-title"><div><span class="panel-kicker">INCONSISTÊNCIAS</span><h3>Problemas encontrados por coluna</h3><p>Exemplos para localizar e corrigir os registros.</p></div></div>
+        <div class="table-responsive table-shell tall">
+          <table class="management-table wide">
+            <thead><tr><th>Campo</th><th>Problema</th><th>Quantidade</th><th>Exemplo</th><th>Registros para localizar</th></tr></thead>
+            <tbody id="qualityTableBody"><tr><td colspan="5" class="empty-cell">Clique em analisar novamente.</td></tr></tbody>
+          </table>
+        </div>
+      </article>
     </section>
-    {% endif %}
   </main>
 </div>
 
 <div id="toastRegion" class="toast-region"></div>
 <script src="{{ url_for('static', filename='js/gestao.js') }}?v={{ asset_version }}"></script>
-<script src="{{ url_for('static', filename='js/gestao-disparos.js') }}?v={{ asset_version }}"></script>
 </body>
 </html>
