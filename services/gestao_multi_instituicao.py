@@ -16,7 +16,6 @@ REQUIRED_COLUMNS = [
 ]
 
 DATE_COLUMNS = {"data_inscricao", "data_ultima_acao", "data_disparo", "data_matricula"}
-TEXT_COLUMNS = set(REQUIRED_COLUMNS) - DATE_COLUMNS - {"qtd_acionamentos", "matriculado"}
 
 ALIASES = {
     "unidade": ("unidade", "polo"),
@@ -114,15 +113,36 @@ def combined_relation() -> str:
     return "(" + " UNION ALL ".join(selects) + ")"
 
 
+def _patch_export_dates(produtividade_export) -> None:
+    current = produtividade_export._make_workbook
+    if getattr(current, "_date_export_guard", False):
+        return
+
+    def guarded_make_workbook(rows, start, month_label):
+        normalized = []
+        for original in rows:
+            row = dict(original)
+            for field in DATE_COLUMNS:
+                parsed = produtividade_export._as_date(row.get(field))
+                row[field] = parsed
+            normalized.append(row)
+        return current(normalized, start, month_label)
+
+    guarded_make_workbook._date_export_guard = True
+    produtividade_export._make_workbook = guarded_make_workbook
+
+
 def apply_multi_institution_metrics() -> dict[str, Any]:
     from . import gestao_sem_lotes
     from . import produtividade_export
 
     gestao_sem_lotes._relation = combined_relation
     produtividade_export._relation = combined_relation
+    _patch_export_dates(produtividade_export)
 
     return {
         "status": "aplicado",
         "fontes": ["modelo_estrela", "unifecaf"],
         "uso": ["gestao", "ranking", "funil", "campanhas", "exportacao"],
+        "datas_exportacao": "DD/MM/AAAA",
     }
