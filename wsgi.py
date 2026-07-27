@@ -48,15 +48,8 @@ def _startup_error_wsgi_app(payload: Dict[str, Any]) -> Callable:
 
 
 def _matriculado_explicito(row: Dict[str, Any]) -> bool:
-    """Considera matrícula somente quando o campo matriculado confirma o estado atual.
-
-    data_matricula pode representar uma matrícula histórica, especialmente em
-    bases de egressos e Pós, e nunca deve sozinha classificar o lead como matriculado.
-    """
-    value = row.get("matriculado")
-    if value is True:
-        return True
-    return str(value or "").strip().upper() in {"TRUE", "T", "1", "SIM", "S"}
+    """Conta matrícula somente quando a flag booleana matriculado é True."""
+    return row.get("matriculado") is True
 
 
 try:
