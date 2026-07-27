@@ -67,10 +67,10 @@ def _where_filters() -> tuple[str, Dict[str, Any]]:
     start = str(request.args.get("data_ini") or "").strip()
     end = str(request.args.get("data_fim") or "").strip()
     if start:
-        clauses.append("data_disparo >= :data_ini")
+        clauses.append("data_disparo >= CAST(:data_ini AS timestamp)")
         params["data_ini"] = start
     if end:
-        clauses.append("data_disparo < (:data_fim::date + INTERVAL '1 day')")
+        clauses.append("data_disparo < (CAST(:data_fim AS date) + INTERVAL '1 day')")
         params["data_fim"] = end
     return " AND ".join(clauses), params
 
