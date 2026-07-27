@@ -6,6 +6,7 @@ from calendar import monthrange
 from datetime import date, datetime
 from io import BytesIO
 from typing import Any, Dict
+import unicodedata
 
 from flask import jsonify, request, send_file
 from openpyxl import Workbook
@@ -22,6 +23,12 @@ EXPORT_HEADERS = [
     "campanha", "observacao", "data_matricula", "matriculado", "canal",
     "acao_comercial", "consultor_comercial",
 ]
+
+INVALID_CONSULTANTS = {
+    "", "N", "NULL", "N/A", "NA", "NONE", "UNDEFINED", "-",
+    "SEM CONSULTOR", "SEM_CONSULTOR", "SEM RESPONSAVEL", "SEM RESPONSÁVEL",
+    "NAO INFORMADO", "NÃO INFORMADO",
+}
 
 
 def _rows(sql: str, params: Dict[str, Any] | None = None, name: str = "export_produtividade"):
@@ -73,7 +80,16 @@ def _parse_month(value: str | None) -> tuple[date, date, str]:
 
 
 def _normalize(value: Any) -> str:
-    return str(value or "").strip().upper()
+    text = str(value or "").strip().upper()
+    return "".join(
+        char for char in unicodedata.normalize("NFD", text)
+        if unicodedata.category(char) != "Mn"
+    )
+
+
+def _valid_consultant(value: Any) -> bool:
+    normalized = _normalize(str(value or "").replace("\\", ""))
+    return normalized not in {_normalize(item) for item in INVALID_CONSULTANTS}
 
 
 def _is_positive(row: Dict[str, Any]) -> bool:
@@ -82,8 +98,8 @@ def _is_positive(row: Dict[str, Any]) -> bool:
 
 
 def _is_matriculated(row: Dict[str, Any]) -> bool:
-    value = row.get("matriculado")
-    return value is True or _normalize(value) in {"TRUE", "T", "1", "SIM", "S"} or bool(row.get("data_matricula"))
+    # Regra oficial: somente a flag booleana verdadeira confirma matrícula.
+    return row.get("matriculado") is True
 
 
 def _as_date(value: Any) -> date | None:
@@ -91,10 +107,26 @@ def _as_date(value: Any) -> date | None:
         return value.date()
     if isinstance(value, date):
         return value
-    if not value:
+    if value in (None, ""):
         return None
+
     text = str(value).strip()
-    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d", "%d/%m/%Y"):
+    if not text:
+        return None
+
+    # PostgreSQL/SQLAlchemy normalmente retorna ISO 8601 com T, microssegundos
+    # e, às vezes, timezone. datetime.fromisoformat cobre todos esses casos.
+    try:
+        return datetime.fromisoformat(text.replace("Z", "+00:00")).date()
+    except ValueError:
+        pass
+
+    try:
+        return date.fromisoformat(text[:10])
+    except ValueError:
+        pass
+
+    for fmt in ("%d/%m/%Y %H:%M:%S", "%d/%m/%Y", "%Y-%m-%d %H:%M:%S"):
         try:
             return datetime.strptime(text[:19], fmt).date()
         except ValueError:
@@ -104,7 +136,7 @@ def _as_date(value: Any) -> date | None:
 
 def _category_date(row: Dict[str, Any], category: str) -> date | None:
     if category == "MATRÍCULAS":
-        return _as_date(row.get("data_matricula")) or _as_date(row.get("data_disparo"))
+        return _as_date(row.get("data_matricula"))
     return _as_date(row.get("data_disparo"))
 
 
@@ -121,6 +153,11 @@ def _matches_category(row: Dict[str, Any], category: str) -> bool:
     if category == "MATRÍCULAS":
         return _is_matriculated(row)
     return False
+
+
+def _in_export_month(value: Any, start: date) -> bool:
+    parsed = _as_date(value)
+    return bool(parsed and parsed.year == start.year and parsed.month == start.month)
 
 
 def _make_workbook(rows: list[Dict[str, Any]], start: date, month_label: str) -> BytesIO:
@@ -143,7 +180,9 @@ def _make_workbook(rows: list[Dict[str, Any]], start: date, month_label: str) ->
     categories = ["URA", "ROBO", "RETORNO POSITIVO / URA", "RETORNO POSITIVO / ROBO", "MATRÍCULAS"]
     by_consultant: dict[str, list[Dict[str, Any]]] = {}
     for row in rows:
-        consultant = str(row.get("consultor_disparo") or "SEM CONSULTOR").strip().upper()
+        consultant = str(row.get("consultor_disparo") or "").strip().upper()
+        if not _valid_consultant(consultant):
+            continue
         by_consultant.setdefault(consultant, []).append(row)
 
     current_row = 1
@@ -178,12 +217,15 @@ def _make_workbook(rows: list[Dict[str, Any]], start: date, month_label: str) ->
             ws.cell(current_row, 1, category).font = bold
             daily = []
             for day in range(1, days + 1):
-                count = sum(
-                    1 for row in data
-                    if _matches_category(row, category)
-                    and (_category_date(row, category) is not None)
-                    and _category_date(row, category).day == day
-                )
+                count = 0
+                for row in data:
+                    event_date = _category_date(row, category)
+                    if not event_date:
+                        continue
+                    if event_date.year != start.year or event_date.month != start.month or event_date.day != day:
+                        continue
+                    if _matches_category(row, category):
+                        count += 1
                 daily.append(count)
                 cell = ws.cell(current_row, day + 3, count if count else None)
                 cell.alignment, cell.border = Alignment(horizontal="center"), border
@@ -193,7 +235,8 @@ def _make_workbook(rows: list[Dict[str, Any]], start: date, month_label: str) ->
                     ws.cell(current_row, col).fill = fill_yellow
             current_row += 1
 
-        ws.cell(header_row, 2, sum(1 for row in data if row.get("data_disparo"))).font = bold
+        total_dispatches = sum(1 for row in data if _in_export_month(row.get("data_disparo"), start))
+        ws.cell(header_row, 2, total_dispatches).font = bold
         current_row += 3
 
     ws.cell(current_row, 1, "Mês").fill = fill_blue
@@ -205,7 +248,10 @@ def _make_workbook(rows: list[Dict[str, Any]], start: date, month_label: str) ->
     current_row += 1
     total_team = 0
     for consultant in sorted(by_consultant):
-        total = sum(1 for row in by_consultant[consultant] if _is_matriculated(row))
+        total = sum(
+            1 for row in by_consultant[consultant]
+            if _is_matriculated(row) and _in_export_month(row.get("data_matricula"), start)
+        )
         total_team += total
         ws.cell(current_row, 1, consultant)
         ws.cell(current_row, 2, total)
@@ -226,7 +272,10 @@ def _make_workbook(rows: list[Dict[str, Any]], start: date, month_label: str) ->
         cell.fill, cell.font, cell.border = fill_blue, bold, border
         cell.alignment = Alignment(horizontal="center")
 
-    matriculated = [row for row in rows if _is_matriculated(row)]
+    matriculated = [
+        row for row in rows
+        if _is_matriculated(row) and _in_export_month(row.get("data_matricula"), start)
+    ]
     for r_idx, row in enumerate(matriculated, 2):
         for c_idx, header in enumerate(EXPORT_HEADERS, 1):
             value = row.get(header)
@@ -261,9 +310,15 @@ def register_produtividade_export(app) -> None:
                 f"""
                 SELECT {selected}
                 FROM {relation}
-                WHERE data_disparo >= :inicio
-                  AND data_disparo < :fim
-                ORDER BY consultor_disparo, data_disparo, nome
+                WHERE (
+                    data_disparo >= :inicio
+                    AND data_disparo < :fim
+                ) OR (
+                    matriculado IS TRUE
+                    AND data_matricula >= :inicio
+                    AND data_matricula < :fim
+                )
+                ORDER BY consultor_disparo, COALESCE(data_disparo, data_matricula), nome
                 """,
                 {"inicio": start.isoformat(), "fim": end.isoformat()},
                 "export_produtividade_rows",
