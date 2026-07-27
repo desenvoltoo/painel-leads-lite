@@ -77,6 +77,7 @@ try:
     from services.qualidade_dados import register_qualidade_dados
     from services.date_monotonic_guard import apply_date_monotonic_guards
     from services.gestao_multi_instituicao import apply_multi_institution_metrics
+    from services.query_performance_guard import apply_query_performance_guard
 
     produtividade_export_module._is_matriculated = _matriculado_explicito
     multi_result = apply_multi_institution_metrics()
@@ -92,6 +93,12 @@ try:
     register_metricas_corrigidas(application)
     register_produtividade_export(application)
     register_qualidade_dados(application)
+
+    try:
+        performance_result = apply_query_performance_guard()
+        application.logger.info("Índices de performance aplicados: %s", performance_result)
+    except Exception:
+        application.logger.exception("Não foi possível aplicar os índices de performance")
 
     try:
         hardening_result = apply_import_hardening()
