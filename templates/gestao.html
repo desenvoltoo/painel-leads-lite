@@ -18,7 +18,7 @@
     <div>
       <span class="eyebrow">GESTÃO OPERACIONAL</span>
       <h1>Central de Gestão</h1>
-      <p>Equipe, lotes, conversão e qualidade da operação educacional.</p>
+      <p>Equipe, disparos, conversão e qualidade da operação educacional.</p>
     </div>
   </div>
   <div class="topbar-actions">
@@ -34,7 +34,7 @@
   <aside class="side-nav" aria-label="Navegação da gestão">
     <div class="nav-label">Módulo</div>
     <button class="active" data-page="overview"><span>01</span><div><strong>Visão geral</strong><small>Resumo executivo</small></div></button>
-    <button data-page="team"><span>02</span><div><strong>Minha equipe</strong><small>Produtividade</small></div></button>
+    <button data-page="team"><span>02</span><div><strong>Minha equipe</strong><small>Disparos e produtividade</small></div></button>
     <button data-page="lots"><span>03</span><div><strong>Lotes</strong><small>Fluxo operacional</small></div></button>
     <button data-page="imports"><span>04</span><div><strong>Importações</strong><small>Histórico e qualidade</small></div></button>
     <button data-page="leads"><span>05</span><div><strong>Localizar lead</strong><small>Busca individual</small></div></button>
@@ -57,7 +57,7 @@
 
       <div class="overview-grid">
         <article class="panel panel-ranking">
-          <div class="panel-title"><div><span class="panel-kicker">DESEMPENHO</span><h3>Ranking da equipe</h3><p>Matrículas, atividade e pendências por consultor.</p></div><button class="link-button" data-go="team">Ver equipe</button></div>
+          <div class="panel-title"><div><span class="panel-kicker">DESEMPENHO</span><h3>Ranking da equipe</h3><p>Volume de disparos e matrículas por consultor.</p></div><button class="link-button" data-go="team">Ver equipe</button></div>
           <div id="teamRanking" class="ranking-list"></div>
         </article>
         <article class="panel panel-alerts">
@@ -73,10 +73,50 @@
     </section>
 
     <section class="page" id="page-team">
-      <div class="page-heading"><div><span class="page-kicker">PRODUTIVIDADE</span><h2>Minha equipe</h2><p>Carga, andamento, retorno e matrícula por consultor.</p></div><small id="teamCount">—</small></div>
-      <div class="toolbar toolbar-team"><div class="search-box"><span>⌕</span><input id="teamSearch" class="form-control" placeholder="Buscar consultor"></div><select id="teamSort" class="form-select"><option value="matriculas">Mais matrículas</option><option value="trabalhados">Mais trabalhados</option><option value="pendentes">Mais pendências</option><option value="taxa_matricula_pct">Maior conversão</option><option value="taxa_retorno_pct">Maior retorno</option></select></div>
+      <div class="page-heading"><div><span class="page-kicker">DISPAROS DA EQUIPE</span><h2>Minha equipe</h2><p>Totais calculados diretamente pelos dados de disparo no banco, sem dependência de lote.</p></div><small id="teamCount">—</small></div>
+
+      <div id="teamSummaryCards" class="executive-kpis mb-3" aria-live="polite"></div>
+
+      <div class="toolbar toolbar-team">
+        <div class="search-box"><span>⌕</span><input id="teamSearch" class="form-control" placeholder="Buscar consultor"></div>
+        <select id="teamPeriod" class="form-select">
+          <option value="total_disparado">Todo o período</option>
+          <option value="disparado_hoje">Hoje</option>
+          <option value="disparado_semana" selected>Esta semana</option>
+          <option value="disparado_mes">Este mês</option>
+        </select>
+        <select id="teamSort" class="form-select">
+          <option value="disparado_semana" selected>Mais disparos na semana</option>
+          <option value="total_disparado">Mais disparos no total</option>
+          <option value="disparado_hoje">Mais disparos hoje</option>
+          <option value="disparado_mes">Mais disparos no mês</option>
+          <option value="matriculas">Mais matrículas</option>
+          <option value="taxa_matricula_pct">Maior conversão</option>
+          <option value="taxa_retorno_pct">Maior retorno</option>
+        </select>
+      </div>
+
       <div id="teamCards" class="team-cards"></div>
-      <article class="panel mt-3"><div class="table-responsive table-shell tall"><table class="management-table wide"><thead><tr><th>Consultor</th><th>Leads</th><th>Trabalhados</th><th>Pendentes</th><th>Em atendimento</th><th>Retornos</th><th>Positivos</th><th>Negativos</th><th>Matrículas</th><th>Taxa retorno</th><th>Taxa matrícula</th><th>Última movimentação</th></tr></thead><tbody id="teamTableBody"></tbody></table></div></article>
+
+      <article class="panel mt-3">
+        <div class="panel-title"><div><span class="panel-kicker">RESUMO POR CONSULTOR</span><h3>Disparos e resultados</h3><p>Visão consolidada de todo o período, hoje, semana e mês.</p></div></div>
+        <div class="table-responsive table-shell tall">
+          <table class="management-table wide">
+            <thead><tr><th>Consultor</th><th>Total disparado</th><th>Hoje</th><th>Semana</th><th>Mês</th><th>Retornos</th><th>Positivos</th><th>Negativos</th><th>Matrículas</th><th>Taxa retorno</th><th>Conversão</th><th>Último disparo</th></tr></thead>
+            <tbody id="teamTableBody"></tbody>
+          </table>
+        </div>
+      </article>
+
+      <article class="panel mt-3">
+        <div class="panel-title"><div><span class="panel-kicker">DETALHAMENTO</span><h3>Disparos separados pelos dados do banco</h3><p>Quebra por consultor, tipo, campanha, canal e peça de disparo.</p></div></div>
+        <div class="table-responsive table-shell tall">
+          <table class="management-table wide">
+            <thead><tr><th>Consultor</th><th>Tipo</th><th>Campanha</th><th>Canal</th><th>Peça</th><th>Total</th><th>Semana</th><th>Último disparo</th></tr></thead>
+            <tbody id="teamBreakdownBody"></tbody>
+          </table>
+        </div>
+      </article>
     </section>
 
     <section class="page" id="page-lots">
@@ -111,5 +151,6 @@
 
 <div id="toastRegion" class="toast-region"></div>
 <script src="{{ url_for('static', filename='js/gestao.js') }}?v={{ asset_version }}"></script>
+<script src="{{ url_for('static', filename='js/gestao-disparos.js') }}?v={{ asset_version }}"></script>
 </body>
 </html>
