@@ -79,6 +79,16 @@ def _set_progress(cfg: Dict[str, str], upload_id: str, status: str, etapa: str, 
     db._run_gestao_query(f"SELECT {cfg['schema_ident']}.fn_atualizar_progresso_importacao(:upload_id,:status,:etapa,:progresso,:linhas_processadas,:linhas_inseridas,:linhas_ignoradas,:linhas_rejeitadas,:mensagem,:erro)", params, f"upload_progress_update_{cfg['institution']}")
 
 
+def _safe_set_progress(cfg: Dict[str, str], upload_id: str, status: str, etapa: str, progresso: float, **metrics: Any) -> None:
+    try:
+        _set_progress(cfg, upload_id, status, etapa, progresso, **metrics)
+    except Exception:
+        logger.warning(
+            "upload_progress_nonfatal institution=%s upload_id=%s status=%s etapa=%s",
+            cfg["institution"], upload_id, status, etapa, exc_info=True,
+        )
+
+
 def _resolve_routine(cfg: Dict[str, str], preferred: str):
     routine = _find_routine(cfg["schema"], preferred)
     if routine or cfg["institution"] != "unifecaf":
@@ -101,12 +111,13 @@ def _resolve_routine(cfg: Dict[str, str], preferred: str):
 def _worker(cfg: Dict[str, str], upload_id: str, routine_name: str, total_rows: int) -> None:
     started = time.monotonic()
     try:
-        _set_progress(cfg, upload_id, "PROCESSANDO", "LOCALIZANDO_ROTINA", 25)
+        _safe_set_progress(cfg, upload_id, "PROCESSANDO", "LOCALIZANDO_ROTINA", 25)
         routine = _resolve_routine(cfg, routine_name)
         if not routine:
             raise RuntimeError(f"Nenhuma rotina compatível encontrada no schema {cfg['schema']} para processar {upload_id}.")
         selected_name = str(routine.get("routine_name") or routine_name)
-        _set_progress(cfg, upload_id, "PROCESSANDO", "EXECUTANDO_SP", 35, mensagem=f"Executando {selected_name}.")
+        _safe_set_progress(cfg, upload_id, "PROCESSANDO", "EXECUTANDO_SP", 35, mensagem=f"Executando {selected_name}.")
+        logger.warning("upload_sp_call institution=%s upload_id=%s rotina=%s linhas=%s", cfg["institution"], upload_id, selected_name, total_rows)
         report = _execute_routine(cfg["schema_ident"], routine, upload_id, total_rows)
         inserted = int(report.get("linhas_inseridas") or 0)
         updated = int(report.get("linhas_atualizadas") or 0)
@@ -118,15 +129,15 @@ def _worker(cfg: Dict[str, str], upload_id: str, routine_name: str, total_rows: 
         ignored = existing_phone + existing_cpf + duplicates_file + no_identifier
         processed = min(total_rows, inserted + updated + ignored + rejected)
         message = report.get("mensagem") or f"Importação concluída por {selected_name}."
-        with db.get_engine().begin() as conn:
-            conn.execute(text(f"""UPDATE {cfg['schema_ident']}.{cfg['progress']} SET status='CONCLUIDO', etapa='CONCLUIDO', progresso=100, linhas_processadas=:processed, linhas_inseridas=:inserted, linhas_ignoradas=:ignored, linhas_rejeitadas=:rejected, duplicados_arquivo=:duplicates_file, existentes_por_celular=:existing_phone, existentes_por_cpf=:existing_cpf, mensagem=:message, atualizado_em=now(), finalizado_em=now() WHERE upload_id=:upload_id"""), {"processed": processed, "inserted": inserted, "ignored": ignored, "rejected": rejected, "duplicates_file": duplicates_file, "existing_phone": existing_phone, "existing_cpf": existing_cpf, "message": message, "upload_id": upload_id})
+        try:
+            with db.get_engine().begin() as conn:
+                conn.execute(text(f"""UPDATE {cfg['schema_ident']}.{cfg['progress']} SET status='CONCLUIDO', etapa='CONCLUIDO', progresso=100, linhas_processadas=:processed, linhas_inseridas=:inserted, linhas_ignoradas=:ignored, linhas_rejeitadas=:rejected, duplicados_arquivo=:duplicates_file, existentes_por_celular=:existing_phone, existentes_por_cpf=:existing_cpf, mensagem=:message, atualizado_em=now(), finalizado_em=now() WHERE upload_id=:upload_id"""), {"processed": processed, "inserted": inserted, "ignored": ignored, "rejected": rejected, "duplicates_file": duplicates_file, "existing_phone": existing_phone, "existing_cpf": existing_cpf, "message": message, "upload_id": upload_id})
+        except Exception:
+            logger.warning("upload_finalize_progress_nonfatal institution=%s upload_id=%s", cfg["institution"], upload_id, exc_info=True)
         logger.info("upload_async_complete institution=%s upload_id=%s rotina=%s total=%s elapsed_s=%.2f", cfg["institution"], upload_id, selected_name, total_rows, time.monotonic()-started)
     except Exception as exc:
         logger.exception("upload_async_error institution=%s upload_id=%s", cfg["institution"], upload_id)
-        try:
-            _set_progress(cfg, upload_id, "ERRO", "ERRO", 100, erro=str(exc), mensagem="Falha ao processar importação.")
-        except Exception:
-            logger.exception("upload_async_progress_error upload_id=%s", upload_id)
+        _safe_set_progress(cfg, upload_id, "ERRO", "ERRO", 100, erro=str(exc), mensagem="Falha ao processar importação.")
 
 
 def start_upload_worker(institution: str, upload_id: str, routine_name: str, total_rows: int) -> threading.Thread:
@@ -183,6 +194,7 @@ def enqueue_upload_dataframe(df, filename: str, mode: str, routine_name: str, in
     if "nome_arquivo" in stg_cols and "nome_arquivo" not in prepared.columns: prepared["nome_arquivo"] = filename
     if "linha_arquivo" in stg_cols and "linha_arquivo" not in prepared.columns: prepared["linha_arquivo"] = range(2, total_rows + 2)
     _copy_dataframe_to_staging(cfg, prepared, upload_id, mode, routine_name, filename)
-    start_upload_worker(cfg["institution"], upload_id, routine_name, total_rows)
+    worker = start_upload_worker(cfg["institution"], upload_id, routine_name, total_rows)
+    logger.warning("upload_worker_started institution=%s upload_id=%s rotina=%s thread_alive=%s", cfg["institution"], upload_id, routine_name, worker.is_alive())
     logger.info("upload_async_queued institution=%s upload_id=%s rotina=%s linhas=%s elapsed_s=%.2f", cfg["institution"], upload_id, routine_name, total_rows, time.monotonic() - started)
     return {"job_id": upload_id, "upload_id": upload_id, "institution": cfg["institution"], "status": "AGUARDANDO", "done": False, "mode": "somente_novos" if mode == "SOMENTE_NOVOS" else "atualizar_existentes", "progress_url": f"/api/upload/progresso/{upload_id}", "report": {"linhas_recebidas": total_rows, "linhas_gravadas_staging": total_rows}}
