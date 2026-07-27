@@ -56,11 +56,13 @@ try:
     from services.upload_compat import apply_upload_alias_compat
     from services.upload_queue_compat import apply_upload_queue_compat
     from services.upload_matriculado_patch import apply_matriculado_full_update_patch
+    from services.upload_null_guard import apply_upload_null_guard
     from services.import_hardening import apply_import_hardening
 
     apply_upload_alias_compat()
     apply_upload_queue_compat()
     apply_matriculado_full_update_patch()
+    apply_upload_null_guard()
 
     from app import create_app
     from upload_preview_routes import register_upload_preview_routes
