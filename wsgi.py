@@ -47,6 +47,18 @@ def _startup_error_wsgi_app(payload: Dict[str, Any]) -> Callable:
     return application
 
 
+def _matriculado_explicito(row: Dict[str, Any]) -> bool:
+    """Considera matrícula somente quando o campo matriculado confirma o estado atual.
+
+    data_matricula pode representar uma matrícula histórica, especialmente em
+    bases de egressos e Pós, e nunca deve sozinha classificar o lead como matriculado.
+    """
+    value = row.get("matriculado")
+    if value is True:
+        return True
+    return str(value or "").strip().upper() in {"TRUE", "T", "1", "SIM", "S"}
+
+
 try:
     from services.upload_compat import apply_upload_alias_compat
     from services.upload_queue_compat import apply_upload_queue_compat
@@ -61,8 +73,11 @@ try:
     from upload_progress_routes import register_upload_progress_routes
     from institution_routes import register_institution_routes
     from services.gestao_sem_lotes import register_gestao_sem_lotes
+    from services import produtividade_export as produtividade_export_module
     from services.produtividade_export import register_produtividade_export
     from services.qualidade_dados import register_qualidade_dados
+
+    produtividade_export_module._is_matriculated = _matriculado_explicito
 
     application = create_app()
     register_institution_routes(application)
