@@ -56,6 +56,7 @@ try:
     from services.upload_compat import apply_upload_alias_compat
     from services.upload_queue_compat import apply_upload_queue_compat
     from services.upload_matriculado_patch import apply_matriculado_full_update_patch
+    from services.import_hardening import apply_import_hardening
 
     apply_upload_alias_compat()
     apply_upload_queue_compat()
@@ -86,6 +87,12 @@ try:
     register_metricas_corrigidas(application)
     register_produtividade_export(application)
     register_qualidade_dados(application)
+
+    try:
+        hardening_result = apply_import_hardening()
+        application.logger.info("Endurecimento de importação aplicado: %s", hardening_result)
+    except Exception:
+        application.logger.exception("Não foi possível aplicar o endurecimento de importação")
 
     try:
         protected_targets = apply_date_monotonic_guards()
