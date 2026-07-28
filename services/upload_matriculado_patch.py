@@ -19,10 +19,9 @@ _RESULTS_LOCK = threading.Lock()
 def apply_matriculado_full_update_patch() -> None:
     """Garante que a carga de matrícula prevaleça sobre os dados existentes.
 
-    A staging era apagada dentro do worker antes da execução da atualização
-    prioritária. Com isso, a rotina encontrava zero linhas e nenhum matriculado
-    recebia os valores do arquivo. Agora a atualização roda imediatamente antes
-    da limpeza da staging.
+    A atualização prioritária roda imediatamente antes da limpeza da staging.
+    A mensagem de matrículas só é anexada quando o worker realmente conclui;
+    em caso de falha, não registra "0 matriculados" como se fosse resultado válido.
     """
     global _PATCHED
     if _PATCHED:
@@ -69,6 +68,33 @@ def apply_matriculado_full_update_patch() -> None:
             atualizados = int(_RESULTS.pop(upload_id, 0) or 0)
 
         try:
+            rows = db._run_gestao_query(
+                f"""
+                SELECT status, etapa
+                  FROM {cfg['schema_ident']}.{cfg['progress']}
+                 WHERE upload_id = :upload_id
+                 LIMIT 1
+                """,
+                {"upload_id": upload_id},
+                "upload_matriculados_status",
+            ) or []
+            progresso = rows[0] if rows else {}
+            status = str(progresso.get("status") or "").upper()
+
+            if status != "CONCLUIDO":
+                logger.warning(
+                    "upload_matriculados_message_skipped upload_id=%s status=%s atualizados=%s",
+                    upload_id,
+                    status or "DESCONHECIDO",
+                    atualizados,
+                )
+                return result
+
+            mensagem = (
+                f"{atualizados} matriculado(s) receberam os dados prioritários "
+                "do arquivo, incluindo status e matrícula."
+            )
+
             db._run_gestao_query(
                 f"""
                 UPDATE {cfg['schema_ident']}.{cfg['progress']}
@@ -78,13 +104,11 @@ def apply_matriculado_full_update_patch() -> None:
                        ),
                        atualizado_em = now()
                  WHERE upload_id = :upload_id
+                   AND status = 'CONCLUIDO'
                 """,
                 {
                     "upload_id": upload_id,
-                    "mensagem": (
-                        f"{atualizados} matriculado(s) receberam os dados "
-                        "prioritários do arquivo, incluindo status e matrícula."
-                    ),
+                    "mensagem": mensagem,
                 },
                 "upload_matriculados_progress",
             )
