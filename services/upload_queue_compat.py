@@ -28,10 +28,13 @@ def _queued_worker(cfg: Dict[str, str], upload_id: str, routine_name: str, total
     try:
         cursor = raw.cursor()
         try:
+            # A constraint op_importacao_progresso_status_check aceita
+            # AGUARDANDO, STAGING, PROCESSANDO, CONCLUIDO e ERRO.
+            # A etapa mantém a informação de que o upload está na fila.
             upload_async._set_progress(
                 cfg,
                 upload_id,
-                "AGUARDANDO_PROCESSAMENTO",
+                "AGUARDANDO",
                 "FILA_PROCESSAMENTO",
                 20,
                 mensagem="Upload concluído. Aguardando processamento interno.",
