@@ -41,22 +41,23 @@ def _clean_value(value: Any) -> Any:
 
 
 def _format_date_value(value: Any) -> Any:
+    """Normaliza datas para ISO, evitando ambiguidade DD/MM x MM/DD no PostgreSQL."""
     value = _clean_value(value)
     if value is None:
         return None
 
     if isinstance(value, pd.Timestamp):
-        return value.strftime("%d/%m/%Y")
+        return value.strftime("%Y-%m-%d")
     if isinstance(value, datetime):
-        return value.strftime("%d/%m/%Y")
+        return value.strftime("%Y-%m-%d")
     if isinstance(value, date):
-        return value.strftime("%d/%m/%Y")
+        return value.strftime("%Y-%m-%d")
 
     # Datas numéricas do Excel.
     if isinstance(value, (int, float)) and not isinstance(value, bool):
         try:
             parsed = pd.to_datetime(value, unit="D", origin="1899-12-30", errors="raise")
-            return parsed.strftime("%d/%m/%Y")
+            return parsed.strftime("%Y-%m-%d")
         except Exception:
             return value
 
@@ -66,10 +67,13 @@ def _format_date_value(value: Any) -> Any:
 
     # Remove somente a parte de horário quando a data já estiver em formato conhecido.
     candidate = text.replace("T", " ").split(" ", 1)[0]
+
+    # Arquivos operacionais usam padrão brasileiro. A tentativa dayfirst=False fica
+    # apenas como fallback para valores ISO/americanos inequivocamente válidos.
     for dayfirst in (True, False):
         try:
             parsed = pd.to_datetime(candidate, dayfirst=dayfirst, errors="raise")
-            return parsed.strftime("%d/%m/%Y")
+            return parsed.strftime("%Y-%m-%d")
         except Exception:
             continue
 
