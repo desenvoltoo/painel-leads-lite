@@ -23,7 +23,7 @@ def _pending_uploads() -> list[dict[str, Any]]:
         SELECT
             s.upload_id,
             COUNT(*)::bigint AS total_rows,
-            COALESCE(MAX(p.rotina), 'sp_processar_stg_leads') AS routine_name,
+            COALESCE(MAX(NULLIF(BTRIM(p.rotina), '')), 'sp_processar_stg_leads') AS routine_name,
             MAX(p.atualizado_em) AS progresso_atualizado_em,
             MAX(l.atualizado_em) AS log_atualizado_em
         FROM {schema}.stg_leads s
@@ -32,15 +32,17 @@ def _pending_uploads() -> list[dict[str, Any]]:
         LEFT JOIN {schema}.logs_importacoes l
           ON l.upload_id = s.upload_id
         WHERE NULLIF(BTRIM(s.upload_id), '') IS NOT NULL
+          AND COALESCE(s.processado, false) = false
           AND (
             p.upload_id IS NULL
-            OR UPPER(COALESCE(p.status, '')) IN ('AGUARDANDO','STAGING','PENDENTE','ERRO')
+            OR UPPER(COALESCE(p.status, '')) IN (
+                'AGUARDANDO','STAGING','PENDENTE','ERRO','CONCLUIDO','CONCLUIDO_COM_REJEICOES'
+            )
             OR (
               UPPER(COALESCE(p.status, '')) = 'PROCESSANDO'
-              AND COALESCE(p.atualizado_em, now()) < now() - interval '20 minutes'
+              AND COALESCE(p.atualizado_em, timestamp '1900-01-01') < now() - interval '20 minutes'
             )
           )
-          AND UPPER(COALESCE(l.status, '')) NOT IN ('CONCLUIDO','CONCLUIDO_COM_REJEICOES')
         GROUP BY s.upload_id
         ORDER BY MIN(s.linha_arquivo) NULLS LAST, s.upload_id
         """,
@@ -65,10 +67,30 @@ def _ensure_progress_row(upload_id: str, total_rows: int, routine_name: str) -> 
             etapa = 'RECUPERACAO_AUTOMATICA',
             linhas_total = EXCLUDED.linhas_total,
             progresso = 20,
-            atualizado_em = now()
+            erro = NULL,
+            atualizado_em = now(),
+            finalizado_em = NULL
         """,
         {"upload_id": upload_id, "routine_name": routine_name, "total_rows": total_rows},
         "unifecaf_recovery_progress",
+    )
+
+    # Reabre o log quando ainda há linhas não processadas na staging.
+    db._run_gestao_query(
+        f"""
+        UPDATE {schema}.logs_importacoes
+           SET status = 'RECEBIDO',
+               etapa = 'RECUPERACAO_AUTOMATICA',
+               mensagem = 'Carga reaberta automaticamente porque ainda possui linhas pendentes na staging.',
+               linhas_recebidas = :total_rows,
+               total_linhas = :total_rows,
+               atualizado_em = now(),
+               finalizado_em = NULL,
+               erros = 0
+         WHERE upload_id = :upload_id
+        """,
+        {"upload_id": upload_id, "total_rows": total_rows},
+        "unifecaf_recovery_reopen_log",
     )
 
 
@@ -80,7 +102,11 @@ def _run_recovery() -> None:
         try:
             pending = _pending_uploads()
             if pending:
-                logger.warning("unifecaf_recovery_found uploads=%s total_rows=%s", len(pending), sum(int(r.get("total_rows") or 0) for r in pending))
+                logger.warning(
+                    "unifecaf_recovery_found uploads=%s total_rows=%s",
+                    len(pending),
+                    sum(int(r.get("total_rows") or 0) for r in pending),
+                )
             for row in pending:
                 upload_id = str(row.get("upload_id") or "").strip()
                 total_rows = int(row.get("total_rows") or 0)
