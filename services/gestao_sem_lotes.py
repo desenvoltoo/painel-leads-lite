@@ -47,9 +47,8 @@ def _relation() -> str:
 
 
 def _where_filters() -> tuple[str, Dict[str, Any]]:
-    # Entram na análise todos os disparos e também qualquer registro marcado
-    # explicitamente como matriculado, mesmo sem data_disparo.
-    clauses = ["(data_disparo IS NOT NULL OR matriculado IS TRUE)"]
+    # Disparos são filtrados por data_disparo; matrículas, por data_matricula.
+    clauses = ["(data_disparo IS NOT NULL OR (matriculado IS TRUE AND data_matricula IS NOT NULL))"]
     params: Dict[str, Any] = {}
     mapping = {
         "consultor_disparo": "consultor_disparo",
@@ -69,16 +68,21 @@ def _where_filters() -> tuple[str, Dict[str, Any]]:
     start = str(request.args.get("data_ini") or "").strip()
     end = str(request.args.get("data_fim") or "").strip()
     if start:
-        clauses.append("(matriculado IS TRUE OR data_disparo >= CAST(:data_ini AS timestamp))")
+        clauses.append("((data_disparo IS NOT NULL AND data_disparo >= CAST(:data_ini AS timestamp)) OR (matriculado IS TRUE AND data_matricula >= CAST(:data_ini AS timestamp)))")
         params["data_ini"] = start
     if end:
-        clauses.append("(matriculado IS TRUE OR data_disparo < (CAST(:data_fim AS date) + INTERVAL '1 day'))")
+        clauses.append("((data_disparo IS NOT NULL AND data_disparo < (CAST(:data_fim AS date) + INTERVAL '1 day')) OR (matriculado IS TRUE AND data_matricula < (CAST(:data_fim AS date) + INTERVAL '1 day')))")
         params["data_fim"] = end
     return " AND ".join(clauses), params
 
 
 def _matriculated_sql() -> str:
-    return "matriculado IS TRUE"
+    clauses = ["matriculado IS TRUE", "data_matricula IS NOT NULL"]
+    if str(request.args.get("data_ini") or "").strip():
+        clauses.append("data_matricula >= CAST(:data_ini AS timestamp)")
+    if str(request.args.get("data_fim") or "").strip():
+        clauses.append("data_matricula < (CAST(:data_fim AS date) + INTERVAL '1 day')")
+    return "(" + " AND ".join(clauses) + ")"
 
 
 def _consultants_payload() -> Dict[str, Any]:
