@@ -6,7 +6,7 @@ import os
 from flask import jsonify, request, session
 
 from app import _read_upload_to_df, _validate_upload_filename
-from services.upload_async import enqueue_upload_dataframe
+from services.upload_update_fixed import enqueue_update_existing_dataframe
 
 
 def register_upload_update_existing_routes(app) -> None:
@@ -37,7 +37,12 @@ def register_upload_update_existing_routes(app) -> None:
             else:
                 routine_name = str(os.getenv("LEADS_IMPORT_ROUTINE") or "sp_processar_stg_leads_site").strip()
 
-            result = enqueue_upload_dataframe(df, filename=filename, mode="ATUALIZAR_EXISTENTES", routine_name=routine_name, institution=institution)
+            result = enqueue_update_existing_dataframe(
+                df,
+                filename=filename,
+                routine_name=routine_name,
+                institution=institution,
+            )
             return jsonify({"ok": True, "mode": "atualizar_existentes", "message": "Arquivo gravado na staging da instituição ativa. Atualização iniciada.", **result}), 202
         except Exception as exc:
             app.logger.exception("upload_atualizar_existentes_error")
