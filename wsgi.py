@@ -85,6 +85,7 @@ try:
     from services.management_import_compat import apply_management_import_compat
     from services.gestao_matricula_disparo_guard import apply_gestao_matricula_disparo_guard
     from services.upload_existing_full_update_guard import apply_upload_existing_full_update_guard
+    from services.upload_result_metrics_guard import apply_upload_result_metrics_guard
 
     produtividade_export_module._is_matriculated = _matriculado_explicito
     multi_result = apply_multi_institution_metrics()
@@ -93,6 +94,7 @@ try:
     management_import_result = apply_management_import_compat()
     matricula_disparo_result = apply_gestao_matricula_disparo_guard()
     existing_full_update_result = apply_upload_existing_full_update_guard()
+    result_metrics_result = apply_upload_result_metrics_guard()
 
     application = create_app()
     application.logger.info("Gestão multi-instituição ativada: %s", multi_result)
@@ -101,6 +103,7 @@ try:
     application.logger.info("Importações da Gestão corrigidas: %s", management_import_result)
     application.logger.info("Regra de matrícula com data de disparo ativada: %s", matricula_disparo_result)
     application.logger.info("Atualização completa antes da limpeza da staging ativada: %s", existing_full_update_result)
+    application.logger.info("Métricas reais das SPs ativadas: %s", result_metrics_result)
     register_institution_routes(application)
     register_upload_preview_routes(application)
     register_upload_new_only_routes(application)
