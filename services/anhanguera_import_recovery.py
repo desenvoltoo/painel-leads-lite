@@ -33,6 +33,14 @@ def _pending_uploads() -> list[dict[str, Any]]:
           ON p.upload_id = s.upload_id
         WHERE NULLIF(BTRIM(s.upload_id::text), '') IS NOT NULL
           AND COALESCE(s.processado, false) = false
+          AND (
+                p.upload_id IS NULL
+                OR UPPER(COALESCE(p.status, '')) IN ('ERRO', 'AGUARDANDO', 'STAGING')
+              )
+          AND NOT (
+                UPPER(COALESCE(p.status, '')) = 'PROCESSANDO'
+                AND COALESCE(p.atualizado_em, p.criado_em, now()) >= now() - interval '20 minutes'
+              )
         GROUP BY s.upload_id
         ORDER BY MIN(s.linha_arquivo) NULLS LAST, s.upload_id
         """,
@@ -65,7 +73,6 @@ def _ensure_progress_row(upload_id: str, total_rows: int, routine_name: str) -> 
         "anhanguera_recovery_progress",
     )
 
-    # Reabre o log mesmo que uma tentativa anterior tenha sido finalizada.
     db._run_gestao_query(
         f"""
         UPDATE {schema}.logs_importacoes
