@@ -12,6 +12,7 @@ def atualizar_matriculados_do_upload(schema: str, upload_id: str) -> Dict[str, A
 
     Regras:
     - somente linhas cuja flag recebida seja explicitamente verdadeira;
+    - aceita valores booleanos em português e inglês;
     - identifica por CPF e, na ausência, por celular;
     - campos textuais vazios não apagam dados existentes;
     - datas operacionais nunca retrocedem: prevalece a maior data;
@@ -35,7 +36,7 @@ def atualizar_matriculados_do_upload(schema: str, upload_id: str) -> Dict[str, A
         FROM {schema_ident}.stg_leads_site s
         WHERE s.upload_id = :upload_id
           AND LOWER(BTRIM(COALESCE(s.matriculado, s.flag_matriculado, ''))) IN
-              ('true', 't', '1', 'sim', 's', 'yes', 'y', 'matriculado')
+              ('true', 't', '1', 'sim', 's', 'yes', 'y', 'matriculado', 'verdadeiro', 'v')
     ), matriculados AS (
         SELECT * FROM origem WHERE rn = 1
     ), atualizados AS (
