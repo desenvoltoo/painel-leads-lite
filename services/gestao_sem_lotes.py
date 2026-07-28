@@ -47,8 +47,8 @@ def _relation() -> str:
 
 
 def _where_filters() -> tuple[str, Dict[str, Any]]:
-    # Disparos são filtrados por data_disparo; matrículas, por data_matricula.
-    clauses = ["(data_disparo IS NOT NULL OR (matriculado IS TRUE AND data_matricula IS NOT NULL))"]
+    # Disparos são filtrados por data_disparo; matrículas, exclusivamente por data_matricula.
+    clauses = ["(data_disparo IS NOT NULL OR (matriculado IS TRUE AND data_matricula IS NOT NULL AND UPPER(BTRIM(COALESCE(status::text, ''))) = 'MAT'))"]
     params: Dict[str, Any] = {}
     mapping = {
         "consultor_disparo": "consultor_disparo",
@@ -68,16 +68,22 @@ def _where_filters() -> tuple[str, Dict[str, Any]]:
     start = str(request.args.get("data_ini") or "").strip()
     end = str(request.args.get("data_fim") or "").strip()
     if start:
-        clauses.append("((data_disparo IS NOT NULL AND data_disparo >= CAST(:data_ini AS timestamp)) OR (matriculado IS TRUE AND data_matricula >= CAST(:data_ini AS timestamp)))")
+        clauses.append("((data_disparo IS NOT NULL AND data_disparo >= CAST(:data_ini AS timestamp)) OR (matriculado IS TRUE AND UPPER(BTRIM(COALESCE(status::text, ''))) = 'MAT' AND data_matricula >= CAST(:data_ini AS timestamp)))")
         params["data_ini"] = start
     if end:
-        clauses.append("((data_disparo IS NOT NULL AND data_disparo < (CAST(:data_fim AS date) + INTERVAL '1 day')) OR (matriculado IS TRUE AND data_matricula < (CAST(:data_fim AS date) + INTERVAL '1 day')))")
+        clauses.append("((data_disparo IS NOT NULL AND data_disparo < (CAST(:data_fim AS date) + INTERVAL '1 day')) OR (matriculado IS TRUE AND UPPER(BTRIM(COALESCE(status::text, ''))) = 'MAT' AND data_matricula < (CAST(:data_fim AS date) + INTERVAL '1 day')))")
         params["data_fim"] = end
     return " AND ".join(clauses), params
 
 
 def _matriculated_sql() -> str:
-    clauses = ["matriculado IS TRUE", "data_matricula IS NOT NULL"]
+    # Matrícula exige os três critérios simultaneamente:
+    # 1) matriculado=true; 2) status=MAT; 3) período definido somente por data_matricula.
+    clauses = [
+        "matriculado IS TRUE",
+        "UPPER(BTRIM(COALESCE(status::text, ''))) = 'MAT'",
+        "data_matricula IS NOT NULL",
+    ]
     if str(request.args.get("data_ini") or "").strip():
         clauses.append("data_matricula >= CAST(:data_ini AS timestamp)")
     if str(request.args.get("data_fim") or "").strip():
