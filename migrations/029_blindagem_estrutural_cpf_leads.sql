@@ -3,6 +3,10 @@
 
 BEGIN;
 
+-- Garante compatibilidade com bancos onde a migration de telefone2 ainda nao foi aplicada.
+ALTER TABLE modelo_estrela.leads_painel_lite
+    ADD COLUMN IF NOT EXISTS telefone2 text;
+
 LOCK TABLE modelo_estrela.leads_painel_lite IN SHARE ROW EXCLUSIVE MODE;
 
 -- 1) Consolida telefone alternativo antes de remover duplicados existentes.
