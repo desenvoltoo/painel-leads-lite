@@ -11,9 +11,10 @@ CREATE TABLE modelo_estrela.backup_leads_antes_telefone_031 AS
 SELECT * FROM modelo_estrela.leads_painel_lite;
 
 -- Materializa cada telefone uma unica vez.
+-- O ctid recebe alias row_id porque "ctid" e nome reservado de coluna de sistema.
 CREATE TEMP TABLE tmp_tel_ocorrencias ON COMMIT DROP AS
 SELECT
-  l.ctid,
+  l.ctid AS row_id,
   regexp_replace(COALESCE(l.cpf::text,''),'[^0-9]','','g') AS cpf_limpo,
   t.telefone,
   COALESCE(
@@ -31,7 +32,7 @@ CROSS JOIN LATERAL (
 ) t(telefone)
 WHERE t.telefone IS NOT NULL;
 
-CREATE INDEX ON tmp_tel_ocorrencias (telefone, data_ref DESC, ctid);
+CREATE INDEX ON tmp_tel_ocorrencias (telefone, data_ref DESC, row_id);
 ANALYZE tmp_tel_ocorrencias;
 
 -- Mesmo CPF: remove telefone2 igual ao celular.
@@ -40,30 +41,30 @@ SET telefone2 = NULL
 WHERE NULLIF(regexp_replace(COALESCE(celular::text,''),'[^0-9]','','g'),'')
     = NULLIF(regexp_replace(COALESCE(telefone2::text,''),'[^0-9]','','g'),'');
 
--- CPF diferente com mesmo telefone: mantém a linha mais recente e remove as antigas.
+-- CPF diferente com mesmo telefone: mantem a linha mais recente e remove as antigas.
 WITH ranqueados AS (
   SELECT
-    ctid,
+    row_id,
     telefone,
     cpf_limpo,
     ROW_NUMBER() OVER (
       PARTITION BY telefone
-      ORDER BY data_ref DESC, ctid DESC
+      ORDER BY data_ref DESC, row_id DESC
     ) AS rn,
     FIRST_VALUE(cpf_limpo) OVER (
       PARTITION BY telefone
-      ORDER BY data_ref DESC, ctid DESC
+      ORDER BY data_ref DESC, row_id DESC
     ) AS cpf_vencedor
   FROM tmp_tel_ocorrencias
 ), perdedores AS (
-  SELECT DISTINCT ctid
+  SELECT DISTINCT row_id
   FROM ranqueados
   WHERE rn > 1
     AND cpf_limpo IS DISTINCT FROM cpf_vencedor
 )
 DELETE FROM modelo_estrela.leads_painel_lite l
 USING perdedores p
-WHERE l.ctid = p.ctid;
+WHERE l.ctid = p.row_id;
 
 -- Indices para a blindagem futura ser rapida.
 CREATE INDEX IF NOT EXISTS idx_leads_celular_normalizado
@@ -97,7 +98,7 @@ BEGIN
   LOOP
     PERFORM pg_advisory_xact_lock(hashtext('TEL:' || v_tel));
 
-    SELECT l.ctid,
+    SELECT l.ctid AS row_id,
            NULLIF(regexp_replace(COALESCE(l.cpf::text,''),'[^0-9]','','g'),'') AS cpf_limpo,
            COALESCE(l.data_atualizacao::timestamptz,l.dt_upload,l.data_matricula::timestamptz,l.data_inscricao::timestamptz,'-infinity'::timestamptz) AS data_ref
       INTO v_old
@@ -112,7 +113,7 @@ BEGIN
 
     IF FOUND AND v_old.cpf_limpo IS DISTINCT FROM v_cpf THEN
       IF v_data_nova >= v_old.data_ref THEN
-        DELETE FROM modelo_estrela.leads_painel_lite WHERE ctid = v_old.ctid;
+        DELETE FROM modelo_estrela.leads_painel_lite WHERE ctid = v_old.row_id;
       ELSE
         RETURN NULL;
       END IF;
