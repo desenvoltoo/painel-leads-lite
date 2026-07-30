@@ -285,6 +285,7 @@ function makeTomSelect(selector) {
   const tomSelect = new TomSelect(selector, {
     plugins: [pluginCheckbox, pluginRemove],
     maxItems: null,
+    maxOptions: null,
     hideSelected: false,
     closeAfterSelect: false,
     persist: false,

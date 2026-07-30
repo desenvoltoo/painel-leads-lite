@@ -371,13 +371,19 @@ def query_options():
             logger.warning("Options ignorado: coluna não existe na view col=%s view=%s", col, _view_table_id())
             values = []
         else:
+            safe_col = _safe_ident(col)
             rows = _run_gestao_query(
                 f"""
-                SELECT DISTINCT NULLIF(TRIM({col}::text), '') AS value
-                FROM {_view_table_id()}
-                WHERE NULLIF(TRIM({col}::text), '') IS NOT NULL
-                ORDER BY value
-                LIMIT 1000
+                WITH valores AS (
+                    SELECT
+                        REGEXP_REPLACE(BTRIM({safe_col}::text), '\\s+', ' ', 'g') AS value
+                    FROM {_view_table_id()}
+                )
+                SELECT MIN(value) AS value
+                FROM valores
+                WHERE NULLIF(value, '') IS NOT NULL
+                GROUP BY UPPER(value)
+                ORDER BY MIN(value)
                 """,
                 {},
                 f"options_{col}",

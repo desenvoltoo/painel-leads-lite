@@ -486,6 +486,32 @@ def test_fila_sem_status_recency_before_ec_regardless_previous_action():
     assert [r["nome"] for r in ordered] == ["sem status trabalhado recente", "sem status antigo", "ec recente"]
 
 
+
+
+def test_query_options_loads_all_distinct_values_without_limit(monkeypatch):
+    calls = []
+
+    def fake_has_view_col(col):
+        return col in {"polo"}
+
+    def fake_run(sql, params=None, operation_name=""):
+        calls.append((sql, params or {}, operation_name))
+        if operation_name == "options_polo":
+            return [{"value": "ITAQUERA"}, {"value": "JUNDIAÍ"}, {"value": "RIO CLARO"}]
+        return []
+
+    monkeypatch.setattr(bq, "_has_view_col", fake_has_view_col)
+    monkeypatch.setattr(bq, "_run_gestao_query", fake_run)
+
+    options = bq.query_options()
+
+    assert options["polos"] == ["ITAQUERA", "JUNDIAÍ", "RIO CLARO"]
+    polo_sql = next(sql for sql, _params, op in calls if op == "options_polo")
+    assert "LIMIT" not in polo_sql.upper()
+    assert "OFFSET" not in polo_sql.upper()
+    assert "GROUP BY UPPER(value)" in polo_sql
+    assert "REGEXP_REPLACE" in polo_sql
+
 def test_bq_param_logging_redacts_personal_values():
     params = [
         bq.database.ScalarQueryParameter("email", "STRING", "ana@example.com"),
