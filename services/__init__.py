@@ -59,6 +59,41 @@ _database.UPLOAD_ALIASES.setdefault(
     ],
 )
 
+# Novos campos acadêmicos recebidos nas planilhas.
+_database.UPLOAD_ALIASES.setdefault(
+    "graduacao",
+    [
+        "graduacao",
+        "graduação",
+        "formacao",
+        "formação",
+        "curso_graduacao",
+        "curso_graduação",
+    ],
+)
+_database.UPLOAD_ALIASES.setdefault(
+    "conclusao",
+    [
+        "conclusao",
+        "conclusão",
+        "ano_conclusao",
+        "ano_conclusão",
+        "data_conclusao",
+        "data_conclusão",
+    ],
+)
+
+# Garante que os novos campos façam parte da API de leads.
+for _column in ("graduacao", "conclusao"):
+    if _column not in _database.LEADS_COLUMNS:
+        try:
+            _database.LEADS_COLUMNS.insert(
+                _database.LEADS_COLUMNS.index("email") + 1,
+                _column,
+            )
+        except ValueError:
+            _database.LEADS_COLUMNS.append(_column)
+
 _original_prepare_upload_dataframe = _database._prepare_upload_dataframe
 
 
@@ -88,33 +123,104 @@ if not any(output == "telefone2" for _, output in _database.EXPORT_COLUMNS):
         len(_database.EXPORT_COLUMNS),
     )
     _database.EXPORT_COLUMNS.insert(position, ("telefone2", "telefone2"))
+
+# Inclui graduação e conclusão nas exportações, preservando a ordem histórica.
+for _source, _output in reversed((
+    ("graduacao", "graduacao"),
+    ("conclusao", "conclusao"),
+)):
+    if not any(output == _output for _, output in _database.EXPORT_COLUMNS):
+        position = next(
+            (
+                index + 1
+                for index, (_, output) in enumerate(_database.EXPORT_COLUMNS)
+                if output == "email"
+            ),
+            len(_database.EXPORT_COLUMNS),
+        )
+        _database.EXPORT_COLUMNS.insert(position, (_source, _output))
+
 _database.EXPORT_ORDER = [output for _, output in _database.EXPORT_COLUMNS]
 
 
-# O app possui uma lista histórica própria usada no CSV em lote. Como o módulo
-# services é carregado enquanto app.py ainda está sendo importado, aguardamos a
-# conclusão da importação e acrescentamos telefone2 sem alterar as rotas.
-def _patch_app_export_order() -> None:
+def _append_filter_value(filters: Dict[str, Any], key: str, value: Any) -> None:
+    if isinstance(value, list):
+        cleaned = [str(item).strip() for item in value if str(item).strip()]
+        if cleaned:
+            filters[key] = cleaned
+        return
+    if value is None:
+        return
+    cleaned = str(value).strip()
+    if cleaned:
+        filters[key] = cleaned
+
+
+# app.py é um arquivo grande e historicamente mantém suas próprias listas de
+# filtros/exportação. O pacote services é carregado antes da conclusão do import
+# do app, então aplicamos a compatibilidade assim que as funções ficam prontas.
+def _patch_app_academic_fields() -> None:
     for _ in range(200):
         patched = False
         for module_name in ("app", "__main__"):
             module = sys.modules.get(module_name)
-            order = getattr(module, "EXPORT_ORDER", None) if module else None
+            if module is None:
+                continue
+
+            order = getattr(module, "EXPORT_ORDER", None)
             if isinstance(order, list):
                 if "telefone2" not in order:
                     try:
                         order.insert(order.index("celular") + 1, "telefone2")
                     except ValueError:
                         order.append("telefone2")
+                for field in reversed(("graduacao", "conclusao")):
+                    if field not in order:
+                        try:
+                            order.insert(order.index("email") + 1, field)
+                        except ValueError:
+                            order.append(field)
+
+            original_request = getattr(module, "_get_filters_from_request", None)
+            if callable(original_request) and not getattr(original_request, "_academic_fields_patch", False):
+                def _get_filters_from_request_with_academic_fields(_original=original_request, _module=module):
+                    filters, meta = _original()
+                    req = getattr(_module, "request", None)
+                    if req is not None:
+                        _append_filter_value(filters, "graduacao", req.args.get("graduacao"))
+                        _append_filter_value(filters, "conclusao", req.args.get("conclusao"))
+                    return filters, meta
+
+                _get_filters_from_request_with_academic_fields._academic_fields_patch = True
+                setattr(module, "_get_filters_from_request", _get_filters_from_request_with_academic_fields)
+
+            original_payload = getattr(module, "_get_filters_from_payload", None)
+            if callable(original_payload) and not getattr(original_payload, "_academic_fields_patch", False):
+                def _get_filters_from_payload_with_academic_fields(payload, _original=original_payload):
+                    filters, meta = _original(payload)
+                    payload = payload or {}
+                    _append_filter_value(filters, "graduacao", payload.get("graduacao"))
+                    _append_filter_value(filters, "conclusao", payload.get("conclusao"))
+                    return filters, meta
+
+                _get_filters_from_payload_with_academic_fields._academic_fields_patch = True
+                setattr(module, "_get_filters_from_payload", _get_filters_from_payload_with_academic_fields)
+
+            if (
+                isinstance(order, list)
+                and callable(getattr(module, "_get_filters_from_request", None))
+                and callable(getattr(module, "_get_filters_from_payload", None))
+            ):
                 patched = True
+
         if patched:
             return
         time.sleep(0.05)
 
 
 threading.Thread(
-    target=_patch_app_export_order,
-    name="patch-app-export-telefone2",
+    target=_patch_app_academic_fields,
+    name="patch-app-campos-academicos",
     daemon=True,
 ).start()
 
