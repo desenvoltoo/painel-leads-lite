@@ -21,6 +21,7 @@ STAGING_COLUMNS = {
     "anhanguera": {
         "status_inscricao", "data_inscricao", "origem", "unidade", "tipo_negocio",
         "curso", "modalidade", "turno", "nome", "cpf", "celular", "email",
+        "graduacao", "conclusao",
         "data_ultima_acao", "qtd_acionamentos", "status", "data_disparo",
         "peca_disparo", "texto_disparo", "consultor_disparo", "tipo_disparo",
         "campanha", "observacao", "data_matricula", "matriculado", "canal",
