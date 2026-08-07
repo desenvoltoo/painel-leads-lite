@@ -2,6 +2,7 @@
 """Upload de atualização com um único upload_id em todas as etapas."""
 from __future__ import annotations
 
+import logging
 import time
 import uuid
 from typing import Any, Dict
@@ -14,6 +15,79 @@ from .upload_async import (
     _prepare_for_unifecaf,
     start_upload_worker,
 )
+
+logger = logging.getLogger(__name__)
+
+
+_ACADEMIC_UPLOAD_ALIASES = {
+    "graduacao": {
+        "graduacao",
+        "graduação",
+        "formacao",
+        "formação",
+        "curso_graduacao",
+        "curso_graduação",
+        "graduacao_cursada",
+        "graduação_cursada",
+    },
+    "conclusao": {
+        "conclusao",
+        "conclusão",
+        "ano_conclusao",
+        "ano_conclusão",
+        "data_conclusao",
+        "data_conclusão",
+        "conclusao_graduacao",
+        "conclusão_graduação",
+    },
+}
+
+
+def _restore_academic_columns_from_source(df, prepared):
+    """Garante graduação/conclusão diretamente a partir da planilha original.
+
+    Esta proteção é intencionalmente independente de ``UPLOAD_ALIASES``. Assim,
+    mesmo que uma instância antiga do módulo database permaneça carregada ou
+    algum patch histórico altere o parser, os dois campos acadêmicos chegam à
+    staging quando estiverem presentes no arquivo recebido.
+    """
+    if df is None or getattr(df, "empty", True) or prepared is None or getattr(prepared, "empty", True):
+        return prepared
+
+    normalized_source = {
+        db._normalize_upload_col(column): column
+        for column in df.columns
+    }
+
+    for target, aliases in _ACADEMIC_UPLOAD_ALIASES.items():
+        source_column = None
+        for alias in aliases:
+            normalized_alias = db._normalize_upload_col(alias)
+            if normalized_alias in normalized_source:
+                source_column = normalized_source[normalized_alias]
+                break
+
+        if source_column is None:
+            continue
+
+        source_values = df[source_column].reset_index(drop=True)
+        if len(source_values) != len(prepared):
+            raise RuntimeError(
+                f"Quantidade de linhas divergente ao preservar {target}: "
+                f"origem={len(source_values)} preparado={len(prepared)}."
+            )
+
+        prepared = prepared.copy()
+        prepared[target] = source_values.astype(object).where(source_values.notna(), None).values
+
+        source_has_value = source_values.notna() & source_values.astype(str).str.strip().ne("")
+        prepared_has_value = prepared[target].notna() & prepared[target].astype(str).str.strip().ne("")
+        if bool(source_has_value.any()) and not bool(prepared_has_value.any()):
+            raise RuntimeError(
+                f"A coluna {target} possui dados na planilha, mas ficou vazia antes da staging."
+            )
+
+    return prepared
 
 
 def enqueue_update_existing_dataframe(
@@ -28,6 +102,12 @@ def enqueue_update_existing_dataframe(
     started = time.monotonic()
 
     prepared = db._prepare_upload_dataframe(df, filename, upload_id)
+
+    # Proteção explícita para os novos campos acadêmicos. A planilha original é
+    # a fonte de verdade para graduação e conclusão antes do COPY para a staging.
+    if cfg["institution"] == "anhanguera":
+        prepared = _restore_academic_columns_from_source(df, prepared)
+
     if cfg["institution"] == "unifecaf":
         prepared = _prepare_for_unifecaf(prepared)
 
@@ -38,6 +118,23 @@ def enqueue_update_existing_dataframe(
     staging_columns = STAGING_COLUMNS[cfg["institution"]]
     prepared = prepared[[column for column in prepared.columns if column in staging_columns]].copy()
     prepared["upload_id"] = upload_id
+
+    if cfg["institution"] == "anhanguera":
+        for field in ("graduacao", "conclusao"):
+            if field in prepared.columns:
+                non_empty = int(
+                    (
+                        prepared[field].notna()
+                        & prepared[field].astype(str).str.strip().ne("")
+                    ).sum()
+                )
+                logger.info(
+                    "upload_academic_field upload_id=%s field=%s preenchidos=%s total=%s",
+                    upload_id,
+                    field,
+                    non_empty,
+                    total_rows,
+                )
 
     if "nome_arquivo" in staging_columns:
         prepared["nome_arquivo"] = filename
