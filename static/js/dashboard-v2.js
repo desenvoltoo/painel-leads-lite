@@ -139,7 +139,10 @@
     let ready = 0;
     rows.forEach((row) => {
       if (row.querySelector('.table-feedback')) return;
-      const value = (row.cells?.[11]?.textContent || '').trim().toLowerCase();
+      // Ordem atual da tabela: data inscrição, nome, cpf, celular, origem, polo,
+      // curso, graduação, conclusão, modalidade, status, matriculado,
+      // consultor, data disparo, campanha e canal.
+      const value = (row.cells?.[13]?.textContent || '').trim().toLowerCase();
       const isReady = !value || value === '-' || value.includes('sem disparo') || value.includes('pronto para disparo');
       row.classList.toggle('ops-ready-row', isReady);
       row.classList.toggle('ops-sent-row', !isReady);
