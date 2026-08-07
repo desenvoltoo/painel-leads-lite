@@ -9,7 +9,7 @@ from typing import Any, Dict, Iterable, List, Tuple
 from services import database as bq
 
 MAX_PAGE_SIZE = 100
-OPTION_FIELDS = ["status","curso","modalidade","turno","polo","origem","consultor_disparo","consultor_comercial","canal","campanha","tipo_disparo","tipo_negocio"]
+OPTION_FIELDS = ["status","curso","graduacao","conclusao","modalidade","turno","polo","origem","consultor_disparo","consultor_comercial","canal","campanha","tipo_disparo","tipo_negocio"]
 _CACHE: dict = {}
 
 class GestaoValidationError(ValueError): pass
