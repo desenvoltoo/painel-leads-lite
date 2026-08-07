@@ -2,7 +2,7 @@
   'use strict';
 
   const PERSONAL = new Set(['nome', 'cpf', 'celular', 'email']);
-  const ACADEMIC = new Set(['curso', 'modalidade', 'turno', 'polo', 'unidade', 'origem', 'tipo_negocio', 'data_inscricao', 'data_matricula']);
+  const ACADEMIC = new Set(['curso', 'graduacao', 'conclusao', 'modalidade', 'turno', 'polo', 'unidade', 'origem', 'tipo_negocio', 'data_inscricao', 'data_matricula']);
   const OPERATIONAL = new Set([
     'consultor_comercial', 'consultor_disparo', 'status', 'status_inscricao',
     'campanha', 'canal', 'acao_comercial', 'tipo_disparo', 'peca_disparo',
@@ -15,7 +15,8 @@
     whatsapp: 'celular', phone: 'celular', fone: 'celular', documento: 'cpf',
     cpf_aluno: 'cpf', consultor: 'consultor_comercial', consultor_venda: 'consultor_comercial',
     consultor_do_disparo: 'consultor_disparo', acao: 'acao_comercial', obs: 'observacao',
-    flag_matriculado: 'matriculado'
+    flag_matriculado: 'matriculado', formacao: 'graduacao', ano_conclusao: 'conclusao',
+    data_conclusao: 'conclusao'
   };
 
   let cachedRows = null;
