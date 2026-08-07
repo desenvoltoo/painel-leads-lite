@@ -24,7 +24,7 @@ IDENT_RE = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]*$")
 DB_SCHEMA = os.getenv("DB_SCHEMA", "public").strip() or "public"
 LEADS_VIEW = os.getenv("LEADS_VIEW", "vw_leads_painel_lite").strip() or "vw_leads_painel_lite"
 EXPORT_MAX_ROWS = int(os.getenv("EXPORT_MAX_ROWS", "50000"))
-LEADS_COLUMNS = ["sk_pessoa","cpf","celular","nome","email","curso","modalidade","turno","polo","origem","tipo_negocio","consultor_comercial","consultor_disparo","campanha","canal","acao_comercial","tipo_disparo","peca_disparo","texto_disparo","qtd_acionamentos","status","status_inscricao","observacao","flag_matriculado","data_inscricao","data_matricula","data_atualizacao","data_ultima_acao","data_disparo"]
+LEADS_COLUMNS = ["sk_pessoa","cpf","celular","nome","email","graduacao","conclusao","curso","modalidade","turno","polo","origem","tipo_negocio","consultor_comercial","consultor_disparo","campanha","canal","acao_comercial","tipo_disparo","peca_disparo","texto_disparo","qtd_acionamentos","status","status_inscricao","observacao","flag_matriculado","data_inscricao","data_matricula","data_atualizacao","data_ultima_acao","data_disparo"]
 EXPORT_COLUMNS = [
     ("status_inscricao", "status_inscricao"),
     ("data_inscricao", "data_inscricao"),
@@ -38,6 +38,8 @@ EXPORT_COLUMNS = [
     ("cpf", "cpf"),
     ("celular", "celular"),
     ("email", "email"),
+    ("graduacao", "graduacao"),
+    ("conclusao", "conclusao"),
     ("data_ultima_acao", "data_ultima_acao"),
     ("qtd_acionamentos", "qtd_acionamentos"),
     ("status", "status"),
@@ -221,6 +223,8 @@ def _apply_filters(sql: str, filters: Optional[Dict[str, Any]], params: list) ->
     filter_cols = [
         "status",
         "curso",
+        "graduacao",
+        "conclusao",
         "modalidade",
         "turno",
         "polo",
@@ -352,6 +356,8 @@ def query_options():
     option_map = {
         "status": ("status", "status"),
         "curso": ("curso", "cursos"),
+        "graduacao": ("graduacao", "graduacoes"),
+        "conclusao": ("conclusao", "conclusoes"),
         "modalidade": ("modalidade", "modalidades"),
         "turno": ("turno", "turnos"),
         "polo": ("polo", "polos"),
@@ -465,6 +471,8 @@ UPLOAD_ALIASES = {
     "nome": ["nome", "nome_aluno", "aluno", "nome_completo"],
     "email": ["email", "e_mail", "mail"],
     "curso": ["curso", "nome_curso"],
+    "graduacao": ["graduacao", "graduação", "formacao", "formação", "curso_graduacao", "curso_graduação"],
+    "conclusao": ["conclusao", "conclusão", "ano_conclusao", "ano_conclusão", "data_conclusao", "data_conclusão"],
     "modalidade": ["modalidade"],
     "turno": ["turno"],
     "polo": ["polo", "unidade", "campus"],
