@@ -8,7 +8,7 @@
 //
 // HTML (ids):
 // upload: #uploadFile #btnUpload #uploadStatus #uploadSource
-// filtros: #fStatus #fCurso #fModalidade #fTurno #fPolo #fOrigem
+// filtros: #fStatus #fCurso #fGraduacao #fConclusao #fModalidade #fTurno #fPolo #fOrigem
 //          #fConsultorDisparo #fConsultorComercial #fCanal #fCampanha
 //          #fTipoDisparo #fTipoNegocio
 //          #fIni #fFim #fMesDisparo #fDataDisparoSituacao #fMatriculado #fLimit #fBusca
@@ -19,11 +19,11 @@
 
 const $ = (sel) => document.querySelector(sel);
 
-let tsStatus, tsCurso, tsModalidade, tsTurno, tsPolo, tsOrigem;
+let tsStatus, tsCurso, tsGraduacao, tsConclusao, tsModalidade, tsTurno, tsPolo, tsOrigem;
 let tsConsultorDisparo, tsConsultorComercial, tsCanal, tsCampanha;
 let tsTipoDisparo, tsTipoNegocio;
 
-const TABLE_COLS = 14;
+const TABLE_COLS = 16;
 const EMPTY_FILTER_TOKEN = "__EMPTY__";
 const EMPTY_FILTER_LABEL = "(Sem preenchimento)";
 const SAVED_FILTERS_STORAGE_KEY = "painel_leads_saved_filters_v1";
@@ -33,9 +33,6 @@ let totalLeads = 0;
 let isLoadingLeads = false;
 let activeExportJobId = null;
 
-/* =========================
-   Helpers UI
-========================= */
 function setStatus(msg, type = "ok") {
   const el = $("#statusLine");
   if (!el) return;
@@ -67,7 +64,6 @@ function updateSelectedFileName() {
   label.textContent = file ? file.name : "Nenhum arquivo selecionado";
   if (file) setUploadStatus("Arquivo recebido. Pronto para enviar para staging.", "info");
 }
-
 
 function formatImportReport(report) {
   if (!report) return "";
@@ -103,13 +99,7 @@ function setExportProgress({ visible, text = "", progress = 0 }) {
 
 function escapeHtml(str) {
   if (str === null || str === undefined) return "";
-  return String(str).replace(/[&<>"']/g, (m) => ({
-    "&": "&amp;",
-    "<": "&lt;",
-    ">": "&gt;",
-    '"': "&quot;",
-    "'": "&#39;",
-  }[m]));
+  return String(str).replace(/[&<>"']/g, (m) => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[m]));
 }
 
 function fmtDate(d) {
@@ -131,16 +121,12 @@ function fmtMonthYear(monthValue) {
   return `${month}/${year}`;
 }
 
-function fmtDataDisparo(value) {
-  return value ? fmtDate(value) : "Sem disparo";
-}
-
+function fmtDataDisparo(value) { return value ? fmtDate(value) : "Sem disparo"; }
 function fmtBool(b) {
   if (b === true || String(b).toLowerCase() === "true") return "Sim";
   if (b === false || String(b).toLowerCase() === "false") return "Não";
   return "-";
 }
-
 function badgeClass(value, kind = "status") {
   const text = String(value || "").toLowerCase();
   if (kind === "matriculado") return text === "sim" ? "badge-success" : text === "não" ? "badge-warning" : "badge-neutral";
@@ -150,255 +136,130 @@ function badgeClass(value, kind = "status") {
   if (/lead|novo|contato/.test(text)) return "badge-info";
   return "badge-neutral";
 }
-
 function tableCell(value, extraClass = "") {
   const safe = escapeHtml(value || "-");
   return `<span class="${extraClass}" title="${safe}">${safe}</span>`;
 }
 
-/* =========================
-   API (com erro detalhado)
-========================= */
 async function apiGet(path, params = {}) {
   const url = new URL(path, window.location.origin);
-
   Object.entries(params).forEach(([k, v]) => {
     if (v === null || v === undefined) return;
-
     if (Array.isArray(v)) {
       if (v.length === 0) return;
-      // manda "A || B" (backend faz split com _as_list)
       url.searchParams.set(k, v.join(" || "));
       return;
     }
-
     const s = String(v).trim();
     if (!s) return;
     url.searchParams.set(k, s);
   });
-
-  const res = await fetch(url.toString(), {
-    cache: "no-store",
-    credentials: "same-origin",
-  });
-
-  // tenta entender o corpo sempre (pra erro útil)
+  const res = await fetch(url.toString(), { cache: "no-store", credentials: "same-origin" });
   const text = await res.text();
   let data = {};
-  try {
-    data = text ? JSON.parse(text) : {};
-  } catch {
-    data = { message: text || "" };
-  }
-
+  try { data = text ? JSON.parse(text) : {}; } catch { data = { message: text || "" }; }
   if (!res.ok) {
-    if (res.status === 401 && data?.redirect_to) {
-      window.location.href = data.redirect_to;
-      throw new Error("Sessão expirada");
-    }
-    const msg =
-      data?.error ||
-      data?.message ||
-      (typeof data === "string" ? data : "") ||
-      `Erro na API (${res.status})`;
+    if (res.status === 401 && data?.redirect_to) { window.location.href = data.redirect_to; throw new Error("Sessão expirada"); }
+    const msg = data?.error || data?.message || (typeof data === "string" ? data : "") || `Erro na API (${res.status})`;
     throw new Error(msg);
   }
-
   return data;
 }
 
 async function apiPostForm(path, formData) {
   const url = new URL(path, window.location.origin);
-  const res = await fetch(url.toString(), {
-    method: "POST",
-    body: formData,
-    credentials: "same-origin",
-  });
-
+  const res = await fetch(url.toString(), { method: "POST", body: formData, credentials: "same-origin" });
   const text = await res.text();
   let data = {};
-  try {
-    data = text ? JSON.parse(text) : {};
-  } catch {
-    data = { message: text || "" };
-  }
-
+  try { data = text ? JSON.parse(text) : {}; } catch { data = { message: text || "" }; }
   if (!res.ok) {
-    if (res.status === 401 && data?.redirect_to) {
-      window.location.href = data.redirect_to;
-      throw new Error("Sessão expirada");
-    }
-    const msg =
-      data?.error ||
-      data?.message ||
-      (typeof data === "string" ? data : "") ||
-      `Erro na API (${res.status})`;
+    if (res.status === 401 && data?.redirect_to) { window.location.href = data.redirect_to; throw new Error("Sessão expirada"); }
+    const msg = data?.error || data?.message || (typeof data === "string" ? data : "") || `Erro na API (${res.status})`;
     throw new Error(msg);
   }
-
   return data;
 }
 
 async function apiPostJson(path, payload = {}) {
   const url = new URL(path, window.location.origin);
-  const res = await fetch(url.toString(), {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload || {}),
-    credentials: "same-origin",
-  });
-
+  const res = await fetch(url.toString(), { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload || {}), credentials: "same-origin" });
   const text = await res.text();
   let data = {};
-  try {
-    data = text ? JSON.parse(text) : {};
-  } catch {
-    data = { message: text || "" };
-  }
-
+  try { data = text ? JSON.parse(text) : {}; } catch { data = { message: text || "" }; }
   if (!res.ok) {
-    if (res.status === 401 && data?.redirect_to) {
-      window.location.href = data.redirect_to;
-      throw new Error("Sessão expirada");
-    }
-    const msg =
-      data?.error ||
-      data?.message ||
-      (typeof data === "string" ? data : "") ||
-      `Erro na API (${res.status})`;
+    if (res.status === 401 && data?.redirect_to) { window.location.href = data.redirect_to; throw new Error("Sessão expirada"); }
+    const msg = data?.error || data?.message || (typeof data === "string" ? data : "") || `Erro na API (${res.status})`;
     throw new Error(msg);
   }
-
   return data;
 }
 
-/* =========================
-   TomSelect (multi + checkbox)
-========================= */
 function makeTomSelect(selector) {
   const el = $(selector);
   if (!el) return null;
-
   const pluginCheckbox = window.__TOMSELECT_PLUGINS__?.checkbox || "checkbox_options";
   const pluginRemove = window.__TOMSELECT_PLUGINS__?.remove_button || "remove_button";
-
   const tomSelect = new TomSelect(selector, {
-    plugins: [pluginCheckbox, pluginRemove],
-    maxItems: null,
-    maxOptions: null,
-    hideSelected: false,
-    closeAfterSelect: false,
-    persist: false,
-    create: false,
-    valueField: "value",
-    labelField: "text",
-    searchField: ["text"],
+    plugins: [pluginCheckbox, pluginRemove], maxItems: null, maxOptions: null, hideSelected: false, closeAfterSelect: false,
+    persist: false, create: false, valueField: "value", labelField: "text", searchField: ["text"],
     render: {
-      option: (data, escape) => `
-        <div class="ts-opt">
-          <span class="ts-opt-check" aria-hidden="true"></span>
-          <span class="ts-opt-text">${escape(data.text)}</span>
-        </div>
-      `,
+      option: (data, escape) => `<div class="ts-opt"><span class="ts-opt-check" aria-hidden="true"></span><span class="ts-opt-text">${escape(data.text)}</span></div>`,
       item: (data, escape) => `<div>${escape(data.text)}</div>`,
     },
-    onChange: () => {
-      currentPage = 1;
-      loadLeadsAndKpisDebounced();
-    },
+    onChange: () => { currentPage = 1; loadLeadsAndKpisDebounced(); },
   });
-
   addSearchSelectButton(tomSelect);
   return tomSelect;
 }
 
 function addSearchSelectButton(ts) {
-  if (!ts?.dropdown || !ts.dropdown_content) return;
-  if (ts.dropdown.querySelector(".ts-dropdown-toolbar")) return;
-
+  if (!ts?.dropdown || !ts.dropdown_content || ts.dropdown.querySelector(".ts-dropdown-toolbar")) return;
   const toolbar = document.createElement("div");
   toolbar.className = "ts-dropdown-toolbar";
-
   const deselectButton = document.createElement("button");
   deselectButton.type = "button";
   deselectButton.className = "ts-dropdown-toolbar-btn ts-dropdown-toolbar-btn-secondary";
   deselectButton.textContent = "Deselecionar selecionados";
-
   const selectButton = document.createElement("button");
   selectButton.type = "button";
   selectButton.className = "ts-dropdown-toolbar-btn";
   selectButton.textContent = "Selecionar resultados da busca";
-
-  deselectButton.addEventListener("mousedown", (ev) => {
-    ev.preventDefault();
-    ev.stopPropagation();
-  });
-
-  selectButton.addEventListener("mousedown", (ev) => {
-    ev.preventDefault();
-    ev.stopPropagation();
-  });
-
+  [deselectButton, selectButton].forEach((button) => button.addEventListener("mousedown", (ev) => { ev.preventDefault(); ev.stopPropagation(); }));
   deselectButton.addEventListener("click", (ev) => {
-    ev.preventDefault();
-    ev.stopPropagation();
+    ev.preventDefault(); ev.stopPropagation();
     if (!ts.items.length) return;
-    ts.clear(true);
-    ts.refreshOptions(false);
-    loadLeadsAndKpisDebounced();
+    ts.clear(true); ts.refreshOptions(false); loadLeadsAndKpisDebounced();
   });
-
   selectButton.addEventListener("click", (ev) => {
-    ev.preventDefault();
-    ev.stopPropagation();
-
-    const resultItems = ts.currentResults?.items || [];
-    const valuesToSelect = resultItems
-      .map((item) => item.id)
-      .filter((value) => !ts.items.includes(value));
-
-    if (valuesToSelect.length === 0) return;
-    ts.addItems(valuesToSelect);
-    ts.refreshOptions(false);
-    loadLeadsAndKpisDebounced();
+    ev.preventDefault(); ev.stopPropagation();
+    const valuesToSelect = (ts.currentResults?.items || []).map((item) => item.id).filter((value) => !ts.items.includes(value));
+    if (!valuesToSelect.length) return;
+    ts.addItems(valuesToSelect); ts.refreshOptions(false); loadLeadsAndKpisDebounced();
   });
-
-  toolbar.appendChild(deselectButton);
-  toolbar.appendChild(selectButton);
-  ts.dropdown.insertBefore(toolbar, ts.dropdown_content);
+  toolbar.appendChild(deselectButton); toolbar.appendChild(selectButton); ts.dropdown.insertBefore(toolbar, ts.dropdown_content);
 }
 
 function initMultiSelects() {
   tsStatus = makeTomSelect("#fStatus");
   tsCurso = makeTomSelect("#fCurso");
+  tsGraduacao = makeTomSelect("#fGraduacao");
+  tsConclusao = makeTomSelect("#fConclusao");
   tsModalidade = makeTomSelect("#fModalidade");
   tsTurno = makeTomSelect("#fTurno");
   tsPolo = makeTomSelect("#fPolo");
   tsOrigem = makeTomSelect("#fOrigem");
-
   tsConsultorDisparo = makeTomSelect("#fConsultorDisparo");
   tsConsultorComercial = makeTomSelect("#fConsultorComercial");
-
   tsCanal = makeTomSelect("#fCanal");
   tsCampanha = makeTomSelect("#fCampanha");
-
   tsTipoDisparo = makeTomSelect("#fTipoDisparo");
   tsTipoNegocio = makeTomSelect("#fTipoNegocio");
 }
 
-/* =========================
-   Options (dims)
-========================= */
 function fillSelect(ts, values) {
   if (!ts) return;
-  ts.clearOptions();
-  ts.clear(true);
-  ts.addOption({ value: EMPTY_FILTER_TOKEN, text: EMPTY_FILTER_LABEL });
-  (values || []).forEach((v) => {
-    const s = String(v);
-    if (!s || s === EMPTY_FILTER_TOKEN) return;
-    ts.addOption({ value: s, text: s });
-  });
+  ts.clearOptions(); ts.clear(true); ts.addOption({ value: EMPTY_FILTER_TOKEN, text: EMPTY_FILTER_LABEL });
+  (values || []).forEach((v) => { const s = String(v); if (!s || s === EMPTY_FILTER_TOKEN) return; ts.addOption({ value: s, text: s }); });
   ts.refreshOptions(false);
 }
 
@@ -406,20 +267,18 @@ async function loadOptions() {
   try {
     const resp = await apiGet("/api/options");
     const data = resp?.data || resp;
-
     fillSelect(tsStatus, data?.status || []);
     fillSelect(tsCurso, data?.cursos || []);
+    fillSelect(tsGraduacao, data?.graduacoes || data?.graduacao || []);
+    fillSelect(tsConclusao, data?.conclusoes || data?.conclusao || []);
     fillSelect(tsModalidade, data?.modalidades || []);
     fillSelect(tsTurno, data?.turnos || []);
     fillSelect(tsPolo, data?.polos || []);
     fillSelect(tsOrigem, data?.origens || []);
-
     fillSelect(tsConsultorDisparo, data?.consultores_disparo || []);
     fillSelect(tsConsultorComercial, data?.consultores_comercial || []);
-
     fillSelect(tsCanal, data?.canais || []);
     fillSelect(tsCampanha, data?.campanhas || []);
-
     fillSelect(tsTipoDisparo, data?.tipos_disparo || []);
     fillSelect(tsTipoNegocio, data?.tipos_negocio || []);
   } catch (e) {
@@ -428,9 +287,6 @@ async function loadOptions() {
   }
 }
 
-/* =========================
-   Leads + KPIs
-========================= */
 function getMulti(ts) {
   if (!ts) return [];
   const v = ts.getValue();
@@ -438,135 +294,55 @@ function getMulti(ts) {
   if (!v) return [];
   return String(v).split(",").map((s) => s.trim()).filter(Boolean);
 }
-
-function normalizeArrayValues(v) {
-  if (!Array.isArray(v)) return [];
-  return v.map((item) => String(item || "").trim()).filter(Boolean);
-}
-
+function normalizeArrayValues(v) { return Array.isArray(v) ? v.map((item) => String(item || "").trim()).filter(Boolean) : []; }
 function setTomValues(ts, values) {
   if (!ts) return;
   const list = normalizeArrayValues(values);
-  list.forEach((v) => {
-    if (!ts.options[v]) {
-      ts.addOption({ value: v, text: v });
-    }
-  });
+  list.forEach((v) => { if (!ts.options[v]) ts.addOption({ value: v, text: v }); });
   ts.setValue(list, true);
 }
-
 function parseBuscaRapida(txt) {
   const t = (txt || "").trim();
   if (!t) return {};
   if (t.includes("@")) return { email: t };
-
   const onlyDigits = t.replace(/\D/g, "");
   if (onlyDigits.length === 11) return { cpf: onlyDigits };
   if (onlyDigits.length >= 10) return { celular: onlyDigits };
-
   return { nome: t };
 }
-
-// normaliza datas (input date) para YYYY-MM-DD (o backend espera DATE)
-function safeDate(v) {
-  const s = String(v || "").trim();
-  if (!s) return "";
-  // já vem yyyy-mm-dd
-  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
-  return s; // fallback
-}
+function safeDate(v) { const s = String(v || "").trim(); return s; }
 
 function buildLeadsParams() {
-  const status = getMulti(tsStatus);
-  const curso = getMulti(tsCurso);
-  const modalidade = getMulti(tsModalidade);
-  const turno = getMulti(tsTurno);
-  const polo = getMulti(tsPolo);
-  const origem = getMulti(tsOrigem);
-
-  const consultor_disparo = getMulti(tsConsultorDisparo);
-  const consultor_comercial = getMulti(tsConsultorComercial);
-
-  const canal = getMulti(tsCanal);
-  const campanha = getMulti(tsCampanha);
-
-  const tipo_disparo = getMulti(tsTipoDisparo);
-  const tipo_negocio = getMulti(tsTipoNegocio);
-
-  const data_ini = safeDate($("#fIni")?.value || "");
-  const data_fim = safeDate($("#fFim")?.value || "");
-  const matriculado = ($("#fMatriculado")?.value || "").trim(); // "" | "true" | "false"
+  const status = getMulti(tsStatus), curso = getMulti(tsCurso), graduacao = getMulti(tsGraduacao), conclusao = getMulti(tsConclusao);
+  const modalidade = getMulti(tsModalidade), turno = getMulti(tsTurno), polo = getMulti(tsPolo), origem = getMulti(tsOrigem);
+  const consultor_disparo = getMulti(tsConsultorDisparo), consultor_comercial = getMulti(tsConsultorComercial);
+  const canal = getMulti(tsCanal), campanha = getMulti(tsCampanha), tipo_disparo = getMulti(tsTipoDisparo), tipo_negocio = getMulti(tsTipoNegocio);
+  const data_ini = safeDate($("#fIni")?.value || ""), data_fim = safeDate($("#fFim")?.value || "");
+  const matriculado = ($("#fMatriculado")?.value || "").trim();
   const data_disparo_mes = ($("#fMesDisparo")?.value || "").trim();
   const data_disparo_situacao = ($("#fDataDisparoSituacao")?.value || "").trim();
   const limit = Number($("#fLimit")?.value || 500) || 500;
   const offset = Math.max(0, (currentPage - 1) * limit);
-
   const busca = parseBuscaRapida($("#fBusca")?.value);
-
-  return {
-    status,
-    curso,
-    modalidade,
-    turno,
-    polo,
-    origem,
-    consultor_disparo,
-    consultor_comercial,
-    canal,
-    campanha,
-    tipo_disparo,
-    tipo_negocio,
-    matriculado,
-    data_ini,
-    data_fim,
-    data_disparo_mes,
-    data_disparo_situacao,
-    limit,
-    offset,
-    order_by: "data_disparo",
-    order_dir: "ASC",
-    ...busca,
-  };
+  return { status, curso, graduacao, conclusao, modalidade, turno, polo, origem, consultor_disparo, consultor_comercial, canal, campanha, tipo_disparo, tipo_negocio, matriculado, data_ini, data_fim, data_disparo_mes, data_disparo_situacao, limit, offset, order_by: "data_disparo", order_dir: "ASC", ...busca };
 }
 
 function getCurrentFilterState() {
   return {
-    status: getMulti(tsStatus),
-    curso: getMulti(tsCurso),
-    modalidade: getMulti(tsModalidade),
-    turno: getMulti(tsTurno),
-    polo: getMulti(tsPolo),
-    origem: getMulti(tsOrigem),
-    consultor_disparo: getMulti(tsConsultorDisparo),
-    consultor_comercial: getMulti(tsConsultorComercial),
-    canal: getMulti(tsCanal),
-    campanha: getMulti(tsCampanha),
-    tipo_disparo: getMulti(tsTipoDisparo),
-    tipo_negocio: getMulti(tsTipoNegocio),
-    data_ini: safeDate($("#fIni")?.value || ""),
-    data_fim: safeDate($("#fFim")?.value || ""),
-    data_disparo_mes: ($("#fMesDisparo")?.value || "").trim(),
-    data_disparo_situacao: ($("#fDataDisparoSituacao")?.value || "").trim(),
-    matriculado: ($("#fMatriculado")?.value || "").trim(),
-    limit: Number($("#fLimit")?.value || 500) || 500,
-    busca_rapida: ($("#fBusca")?.value || "").trim(),
+    status: getMulti(tsStatus), curso: getMulti(tsCurso), graduacao: getMulti(tsGraduacao), conclusao: getMulti(tsConclusao),
+    modalidade: getMulti(tsModalidade), turno: getMulti(tsTurno), polo: getMulti(tsPolo), origem: getMulti(tsOrigem),
+    consultor_disparo: getMulti(tsConsultorDisparo), consultor_comercial: getMulti(tsConsultorComercial), canal: getMulti(tsCanal), campanha: getMulti(tsCampanha),
+    tipo_disparo: getMulti(tsTipoDisparo), tipo_negocio: getMulti(tsTipoNegocio), data_ini: safeDate($("#fIni")?.value || ""), data_fim: safeDate($("#fFim")?.value || ""),
+    data_disparo_mes: ($("#fMesDisparo")?.value || "").trim(), data_disparo_situacao: ($("#fDataDisparoSituacao")?.value || "").trim(), matriculado: ($("#fMatriculado")?.value || "").trim(),
+    limit: Number($("#fLimit")?.value || 500) || 500, busca_rapida: ($("#fBusca")?.value || "").trim(),
   };
 }
 
 function applyFilterState(state = {}) {
-  setTomValues(tsStatus, state.status);
-  setTomValues(tsCurso, state.curso);
-  setTomValues(tsModalidade, state.modalidade);
-  setTomValues(tsTurno, state.turno);
-  setTomValues(tsPolo, state.polo);
-  setTomValues(tsOrigem, state.origem);
-  setTomValues(tsConsultorDisparo, state.consultor_disparo);
-  setTomValues(tsConsultorComercial, state.consultor_comercial);
-  setTomValues(tsCanal, state.canal);
-  setTomValues(tsCampanha, state.campanha);
-  setTomValues(tsTipoDisparo, state.tipo_disparo);
-  setTomValues(tsTipoNegocio, state.tipo_negocio);
-
+  setTomValues(tsStatus, state.status); setTomValues(tsCurso, state.curso); setTomValues(tsGraduacao, state.graduacao); setTomValues(tsConclusao, state.conclusao);
+  setTomValues(tsModalidade, state.modalidade); setTomValues(tsTurno, state.turno); setTomValues(tsPolo, state.polo); setTomValues(tsOrigem, state.origem);
+  setTomValues(tsConsultorDisparo, state.consultor_disparo); setTomValues(tsConsultorComercial, state.consultor_comercial); setTomValues(tsCanal, state.canal); setTomValues(tsCampanha, state.campanha);
+  setTomValues(tsTipoDisparo, state.tipo_disparo); setTomValues(tsTipoNegocio, state.tipo_negocio);
   if ($("#fIni")) $("#fIni").value = state.data_ini || "";
   if ($("#fFim")) $("#fFim").value = state.data_fim || "";
   if ($("#fMesDisparo")) $("#fMesDisparo").value = state.data_disparo_mes || "";
@@ -579,8 +355,7 @@ function applyFilterState(state = {}) {
 
 function getActiveFilterSummary() {
   const parts = [];
-  const mesDisparo = ($("#fMesDisparo")?.value || "").trim();
-  const situacaoDisparo = ($("#fDataDisparoSituacao")?.value || "").trim();
+  const mesDisparo = ($("#fMesDisparo")?.value || "").trim(); const situacaoDisparo = ($("#fDataDisparoSituacao")?.value || "").trim();
   if (mesDisparo) parts.push(`mês disparo ${fmtMonthYear(mesDisparo)}`);
   if (situacaoDisparo === "vazias") parts.push("sem data de disparo");
   if (situacaoDisparo === "preenchidas") parts.push("com data de disparo");
@@ -590,602 +365,176 @@ function getActiveFilterSummary() {
 }
 
 function updateDataDisparoMonthState() {
-  const situacao = ($("#fDataDisparoSituacao")?.value || "").trim();
-  const mes = $("#fMesDisparo");
+  const situacao = ($("#fDataDisparoSituacao")?.value || "").trim(); const mes = $("#fMesDisparo");
   if (!mes) return;
-  if (situacao === "vazias") {
-    // Sem data de disparo prevalece sobre mês: não há data para comparar no SQL.
-    mes.value = "";
-    mes.disabled = true;
-  } else {
-    mes.disabled = false;
-  }
+  if (situacao === "vazias") { mes.value = ""; mes.disabled = true; } else { mes.disabled = false; }
 }
 
 function readSavedFilters() {
   try {
-    const raw = window.localStorage.getItem(SAVED_FILTERS_STORAGE_KEY);
-    if (!raw) return [];
-    const parsed = JSON.parse(raw);
-    if (!Array.isArray(parsed)) return [];
+    const raw = window.localStorage.getItem(SAVED_FILTERS_STORAGE_KEY); if (!raw) return [];
+    const parsed = JSON.parse(raw); if (!Array.isArray(parsed)) return [];
     return parsed.filter((item) => item && typeof item === "object" && item.id && item.name && item.state);
-  } catch {
-    return [];
-  }
+  } catch { return []; }
 }
-
-function writeSavedFilters(items) {
-  window.localStorage.setItem(SAVED_FILTERS_STORAGE_KEY, JSON.stringify(items || []));
-}
-
+function writeSavedFilters(items) { window.localStorage.setItem(SAVED_FILTERS_STORAGE_KEY, JSON.stringify(items || [])); }
 function refreshSavedFiltersSelect(selectedId = "") {
-  const select = $("#savedFilterSelect");
-  if (!select) return;
-  const saved = readSavedFilters();
-
-  select.innerHTML = `<option value="">Filtros salvos...</option>`;
-  saved.forEach((item) => {
-    const option = document.createElement("option");
-    option.value = item.id;
-    option.textContent = item.name;
-    select.appendChild(option);
-  });
-
-  if (selectedId) {
-    select.value = selectedId;
-  }
+  const select = $("#savedFilterSelect"); if (!select) return;
+  const saved = readSavedFilters(); select.innerHTML = `<option value="">Filtros salvos...</option>`;
+  saved.forEach((item) => { const option = document.createElement("option"); option.value = item.id; option.textContent = item.name; select.appendChild(option); });
+  if (selectedId) select.value = selectedId;
 }
-
 function saveCurrentFilterView() {
-  const currentSelectedId = ($("#savedFilterSelect")?.value || "").trim();
-  const currentSelected = readSavedFilters().find((item) => item.id === currentSelectedId);
-  const suggestedName = currentSelected?.name || "";
-  const name = (window.prompt("Nome do filtro salvo:", suggestedName) || "").trim();
-  if (!name) {
-    setStatus("Informe um nome para salvar a visualização.", "err");
-    return;
-  }
-
-  const state = getCurrentFilterState();
-  const saved = readSavedFilters();
-  const normalizedName = name.toLowerCase();
-  const existing = saved.find((item) => String(item.name).toLowerCase() === normalizedName);
-
+  const currentSelectedId = ($("#savedFilterSelect")?.value || "").trim(); const currentSelected = readSavedFilters().find((item) => item.id === currentSelectedId);
+  const name = (window.prompt("Nome do filtro salvo:", currentSelected?.name || "") || "").trim();
+  if (!name) { setStatus("Informe um nome para salvar a visualização.", "err"); return; }
+  const state = getCurrentFilterState(), saved = readSavedFilters(); const existing = saved.find((item) => String(item.name).toLowerCase() === name.toLowerCase());
   if (existing) {
-    const shouldOverwrite = window.confirm(`Já existe uma visualização chamada "${name}". Deseja sobrescrever?`);
-    if (!shouldOverwrite) return;
-    existing.state = state;
-    existing.updated_at = new Date().toISOString();
-    writeSavedFilters(saved);
-    refreshSavedFiltersSelect(existing.id);
-    setStatus(`Visualização "${name}" atualizada com sucesso.`, "ok");
-    return;
+    if (!window.confirm(`Já existe uma visualização chamada "${name}". Deseja sobrescrever?`)) return;
+    existing.state = state; existing.updated_at = new Date().toISOString(); writeSavedFilters(saved); refreshSavedFiltersSelect(existing.id); setStatus(`Visualização "${name}" atualizada com sucesso.`, "ok"); return;
   }
-
-  if (saved.length >= MAX_SAVED_FILTERS) {
-    setStatus(`Limite de ${MAX_SAVED_FILTERS} filtros salvos atingido. Exclua um para salvar outro.`, "err");
-    return;
-  }
-
-  const newItem = {
-    id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-    name,
-    state,
-    created_at: new Date().toISOString(),
-  };
-  saved.unshift(newItem);
-  writeSavedFilters(saved);
-  refreshSavedFiltersSelect(newItem.id);
-  setStatus(`Visualização "${name}" salva com sucesso.`, "ok");
+  if (saved.length >= MAX_SAVED_FILTERS) { setStatus(`Limite de ${MAX_SAVED_FILTERS} filtros salvos atingido. Exclua um para salvar outro.`, "err"); return; }
+  const newItem = { id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`, name, state, created_at: new Date().toISOString() };
+  saved.unshift(newItem); writeSavedFilters(saved); refreshSavedFiltersSelect(newItem.id); setStatus(`Visualização "${name}" salva com sucesso.`, "ok");
 }
-
 function applySavedFilterView() {
-  const select = $("#savedFilterSelect");
-  const id = (select?.value || "").trim();
-  if (!id) {
-    setStatus("Selecione uma visualização salva para carregar.", "err");
-    return;
-  }
-
-  const saved = readSavedFilters();
-  const selected = saved.find((item) => item.id === id);
-  if (!selected) {
-    setStatus("Visualização não encontrada.", "err");
-    refreshSavedFiltersSelect();
-    return;
-  }
-
-  applyFilterState(selected.state || {});
-  loadLeadsAndKpis();
-  setStatus(`Visualização "${selected.name}" carregada.`, "ok");
+  const id = ($("#savedFilterSelect")?.value || "").trim(); if (!id) { setStatus("Selecione uma visualização salva para carregar.", "err"); return; }
+  const selected = readSavedFilters().find((item) => item.id === id); if (!selected) { setStatus("Visualização não encontrada.", "err"); refreshSavedFiltersSelect(); return; }
+  applyFilterState(selected.state || {}); loadLeadsAndKpis(); setStatus(`Visualização "${selected.name}" carregada.`, "ok");
 }
-
 function deleteSavedFilterView() {
-  const select = $("#savedFilterSelect");
-  const id = (select?.value || "").trim();
-  if (!id) {
-    setStatus("Selecione uma visualização salva para excluir.", "err");
-    return;
-  }
-
-  const saved = readSavedFilters();
-  const selected = saved.find((item) => item.id === id);
-  if (!selected) {
-    setStatus("Visualização não encontrada.", "err");
-    refreshSavedFiltersSelect();
-    return;
-  }
-
-  const shouldDelete = window.confirm(`Excluir a visualização "${selected.name}"?`);
-  if (!shouldDelete) return;
-
-  const filtered = saved.filter((item) => item.id !== id);
-  writeSavedFilters(filtered);
-  refreshSavedFiltersSelect();
-  setStatus(`Visualização "${selected.name}" excluída.`, "ok");
+  const id = ($("#savedFilterSelect")?.value || "").trim(); if (!id) { setStatus("Selecione uma visualização salva para excluir.", "err"); return; }
+  const saved = readSavedFilters(), selected = saved.find((item) => item.id === id); if (!selected) { setStatus("Visualização não encontrada.", "err"); refreshSavedFiltersSelect(); return; }
+  if (!window.confirm(`Excluir a visualização "${selected.name}"?`)) return;
+  writeSavedFilters(saved.filter((item) => item.id !== id)); refreshSavedFiltersSelect(); setStatus(`Visualização "${selected.name}" excluída.`, "ok");
 }
 
 async function loadLeadsAndKpis() {
   if (isLoadingLeads) return;
-  isLoadingLeads = true;
-  setStatus("Consultando PostgreSQL...", "ok");
-  renderTable([], { loading: true });
-  setSearchLoading(true);
-
+  isLoadingLeads = true; setStatus("Consultando PostgreSQL...", "ok"); renderTable([], { loading: true }); setSearchLoading(true);
   const params = buildLeadsParams();
-
   try {
-    const [leadsResp, kpisResp] = await Promise.all([
-      apiPostJson("/api/leads/search", params),
-      apiPostJson("/api/kpis/search", params),
-    ]);
-
-    const rows = leadsResp?.data || [];
-    const total = leadsResp?.total ?? rows.length;
-    totalLeads = Number(total) || 0;
-
-    renderTable(rows);
-    renderTotals(total, rows.length);
-    renderKpis(kpisResp);
-
-    setStatus(`${rows.length} registros carregados.${getActiveFilterSummary()}`, "ok");
+    const [leadsResp, kpisResp] = await Promise.all([apiPostJson("/api/leads/search", params), apiPostJson("/api/kpis/search", params)]);
+    const rows = leadsResp?.data || []; const total = leadsResp?.total ?? rows.length; totalLeads = Number(total) || 0;
+    renderTable(rows); renderTotals(total, rows.length); renderKpis(kpisResp); setStatus(`${rows.length} registros carregados.${getActiveFilterSummary()}`, "ok");
   } catch (e) {
-    console.error(e);
-    setStatus("Não foi possível buscar os leads. Verifique os filtros e tente novamente.", "err");
-    renderTable([]);
-    renderTotals(0, 0);
-  } finally {
-    isLoadingLeads = false;
-    setSearchLoading(false);
-  }
+    console.error(e); setStatus("Não foi possível buscar os leads. Verifique os filtros e tente novamente.", "err"); renderTable([]); renderTotals(0, 0);
+  } finally { isLoadingLeads = false; setSearchLoading(false); }
 }
-
-const loadLeadsAndKpisDebounced = (() => {
-  let t;
-  return () => {
-    clearTimeout(t);
-    t = setTimeout(loadLeadsAndKpis, 450);
-  };
-})();
-
+const loadLeadsAndKpisDebounced = (() => { let t; return () => { clearTimeout(t); t = setTimeout(loadLeadsAndKpis, 450); }; })();
 function renderTotals(total, shown) {
   if ($("#kpiCount")) $("#kpiCount").textContent = total ?? 0;
   if ($("#lblTotal")) $("#lblTotal").textContent = `${shown} / ${total ?? shown}`;
-  const limit = Number($("#fLimit")?.value || 500) || 500;
-  const start = total > 0 ? ((currentPage - 1) * limit) + 1 : 0;
-  const end = total > 0 ? start + shown - 1 : 0;
+  const limit = Number($("#fLimit")?.value || 500) || 500; const start = total > 0 ? ((currentPage - 1) * limit) + 1 : 0; const end = total > 0 ? start + shown - 1 : 0;
   if ($("#lblRange")) $("#lblRange").textContent = `Mostrando ${start}-${Math.max(end, 0)} de ${total ?? 0} leads${getActiveFilterSummary()}`;
   if ($("#lblPage")) $("#lblPage").textContent = `Página ${currentPage}`;
   if ($("#btnPrevPage")) $("#btnPrevPage").disabled = currentPage <= 1;
   if ($("#btnNextPage")) $("#btnNextPage").disabled = end >= (total ?? 0);
 }
-
 function renderTable(rows, { loading = false } = {}) {
-  const tbody = $("#tbl tbody");
-  if (!tbody) return;
-
-  if (loading) {
-    tbody.innerHTML = `<tr><td colspan="${TABLE_COLS}" class="table-feedback"><div class="spinner" aria-hidden="true"></div><strong>Carregando dados...</strong><span>Consultando leads consolidados no PostgreSQL.</span></td></tr>`;
-    return;
-  }
-
-  if (!rows || rows.length === 0) {
-    tbody.innerHTML = `<tr><td colspan="${TABLE_COLS}" class="table-feedback"><strong>Nenhum lead encontrado</strong><span>Ajuste os filtros ou limpe a busca rápida para ampliar a consulta.</span></td></tr>`;
-    return;
-  }
-
+  const tbody = $("#tbl tbody"); if (!tbody) return;
+  if (loading) { tbody.innerHTML = `<tr><td colspan="${TABLE_COLS}" class="table-feedback"><div class="spinner" aria-hidden="true"></div><strong>Carregando dados...</strong><span>Consultando leads consolidados no PostgreSQL.</span></td></tr>`; return; }
+  if (!rows || rows.length === 0) { tbody.innerHTML = `<tr><td colspan="${TABLE_COLS}" class="table-feedback"><strong>Nenhum lead encontrado</strong><span>Ajuste os filtros ou limpe a busca rápida para ampliar a consulta.</span></td></tr>`; return; }
   tbody.textContent = "";
   rows.forEach((r) => {
     const tr = document.createElement("tr");
-
-    const addTextCell = (value, extraClass = "") => {
-      const td = document.createElement("td");
-      const span = document.createElement("span");
-      span.className = extraClass;
-      span.textContent = value || "-";
-      span.title = span.textContent;
-      td.appendChild(span);
-      tr.appendChild(td);
-    };
-
-    const addBadgeCell = (value, kind = "status") => {
-      const td = document.createElement("td");
-      const span = document.createElement("span");
-      span.className = `badge ${badgeClass(value, kind)}`;
-      span.textContent = value || "-";
-      span.title = span.textContent;
-      td.appendChild(span);
-      tr.appendChild(td);
-    };
-
-    addTextCell(fmtDate(r.data_inscricao), "cell-muted");
-    addTextCell(r.nome || "-", "lead-name");
-    addTextCell(r.cpf || "-", "cell-muted");
-    addTextCell(r.celular || "-", "cell-muted");
-    addTextCell(r.origem || "-");
-    addTextCell(r.polo || "-");
-    addTextCell(r.curso || "-");
-    addTextCell(r.modalidade || "-");
-    addBadgeCell(r.status || "LEAD");
-    addBadgeCell(fmtBool(r.flag_matriculado), "matriculado");
-    addTextCell(r.consultor_disparo || "-");
-    addTextCell(fmtDataDisparo(r.data_disparo), r.data_disparo ? "cell-muted" : "cell-warning");
-    addTextCell(r.campanha || "-");
-    addTextCell(r.canal || "-");
-
+    const addTextCell = (value, extraClass = "") => { const td = document.createElement("td"); const span = document.createElement("span"); span.className = extraClass; span.textContent = value || "-"; span.title = span.textContent; td.appendChild(span); tr.appendChild(td); };
+    const addBadgeCell = (value, kind = "status") => { const td = document.createElement("td"); const span = document.createElement("span"); span.className = `badge ${badgeClass(value, kind)}`; span.textContent = value || "-"; span.title = span.textContent; td.appendChild(span); tr.appendChild(td); };
+    addTextCell(fmtDate(r.data_inscricao), "cell-muted"); addTextCell(r.nome || "-", "lead-name"); addTextCell(r.cpf || "-", "cell-muted"); addTextCell(r.celular || "-", "cell-muted");
+    addTextCell(r.origem || "-"); addTextCell(r.polo || "-"); addTextCell(r.curso || "-"); addTextCell(r.graduacao || "-"); addTextCell(r.conclusao || "-"); addTextCell(r.modalidade || "-");
+    addBadgeCell(r.status || "LEAD"); addBadgeCell(fmtBool(r.flag_matriculado), "matriculado"); addTextCell(r.consultor_disparo || "-"); addTextCell(fmtDataDisparo(r.data_disparo), r.data_disparo ? "cell-muted" : "cell-warning"); addTextCell(r.campanha || "-"); addTextCell(r.canal || "-");
     tbody.appendChild(tr);
   });
 }
-
-function renderKpis(k) {
-  const total = k?.total ?? 0;
-  const top = k?.top_status;
-  if ($("#kpiCount")) $("#kpiCount").textContent = total;
-  if ($("#kpiTopStatus")) {
-    $("#kpiTopStatus").textContent = top ? `${top.status} (${top.cnt})` : "-";
-  }
-}
-
-
+function renderKpis(k) { const total = k?.total ?? 0; const top = k?.top_status; if ($("#kpiCount")) $("#kpiCount").textContent = total; if ($("#kpiTopStatus")) $("#kpiTopStatus").textContent = top ? `${top.status} (${top.cnt})` : "-"; }
 function notifyGestaoUploadConcluido() {
   const payload = { type: "upload-concluido", at: new Date().toISOString() };
-  try {
-    window.dispatchEvent(new CustomEvent("gestao:upload-concluido", { detail: payload }));
-  } catch (_) {}
-  try {
-    localStorage.setItem("gestaoUploadConcluido", JSON.stringify(payload));
-  } catch (_) {}
-  try {
-    const channel = new BroadcastChannel("gestao-cache");
-    channel.postMessage(payload);
-    channel.close();
-  } catch (_) {}
+  try { window.dispatchEvent(new CustomEvent("gestao:upload-concluido", { detail: payload })); } catch (_) {}
+  try { localStorage.setItem("gestaoUploadConcluido", JSON.stringify(payload)); } catch (_) {}
+  try { const channel = new BroadcastChannel("gestao-cache"); channel.postMessage(payload); channel.close(); } catch (_) {}
 }
 
-/* =========================
-   Upload
-========================= */
-async function uploadDirectToServer(file, source) {
-  const fd = new FormData();
-  fd.append("file", file);
-  if (source) fd.append("source", source);
-  return apiPostForm("/api/upload", fd);
-}
-
+async function uploadDirectToServer(file, source) { const fd = new FormData(); fd.append("file", file); if (source) fd.append("source", source); return apiPostForm("/api/upload", fd); }
 async function pollUploadStatus(jobId) {
   if (!jobId) return;
-
   const maxAttempts = 80;
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
-    const resp = await apiGet("/api/upload/status", { job_id: jobId });
-    const data = resp?.data || {};
-
+    const resp = await apiGet("/api/upload/status", { job_id: jobId }); const data = resp?.data || {};
     if (data.state === "DONE") {
-      if (data.ok === false) {
-        throw new Error(data?.error?.message || JSON.stringify(data.error) || "Procedure falhou.");
-      }
-
-      setUploadStatus("Processamento concluído com sucesso. Atualizando painel...", "ok");
-      notifyGestaoUploadConcluido();
-      await loadOptions();
-      await loadLeadsAndKpis();
-      return;
+      if (data.ok === false) throw new Error(data?.error?.message || JSON.stringify(data.error) || "Procedure falhou.");
+      setUploadStatus("Processamento concluído com sucesso. Atualizando painel...", "ok"); notifyGestaoUploadConcluido(); await loadOptions(); await loadLeadsAndKpis(); return;
     }
-
-    setUploadStatus(`Dados carregados. Executando procedure no PostgreSQL... (${attempt}/${maxAttempts})`, "info");
-    await new Promise((resolve) => setTimeout(resolve, 1500));
+    setUploadStatus(`Dados carregados. Executando procedure no PostgreSQL... (${attempt}/${maxAttempts})`, "info"); await new Promise((resolve) => setTimeout(resolve, 1500));
   }
-
   setUploadStatus("Upload iniciado. O processamento ainda está em andamento; atualize o painel em instantes.", "warning");
 }
-
 async function doUpload() {
-  const fileInput = $("#uploadFile");
-  if (!fileInput || !fileInput.files || fileInput.files.length === 0) {
-    setUploadStatus("Selecione um arquivo .xlsx, .xls ou .csv antes de importar.", "err");
-    return;
-  }
-
-  const file = fileInput.files[0];
-  const source = ($("#uploadSource")?.value || "").trim();
-  const validExtension = /\.(csv|xlsx|xls)$/i.test(file.name || "");
-  if (!validExtension) {
-    setUploadStatus("Formato inválido. Envie uma planilha CSV, XLS ou XLSX.", "err");
-    return;
-  }
-
-  setUploadStatus("Arquivo recebido. Enviando para staging...", "info");
-  setUploadButtonLoading(true);
-
+  const fileInput = $("#uploadFile"); if (!fileInput || !fileInput.files || fileInput.files.length === 0) { setUploadStatus("Selecione um arquivo .xlsx, .xls ou .csv antes de importar.", "err"); return; }
+  const file = fileInput.files[0]; const source = ($("#uploadSource")?.value || "").trim();
+  if (!/\.(csv|xlsx|xls)$/i.test(file.name || "")) { setUploadStatus("Formato inválido. Envie uma planilha CSV, XLS ou XLSX.", "err"); return; }
+  setUploadStatus("Arquivo recebido. Enviando para staging...", "info"); setUploadButtonLoading(true);
   try {
-    const resp = await uploadDirectToServer(file, source);
-    const jobId = resp?.job_id;
-    const reportText = formatImportReport(resp?.report);
-    const jobText = jobId ? ` Job PostgreSQL: ${jobId}.` : "";
-    setUploadStatus(reportText ? `${reportText}${jobText}` : (resp?.message || `Arquivo enviado com sucesso. Processamento iniciado.${jobText}`), "success");
-    await pollUploadStatus(jobId);
-    if (!jobId) notifyGestaoUploadConcluido();
+    const resp = await uploadDirectToServer(file, source); const jobId = resp?.job_id; const reportText = formatImportReport(resp?.report); const jobText = jobId ? ` Job PostgreSQL: ${jobId}.` : "";
+    setUploadStatus(reportText ? `${reportText}${jobText}` : (resp?.message || `Arquivo enviado com sucesso. Processamento iniciado.${jobText}`), "success"); await pollUploadStatus(jobId); if (!jobId) notifyGestaoUploadConcluido();
     if (reportText) setUploadStatus(`Processamento concluído com sucesso. ${jobText} ${reportText}`, "success");
-  } catch (e) {
-    console.error(e);
-    setUploadStatus(e.message || "Não foi possível concluir a importação. Verifique o arquivo ou tente novamente.", "err");
-  } finally {
-    setUploadButtonLoading(false);
-  }
+  } catch (e) { console.error(e); setUploadStatus(e.message || "Não foi possível concluir a importação. Verifique o arquivo ou tente novamente.", "err"); }
+  finally { setUploadButtonLoading(false); }
 }
 
-/* =========================
-   Export XLSX (server-side)
-========================= */
 async function exportXlsxServerSide() {
-  const btn = $("#btnExport");
-  const previousText = btn?.textContent;
-  if (btn) {
-    btn.disabled = true;
-    btn.textContent = "Exportando...";
-  }
-
-  const params = buildLeadsParams();
-  delete params.limit;
-  delete params.offset;
-  const url = new URL("/api/export/xlsx", window.location.origin);
-
-  Object.entries(params).forEach(([k, v]) => {
-    if (v === null || v === undefined) return;
-
-    if (Array.isArray(v)) {
-      if (v.length === 0) return;
-      url.searchParams.set(k, v.join(" || "));
-      return;
-    }
-
-    const s = String(v).trim();
-    if (!s) return;
-    url.searchParams.set(k, s);
-  });
-
+  const btn = $("#btnExport"); const previousText = btn?.textContent; if (btn) { btn.disabled = true; btn.textContent = "Exportando..."; }
+  const params = buildLeadsParams(); delete params.limit; delete params.offset; const url = new URL("/api/export/xlsx", window.location.origin);
+  Object.entries(params).forEach(([k, v]) => { if (v === null || v === undefined) return; if (Array.isArray(v)) { if (v.length === 0) return; url.searchParams.set(k, v.join(" || ")); return; } const s = String(v).trim(); if (s) url.searchParams.set(k, s); });
   try {
-    const resp = await fetch(url.toString(), {
-      method: "GET",
-      cache: "no-store",
-      credentials: "same-origin",
-    });
-
-    if (!resp.ok) {
-      const text = await resp.text();
-      let message = `Erro ao exportar XLSX (${resp.status})`;
-      try {
-        const payload = text ? JSON.parse(text) : {};
-        message = payload?.error || payload?.message || message;
-      } catch {
-        if (text) message = text;
-      }
-      throw new Error(message);
-    }
-
-    const blob = await resp.blob();
-    const blobUrl = window.URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = blobUrl;
-    a.download = "leads_export.xlsx";
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-    window.URL.revokeObjectURL(blobUrl);
-    setStatus("Exportação XLSX concluída.", "ok");
-  } catch (e) {
-    console.error(e);
-    setStatus(e.message || "Falha ao exportar XLSX.", "err");
-  } finally {
-    if (btn) {
-      btn.disabled = false;
-      btn.textContent = previousText || "Exportar XLSX";
-    }
-  }
+    const resp = await fetch(url.toString(), { method: "GET", cache: "no-store", credentials: "same-origin" });
+    if (!resp.ok) { const text = await resp.text(); let message = `Erro ao exportar XLSX (${resp.status})`; try { const payload = text ? JSON.parse(text) : {}; message = payload?.error || payload?.message || message; } catch { if (text) message = text; } throw new Error(message); }
+    const blob = await resp.blob(); const blobUrl = window.URL.createObjectURL(blob); const a = document.createElement("a"); a.href = blobUrl; a.download = "leads_export.xlsx"; document.body.appendChild(a); a.click(); a.remove(); window.URL.revokeObjectURL(blobUrl); setStatus("Exportação XLSX concluída.", "ok");
+  } catch (e) { console.error(e); setStatus(e.message || "Falha ao exportar XLSX.", "err"); }
+  finally { if (btn) { btn.disabled = false; btn.textContent = previousText || "Exportar XLSX"; } }
 }
-
 async function startBatchExport() {
-  const payload = { ...buildLeadsParams(), batch_size: 1000 };
-  delete payload.limit;
-  delete payload.offset;
-
-  try {
-    setExportProgress({ visible: true, text: "Iniciando exportação...", progress: 5 });
-    const resp = await apiPostJson("/api/export/batch", payload);
-    activeExportJobId = resp?.job_id;
-    if (!activeExportJobId) throw new Error("Job não retornado pela API.");
-    pollBatchExportStatus();
-  } catch (e) {
-    setExportProgress({ visible: true, text: `Falha ao iniciar exportação: ${e.message}`, progress: 0 });
-  }
+  const payload = { ...buildLeadsParams(), batch_size: 1000 }; delete payload.limit; delete payload.offset;
+  try { setExportProgress({ visible: true, text: "Iniciando exportação...", progress: 5 }); const resp = await apiPostJson("/api/export/batch", payload); activeExportJobId = resp?.job_id; if (!activeExportJobId) throw new Error("Job não retornado pela API."); pollBatchExportStatus(); }
+  catch (e) { setExportProgress({ visible: true, text: `Falha ao iniciar exportação: ${e.message}`, progress: 0 }); }
 }
-
 async function pollBatchExportStatus() {
   if (!activeExportJobId) return;
-
   const timer = setInterval(async () => {
     try {
-      const resp = await apiGet("/api/export/batch/status", { job_id: activeExportJobId });
-      const data = resp?.data || {};
-      const total = Number(data.total || 0);
-      const processed = Number(data.processed || 0);
-      const pct = total > 0 ? Math.round((processed / total) * 100) : 10;
-      const msg = data.message || "Processando...";
+      const resp = await apiGet("/api/export/batch/status", { job_id: activeExportJobId }); const data = resp?.data || {}; const total = Number(data.total || 0); const processed = Number(data.processed || 0); const pct = total > 0 ? Math.round((processed / total) * 100) : 10; const msg = data.message || "Processando...";
       setExportProgress({ visible: true, text: `${msg} (${processed}/${total})`, progress: pct });
-
-      if (data.status === "done") {
-        clearInterval(timer);
-        setExportProgress({ visible: true, text: "Concluído. Baixando arquivo...", progress: 100 });
-        window.location.href = `/api/export/batch/download?job_id=${encodeURIComponent(activeExportJobId)}`;
-        activeExportJobId = null;
-      } else if (data.status === "error") {
-        clearInterval(timer);
-        setExportProgress({ visible: true, text: data.error || "Falha no processamento.", progress: 0 });
-        activeExportJobId = null;
-      }
-    } catch (e) {
-      clearInterval(timer);
-      setExportProgress({ visible: true, text: `Erro ao consultar progresso: ${e.message}`, progress: 0 });
-      activeExportJobId = null;
-    }
+      if (data.status === "done") { clearInterval(timer); setExportProgress({ visible: true, text: "Concluído. Baixando arquivo...", progress: 100 }); window.location.href = `/api/export/batch/download?job_id=${encodeURIComponent(activeExportJobId)}`; activeExportJobId = null; }
+      else if (data.status === "error") { clearInterval(timer); setExportProgress({ visible: true, text: data.error || "Falha no processamento.", progress: 0 }); activeExportJobId = null; }
+    } catch (e) { clearInterval(timer); setExportProgress({ visible: true, text: `Erro ao consultar progresso: ${e.message}`, progress: 0 }); activeExportJobId = null; }
   }, 1500);
 }
 
-/* =========================
-   Limpar
-========================= */
 function clearFilters() {
-  tsStatus?.clear(true);
-  tsCurso?.clear(true);
-  tsModalidade?.clear(true);
-  tsTurno?.clear(true);
-  tsPolo?.clear(true);
-  tsOrigem?.clear(true);
-
-  tsConsultorDisparo?.clear(true);
-  tsConsultorComercial?.clear(true);
-
-  tsCanal?.clear(true);
-  tsCampanha?.clear(true);
-
-  tsTipoDisparo?.clear(true);
-  tsTipoNegocio?.clear(true);
-
-  if ($("#fIni")) $("#fIni").value = "";
-  if ($("#fFim")) $("#fFim").value = "";
-  if ($("#fMesDisparo")) $("#fMesDisparo").value = "";
-  if ($("#fDataDisparoSituacao")) $("#fDataDisparoSituacao").value = "";
-  updateDataDisparoMonthState();
-  if ($("#fMatriculado")) $("#fMatriculado").value = "";
-  if ($("#fLimit")) $("#fLimit").value = "500";
-  if ($("#fBusca")) $("#fBusca").value = "";
-
-  currentPage = 1;
-  loadLeadsAndKpis();
+  tsStatus?.clear(true); tsCurso?.clear(true); tsGraduacao?.clear(true); tsConclusao?.clear(true); tsModalidade?.clear(true); tsTurno?.clear(true); tsPolo?.clear(true); tsOrigem?.clear(true);
+  tsConsultorDisparo?.clear(true); tsConsultorComercial?.clear(true); tsCanal?.clear(true); tsCampanha?.clear(true); tsTipoDisparo?.clear(true); tsTipoNegocio?.clear(true);
+  if ($("#fIni")) $("#fIni").value = ""; if ($("#fFim")) $("#fFim").value = ""; if ($("#fMesDisparo")) $("#fMesDisparo").value = ""; if ($("#fDataDisparoSituacao")) $("#fDataDisparoSituacao").value = "";
+  updateDataDisparoMonthState(); if ($("#fMatriculado")) $("#fMatriculado").value = ""; if ($("#fLimit")) $("#fLimit").value = "500"; if ($("#fBusca")) $("#fBusca").value = "";
+  currentPage = 1; loadLeadsAndKpis();
 }
-
 
 function initUploadInteractions() {
-  const input = $("#uploadFile");
-  const dropzone = $("#uploadDropzone");
-  input?.addEventListener("change", updateSelectedFileName);
-  if (!dropzone || !input) return;
-
-  ["dragenter", "dragover"].forEach((eventName) => {
-    dropzone.addEventListener(eventName, (event) => {
-      event.preventDefault();
-      dropzone.classList.add("is-dragover");
-    });
-  });
-
-  ["dragleave", "drop"].forEach((eventName) => {
-    dropzone.addEventListener(eventName, (event) => {
-      event.preventDefault();
-      dropzone.classList.remove("is-dragover");
-    });
-  });
-
-  dropzone.addEventListener("drop", (event) => {
-    const files = event.dataTransfer?.files;
-    if (!files || files.length === 0) return;
-    input.files = files;
-    updateSelectedFileName();
-  });
+  const input = $("#uploadFile"), dropzone = $("#uploadDropzone"); input?.addEventListener("change", updateSelectedFileName); if (!dropzone || !input) return;
+  ["dragenter", "dragover"].forEach((eventName) => dropzone.addEventListener(eventName, (event) => { event.preventDefault(); dropzone.classList.add("is-dragover"); }));
+  ["dragleave", "drop"].forEach((eventName) => dropzone.addEventListener(eventName, (event) => { event.preventDefault(); dropzone.classList.remove("is-dragover"); }));
+  dropzone.addEventListener("drop", (event) => { const files = event.dataTransfer?.files; if (!files || files.length === 0) return; input.files = files; updateSelectedFileName(); });
 }
 
-/* =========================
-   Eventos
-========================= */
 document.addEventListener("DOMContentLoaded", async () => {
-  initMultiSelects();
-  initUploadInteractions();
-
-  refreshSavedFiltersSelect();
-  updateDataDisparoMonthState();
-
-  $("#btnApply")?.addEventListener("click", () => {
-    currentPage = 1;
-    loadLeadsAndKpis();
-  });
-  $("#btnSaveFilterView")?.addEventListener("click", saveCurrentFilterView);
-  $("#btnDeleteFilterView")?.addEventListener("click", deleteSavedFilterView);
-  $("#savedFilterSelect")?.addEventListener("change", () => {
-    const select = $("#savedFilterSelect");
-    const selectedId = (select?.value || "").trim();
-    if (!selectedId) return;
-    applySavedFilterView();
-  });
-  $("#btnReload")?.addEventListener("click", async () => {
-    await loadOptions();
-    await loadLeadsAndKpis();
-  });
-  $("#btnClear")?.addEventListener("click", clearFilters);
-
-  $("#btnUpload")?.addEventListener("click", doUpload);
-  $("#btnExport")?.addEventListener("click", exportXlsxServerSide);
-  $("#btnBatchExport")?.addEventListener("click", startBatchExport);
-  $("#btnPrevPage")?.addEventListener("click", () => {
-    if (currentPage <= 1) return;
-    currentPage -= 1;
-    loadLeadsAndKpis();
-  });
-  $("#btnNextPage")?.addEventListener("click", () => {
-    const limit = Number($("#fLimit")?.value || 500) || 500;
-    if ((currentPage * limit) >= totalLeads) return;
-    currentPage += 1;
-    loadLeadsAndKpis();
-  });
-
-  $("#fIni")?.addEventListener("change", () => {
-    currentPage = 1;
-    loadLeadsAndKpisDebounced();
-  });
-  $("#fFim")?.addEventListener("change", () => {
-    currentPage = 1;
-    loadLeadsAndKpisDebounced();
-  });
-  $("#fMesDisparo")?.addEventListener("change", () => {
-    currentPage = 1;
-    loadLeadsAndKpisDebounced();
-  });
-  $("#fDataDisparoSituacao")?.addEventListener("change", () => {
-    updateDataDisparoMonthState();
-    currentPage = 1;
-    loadLeadsAndKpisDebounced();
-  });
-  $("#fMatriculado")?.addEventListener("change", () => {
-    currentPage = 1;
-    loadLeadsAndKpisDebounced();
-  });
-  $("#fLimit")?.addEventListener("change", () => {
-    currentPage = 1;
-    loadLeadsAndKpisDebounced();
-  });
-  $("#fBusca")?.addEventListener("input", () => {
-    currentPage = 1;
-    loadLeadsAndKpisDebounced();
-  });
-
-  await loadOptions();
-  await loadLeadsAndKpis();
+  initMultiSelects(); initUploadInteractions(); refreshSavedFiltersSelect(); updateDataDisparoMonthState();
+  $("#btnApply")?.addEventListener("click", () => { currentPage = 1; loadLeadsAndKpis(); });
+  $("#btnSaveFilterView")?.addEventListener("click", saveCurrentFilterView); $("#btnDeleteFilterView")?.addEventListener("click", deleteSavedFilterView);
+  $("#savedFilterSelect")?.addEventListener("change", () => { const selectedId = ($("#savedFilterSelect")?.value || "").trim(); if (selectedId) applySavedFilterView(); });
+  $("#btnReload")?.addEventListener("click", async () => { await loadOptions(); await loadLeadsAndKpis(); }); $("#btnClear")?.addEventListener("click", clearFilters);
+  $("#btnUpload")?.addEventListener("click", doUpload); $("#btnExport")?.addEventListener("click", exportXlsxServerSide); $("#btnBatchExport")?.addEventListener("click", startBatchExport);
+  $("#btnPrevPage")?.addEventListener("click", () => { if (currentPage <= 1) return; currentPage -= 1; loadLeadsAndKpis(); });
+  $("#btnNextPage")?.addEventListener("click", () => { const limit = Number($("#fLimit")?.value || 500) || 500; if ((currentPage * limit) >= totalLeads) return; currentPage += 1; loadLeadsAndKpis(); });
+  ["#fIni", "#fFim", "#fMesDisparo", "#fMatriculado", "#fLimit"].forEach((selector) => $(selector)?.addEventListener("change", () => { currentPage = 1; loadLeadsAndKpisDebounced(); }));
+  $("#fDataDisparoSituacao")?.addEventListener("change", () => { updateDataDisparoMonthState(); currentPage = 1; loadLeadsAndKpisDebounced(); });
+  $("#fBusca")?.addEventListener("input", () => { currentPage = 1; loadLeadsAndKpisDebounced(); });
+  await loadOptions(); await loadLeadsAndKpis();
 });
