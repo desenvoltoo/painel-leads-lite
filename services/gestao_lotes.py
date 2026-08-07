@@ -54,7 +54,7 @@ def _association_relation() -> str:
 def _filters(payload: dict) -> dict:
     nested = payload.get("filtros") if isinstance(payload.get("filtros"), dict) else {}
     keys = {
-        "curso", "polo", "unidade", "origem", "modalidade", "turno", "campanha",
+        "curso", "graduacao", "conclusao", "polo", "unidade", "origem", "modalidade", "turno", "campanha",
         "canal", "tipo_disparo", "tipo_negocio", "consultor_disparo", "consultor", "status",
     }
     return {**nested, **{k: v for k, v in payload.items() if k in keys}}
