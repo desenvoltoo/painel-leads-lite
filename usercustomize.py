@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 
 PERSONAL_FIELDS = {"nome", "cpf", "celular", "email"}
 ACADEMIC_FIELDS = {
-    "curso", "modalidade", "turno", "polo", "origem", "tipo_negocio",
+    "curso", "graduacao", "conclusao", "modalidade", "turno", "polo", "origem", "tipo_negocio",
     "data_inscricao", "data_matricula",
 }
 OPERATIONAL_FIELDS = {
@@ -29,6 +29,8 @@ ALIASES = {
     "unidade": "polo", "campus": "polo", "telefone": "celular",
     "telefone_celular": "celular", "whatsapp": "celular", "phone": "celular",
     "fone": "celular", "documento": "cpf", "cpf_aluno": "cpf",
+    "formacao": "graduacao", "curso_graduacao": "graduacao", "graduacao_cursada": "graduacao",
+    "ano_conclusao": "conclusao", "data_conclusao": "conclusao", "conclusao_graduacao": "conclusao",
     "consultor": "consultor_comercial", "consultor_venda": "consultor_comercial",
     "consultor_do_disparo": "consultor_disparo", "acao": "acao_comercial",
     "obs": "observacao", "flag_matriculado": "matriculado",
