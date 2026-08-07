@@ -17,7 +17,7 @@ from . import database as db
 
 EXPORT_HEADERS = [
     "status_inscricao", "data_inscricao", "origem", "unidade", "tipo_negocio",
-    "curso", "modalidade", "turno", "nome", "cpf", "celular", "email",
+    "curso", "graduacao", "conclusao", "modalidade", "turno", "nome", "cpf", "celular", "email",
     "data_ultima_acao", "qtd_acionamentos", "status", "data_disparo",
     "peca_disparo", "texto_disparo", "consultor_disparo", "tipo_disparo",
     "campanha", "observacao", "data_matricula", "matriculado", "canal",
@@ -287,7 +287,7 @@ def _make_workbook(rows: list[Dict[str, Any]], start: date, month_label: str) ->
     leads_ws.freeze_panes = "A2"
     leads_ws.auto_filter.ref = leads_ws.dimensions
     for idx, header in enumerate(EXPORT_HEADERS, 1):
-        width = 30 if header in {"nome", "curso", "campanha", "texto_disparo", "observacao"} else min(45, max(12, len(header) + 2))
+        width = 30 if header in {"nome", "curso", "graduacao", "conclusao", "campanha", "texto_disparo", "observacao"} else min(45, max(12, len(header) + 2))
         leads_ws.column_dimensions[get_column_letter(idx)].width = width
 
     stream = BytesIO()
