@@ -59,6 +59,41 @@ _database.UPLOAD_ALIASES.setdefault(
     ],
 )
 
+# Novos campos acadêmicos recebidos nas planilhas a partir de agosto/2026.
+_database.UPLOAD_ALIASES.setdefault(
+    "graduacao",
+    [
+        "graduacao",
+        "graduação",
+        "formacao",
+        "formação",
+        "curso_graduacao",
+        "curso_graduação",
+    ],
+)
+_database.UPLOAD_ALIASES.setdefault(
+    "conclusao",
+    [
+        "conclusao",
+        "conclusão",
+        "ano_conclusao",
+        "ano_conclusão",
+        "data_conclusao",
+        "data_conclusão",
+    ],
+)
+
+# Faz a API de leads expor os novos campos sem quebrar consumidores antigos.
+for _column in ("graduacao", "conclusao"):
+    if _column not in _database.LEADS_COLUMNS:
+        try:
+            _database.LEADS_COLUMNS.insert(
+                _database.LEADS_COLUMNS.index("email") + 1,
+                _column,
+            )
+        except ValueError:
+            _database.LEADS_COLUMNS.append(_column)
+
 _original_prepare_upload_dataframe = _database._prepare_upload_dataframe
 
 
@@ -88,12 +123,29 @@ if not any(output == "telefone2" for _, output in _database.EXPORT_COLUMNS):
         len(_database.EXPORT_COLUMNS),
     )
     _database.EXPORT_COLUMNS.insert(position, ("telefone2", "telefone2"))
+
+# Inclui graduação e conclusão nas exportações, preservando a ordem histórica.
+for _source, _output in reversed((
+    ("graduacao", "graduacao"),
+    ("conclusao", "conclusao"),
+)):
+    if not any(output == _output for _, output in _database.EXPORT_COLUMNS):
+        position = next(
+            (
+                index + 1
+                for index, (_, output) in enumerate(_database.EXPORT_COLUMNS)
+                if output == "email"
+            ),
+            len(_database.EXPORT_COLUMNS),
+        )
+        _database.EXPORT_COLUMNS.insert(position, (_source, _output))
+
 _database.EXPORT_ORDER = [output for _, output in _database.EXPORT_COLUMNS]
 
 
 # O app possui uma lista histórica própria usada no CSV em lote. Como o módulo
 # services é carregado enquanto app.py ainda está sendo importado, aguardamos a
-# conclusão da importação e acrescentamos telefone2 sem alterar as rotas.
+# conclusão da importação e acrescentamos os campos novos sem alterar as rotas.
 def _patch_app_export_order() -> None:
     for _ in range(200):
         patched = False
@@ -106,6 +158,12 @@ def _patch_app_export_order() -> None:
                         order.insert(order.index("celular") + 1, "telefone2")
                     except ValueError:
                         order.append("telefone2")
+                for field in reversed(("graduacao", "conclusao")):
+                    if field not in order:
+                        try:
+                            order.insert(order.index("email") + 1, field)
+                        except ValueError:
+                            order.append(field)
                 patched = True
         if patched:
             return
@@ -114,7 +172,7 @@ def _patch_app_export_order() -> None:
 
 threading.Thread(
     target=_patch_app_export_order,
-    name="patch-app-export-telefone2",
+    name="patch-app-export-campos-academicos",
     daemon=True,
 ).start()
 
