@@ -6,7 +6,7 @@
   const originalSheetToJson = window.XLSX.utils.sheet_to_json.bind(window.XLSX.utils);
   const known = new Set([
     'status_inscricao','data_inscricao','origem','unidade','polo','tipo_negocio',
-    'curso','modalidade','turno','nome','cpf','celular','email','data_ultima_acao',
+    'curso','graduacao','conclusao','modalidade','turno','nome','cpf','celular','email','data_ultima_acao',
     'qtd_acionamentos','status','data_disparo','peca_disparo','texto_disparo',
     'consultor_disparo','tipo_disparo','campanha','observacao','data_matricula',
     'matriculado','canal','acao_comercial','consultor_comercial'
@@ -16,7 +16,9 @@
     telefone: 'celular', telefone_celular: 'celular', whatsapp: 'celular',
     phone: 'celular', fone: 'celular', documento: 'cpf', cpf_aluno: 'cpf',
     campus: 'polo', consultor: 'consultor_comercial', consultor_venda: 'consultor_comercial',
-    consultor_do_disparo: 'consultor_disparo', acao: 'acao_comercial', obs: 'observacao'
+    consultor_do_disparo: 'consultor_disparo', acao: 'acao_comercial', obs: 'observacao',
+    formacao: 'graduacao', curso_graduacao: 'graduacao', graduacao_cursada: 'graduacao',
+    ano_conclusao: 'conclusao', data_conclusao: 'conclusao', conclusao_graduacao: 'conclusao'
   };
 
   function normalize(value) {
