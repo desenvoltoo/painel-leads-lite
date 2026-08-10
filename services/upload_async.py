@@ -31,6 +31,7 @@ STAGING_COLUMNS = {
     "unifecaf": {
         "data_inscricao", "origem", "unidade", "tipo_negocio", "curso",
         "modalidade", "nome", "cpf", "celular", "email",
+        "graduacao", "conclusao",
         "data_ultima_interacao", "qtd_acionamentos", "status", "data_disparo",
         "peca_disparo", "texto_disparo", "consultor_disparo", "tipo_disparo",
         "campanha", "data_matricula", "matriculado", "consultor_comercial",
