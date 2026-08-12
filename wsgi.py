@@ -61,12 +61,14 @@ try:
     from services.upload_queue_compat import apply_upload_queue_compat
     from services.upload_matriculado_patch import apply_matriculado_full_update_patch
     from services.upload_null_guard import apply_upload_null_guard
+    from services.upload_copy_guard import apply_upload_copy_guard
     from services.import_hardening import apply_import_hardening
 
     apply_upload_alias_compat()
     apply_upload_queue_compat()
     apply_matriculado_full_update_patch()
     apply_upload_null_guard()
+    upload_copy_guard_result = apply_upload_copy_guard()
 
     from app import create_app
     from upload_preview_routes import register_upload_preview_routes
@@ -108,6 +110,7 @@ try:
     application.logger.info("Regra de matrícula com data de disparo ativada: %s", matricula_disparo_result)
     application.logger.info("Atualização completa antes da limpeza da staging ativada: %s", existing_full_update_result)
     application.logger.info("Métricas reais das SPs ativadas: %s", result_metrics_result)
+    application.logger.info("Blindagem do COPY ativada: %s", upload_copy_guard_result)
     register_institution_routes(application)
     register_upload_preview_routes(application)
     register_upload_new_only_routes(application)
