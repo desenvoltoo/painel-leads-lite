@@ -16,6 +16,10 @@ def _details_enabled() -> bool:
     return os.getenv("STARTUP_ERROR_DETAILS", "true").strip().lower() not in {"0", "false", "no", "nao", "não", "off"}
 
 
+def _env_enabled(name: str, default: str = "false") -> bool:
+    return str(os.getenv(name, default) or default).strip().lower() in {"1", "true", "yes", "sim", "on"}
+
+
 def _startup_error_wsgi_app(payload: Dict[str, Any]) -> Callable:
     expose_details = _details_enabled()
     public_payload: Dict[str, Any] = {
@@ -126,23 +130,28 @@ try:
     except Exception:
         application.logger.exception("Não foi possível iniciar a recuperação automática Anhanguera")
 
-    try:
-        performance_result = apply_query_performance_guard()
-        application.logger.info("Índices de performance aplicados: %s", performance_result)
-    except Exception:
-        application.logger.exception("Não foi possível aplicar os índices de performance")
+    if _env_enabled("RUN_STARTUP_DDL", "false"):
+        try:
+            performance_result = apply_query_performance_guard()
+            application.logger.info("Índices de performance aplicados: %s", performance_result)
+        except Exception:
+            application.logger.exception("Não foi possível aplicar os índices de performance")
 
-    try:
-        hardening_result = apply_import_hardening()
-        application.logger.info("Endurecimento de importação aplicado: %s", hardening_result)
-    except Exception:
-        application.logger.exception("Não foi possível aplicar o endurecimento de importação")
+        try:
+            hardening_result = apply_import_hardening()
+            application.logger.info("Endurecimento de importação aplicado: %s", hardening_result)
+        except Exception:
+            application.logger.exception("Não foi possível aplicar o endurecimento de importação")
 
-    try:
-        protected_targets = apply_date_monotonic_guards()
-        application.logger.info("Proteção de datas ativada: %s", protected_targets)
-    except Exception:
-        application.logger.exception("Não foi possível instalar automaticamente a proteção de datas")
+        try:
+            protected_targets = apply_date_monotonic_guards()
+            application.logger.info("Proteção de datas ativada: %s", protected_targets)
+        except Exception:
+            application.logger.exception("Não foi possível instalar automaticamente a proteção de datas")
+    else:
+        application.logger.info(
+            "DDL privilegiado de startup desabilitado; migrações devem ser executadas por usuário administrador (RUN_STARTUP_DDL=false)."
+        )
 except Exception as exc:
     log_startup_failure(exc)
     diagnostic_payload = build_error_payload(exc, public_message="Falha ao inicializar aplicação.", phase="application_startup", include_trace=True)
