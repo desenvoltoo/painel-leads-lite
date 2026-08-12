@@ -8,12 +8,15 @@ import threading
 import time
 from typing import Any
 
+from sqlalchemy import text
+
 from . import database as db
 from .upload_async import start_upload_worker
 
 logger = logging.getLogger(__name__)
 _started = False
 _lock = threading.Lock()
+_RECOVERY_LOCK_KEY = "painel-leads:unifecaf-auto-recovery"
 
 
 def _pending_uploads() -> list[dict[str, Any]]:
@@ -75,7 +78,6 @@ def _ensure_progress_row(upload_id: str, total_rows: int, routine_name: str) -> 
         "unifecaf_recovery_progress",
     )
 
-    # Reabre o log quando ainda há linhas não processadas na staging.
     db._run_gestao_query(
         f"""
         UPDATE {schema}.logs_importacoes
@@ -94,11 +96,21 @@ def _ensure_progress_row(upload_id: str, total_rows: int, routine_name: str) -> 
     )
 
 
-def _run_recovery() -> None:
-    delay = max(2, int(os.getenv("UNIFECAF_RECOVERY_START_DELAY_SECONDS", "5") or 5))
-    interval = max(10, int(os.getenv("UNIFECAF_RECOVERY_INTERVAL_SECONDS", "30") or 30))
-    time.sleep(delay)
-    while True:
+def _run_recovery_cycle() -> None:
+    """Executa um ciclo somente se este worker ganhar o lock global no PostgreSQL."""
+    engine = db.get_engine()
+    with engine.connect() as leader_conn:
+        acquired = bool(
+            leader_conn.execute(
+                text("SELECT pg_try_advisory_lock(hashtext(:lock_key))"),
+                {"lock_key": _RECOVERY_LOCK_KEY},
+            ).scalar()
+        )
+        leader_conn.commit()
+        if not acquired:
+            logger.debug("unifecaf_recovery_skip reason=leader_lock_busy")
+            return
+
         try:
             pending = _pending_uploads()
             if pending:
@@ -116,6 +128,24 @@ def _run_recovery() -> None:
                 _ensure_progress_row(upload_id, total_rows, routine_name)
                 worker = start_upload_worker("unifecaf", upload_id, routine_name, total_rows)
                 worker.join()
+        finally:
+            try:
+                leader_conn.execute(
+                    text("SELECT pg_advisory_unlock(hashtext(:lock_key))"),
+                    {"lock_key": _RECOVERY_LOCK_KEY},
+                )
+                leader_conn.commit()
+            except Exception:
+                logger.warning("unifecaf_recovery_unlock_error", exc_info=True)
+
+
+def _run_recovery() -> None:
+    delay = max(2, int(os.getenv("UNIFECAF_RECOVERY_START_DELAY_SECONDS", "5") or 5))
+    interval = max(10, int(os.getenv("UNIFECAF_RECOVERY_INTERVAL_SECONDS", "30") or 30))
+    time.sleep(delay)
+    while True:
+        try:
+            _run_recovery_cycle()
         except Exception:
             logger.exception("unifecaf_recovery_error")
         time.sleep(interval)
@@ -136,4 +166,5 @@ def start_unifecaf_import_recovery() -> dict[str, Any]:
         "status": "iniciado",
         "delay_seconds": int(os.getenv("UNIFECAF_RECOVERY_START_DELAY_SECONDS", "5") or 5),
         "interval_seconds": int(os.getenv("UNIFECAF_RECOVERY_INTERVAL_SECONDS", "30") or 30),
+        "coordination": "postgres_advisory_lock",
     }

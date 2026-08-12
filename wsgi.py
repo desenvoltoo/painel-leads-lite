@@ -16,6 +16,10 @@ def _details_enabled() -> bool:
     return os.getenv("STARTUP_ERROR_DETAILS", "true").strip().lower() not in {"0", "false", "no", "nao", "não", "off"}
 
 
+def _env_enabled(name: str, default: str = "false") -> bool:
+    return str(os.getenv(name, default) or default).strip().lower() in {"1", "true", "yes", "sim", "on"}
+
+
 def _startup_error_wsgi_app(payload: Dict[str, Any]) -> Callable:
     expose_details = _details_enabled()
     public_payload: Dict[str, Any] = {
@@ -57,12 +61,14 @@ try:
     from services.upload_queue_compat import apply_upload_queue_compat
     from services.upload_matriculado_patch import apply_matriculado_full_update_patch
     from services.upload_null_guard import apply_upload_null_guard
+    from services.upload_copy_guard import apply_upload_copy_guard
     from services.import_hardening import apply_import_hardening
 
     apply_upload_alias_compat()
     apply_upload_queue_compat()
     apply_matriculado_full_update_patch()
     apply_upload_null_guard()
+    upload_copy_guard_result = apply_upload_copy_guard()
 
     from app import create_app
     from upload_preview_routes import register_upload_preview_routes
@@ -104,6 +110,7 @@ try:
     application.logger.info("Regra de matrícula com data de disparo ativada: %s", matricula_disparo_result)
     application.logger.info("Atualização completa antes da limpeza da staging ativada: %s", existing_full_update_result)
     application.logger.info("Métricas reais das SPs ativadas: %s", result_metrics_result)
+    application.logger.info("Blindagem do COPY ativada: %s", upload_copy_guard_result)
     register_institution_routes(application)
     register_upload_preview_routes(application)
     register_upload_new_only_routes(application)
@@ -126,23 +133,28 @@ try:
     except Exception:
         application.logger.exception("Não foi possível iniciar a recuperação automática Anhanguera")
 
-    try:
-        performance_result = apply_query_performance_guard()
-        application.logger.info("Índices de performance aplicados: %s", performance_result)
-    except Exception:
-        application.logger.exception("Não foi possível aplicar os índices de performance")
+    if _env_enabled("RUN_STARTUP_DDL", "false"):
+        try:
+            performance_result = apply_query_performance_guard()
+            application.logger.info("Índices de performance aplicados: %s", performance_result)
+        except Exception:
+            application.logger.exception("Não foi possível aplicar os índices de performance")
 
-    try:
-        hardening_result = apply_import_hardening()
-        application.logger.info("Endurecimento de importação aplicado: %s", hardening_result)
-    except Exception:
-        application.logger.exception("Não foi possível aplicar o endurecimento de importação")
+        try:
+            hardening_result = apply_import_hardening()
+            application.logger.info("Endurecimento de importação aplicado: %s", hardening_result)
+        except Exception:
+            application.logger.exception("Não foi possível aplicar o endurecimento de importação")
 
-    try:
-        protected_targets = apply_date_monotonic_guards()
-        application.logger.info("Proteção de datas ativada: %s", protected_targets)
-    except Exception:
-        application.logger.exception("Não foi possível instalar automaticamente a proteção de datas")
+        try:
+            protected_targets = apply_date_monotonic_guards()
+            application.logger.info("Proteção de datas ativada: %s", protected_targets)
+        except Exception:
+            application.logger.exception("Não foi possível instalar automaticamente a proteção de datas")
+    else:
+        application.logger.info(
+            "DDL privilegiado de startup desabilitado; migrações devem ser executadas por usuário administrador (RUN_STARTUP_DDL=false)."
+        )
 except Exception as exc:
     log_startup_failure(exc)
     diagnostic_payload = build_error_payload(exc, public_message="Falha ao inicializar aplicação.", phase="application_startup", include_trace=True)
