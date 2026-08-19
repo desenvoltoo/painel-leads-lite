@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 
 STAGING_COLUMNS = {
     "anhanguera": {
-        "status_inscricao", "data_inscricao", "origem", "unidade", "tipo_negocio",
+        "status_inscricao", "data_inscricao", "origem", "unidade", "polo", "tipo_negocio",
         "curso", "modalidade", "turno", "nome", "cpf", "celular", "email",
         "graduacao", "conclusao",
         "data_ultima_acao", "qtd_acionamentos", "status", "data_disparo",
