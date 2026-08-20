@@ -35,7 +35,7 @@ def register_upload_update_existing_routes(app) -> None:
                     return jsonify({"ok": False, "error": {"code": "UNIFECAF_IMPORT_DISABLED", "message": "A importação da UniFECAF está desabilitada."}}), 409
                 routine_name = str(os.getenv("UNIFECAF_IMPORT_ROUTINE") or "sp_processar_stg_leads").strip()
             else:
-                routine_name = str(os.getenv("LEADS_IMPORT_ROUTINE") or "sp_processar_stg_leads_site").strip()
+                routine_name = str(os.getenv("LEADS_IMPORT_ROUTINE") or "sp_importar_leads_diario").strip()
 
             result = enqueue_update_existing_dataframe(
                 df,
