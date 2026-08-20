@@ -77,7 +77,13 @@
       tipo_negocio: $('#filterBusiness')?.value,
       tipo_disparo: $('#filterDispatchType')?.value,
       canal: $('#filterChannel')?.value,
+      modalidade: $('#filterModality')?.value,
+      turno: $('#filterShift')?.value,
+      origem: $('#filterOrigin')?.value,
+      status: $('#filterStatus')?.value,
       unidade: $('#filterUnit')?.value,
+      consultor_disparo: $('#filterDispatchConsultant')?.value,
+      consultor_comercial: $('#filterCommercialConsultant')?.value,
       campanha: $('#filterCampaign')?.value,
       curso: $('#filterCourse')?.value,
     };
@@ -93,7 +99,10 @@
     const labels = [
       ['Período inicial', $('#filterDateStart')?.value], ['Período final', $('#filterDateEnd')?.value],
       ['Negócio', $('#filterBusiness')?.value], ['Disparo', $('#filterDispatchType')?.value],
-      ['Canal', $('#filterChannel')?.value], ['Unidade', $('#filterUnit')?.value],
+      ['Canal', $('#filterChannel')?.value], ['Modalidade', $('#filterModality')?.value],
+      ['Turno', $('#filterShift')?.value], ['Origem', $('#filterOrigin')?.value],
+      ['Status', $('#filterStatus')?.value], ['Unidade', $('#filterUnit')?.value],
+      ['Consultor disparo', $('#filterDispatchConsultant')?.value], ['Consultor comercial', $('#filterCommercialConsultant')?.value],
       ['Campanha', $('#filterCampaign')?.value], ['Curso', $('#filterCourse')?.value],
     ].filter(([, value]) => String(value || '').trim());
     $('#activeFilterSummary').textContent = labels.length ? labels.map(([label, value]) => `${label}: ${value}`).join(' · ') : 'Exibindo toda a operação.';
@@ -217,7 +226,12 @@
         populateSelect('#filterBusiness', data.options.tipos_negocio || []);
         populateSelect('#filterDispatchType', data.options.tipos_disparo || []);
         populateSelect('#filterChannel', data.options.canais || []);
-        populateSelect('#filterUnit', data.options.unidades || []);
+        populateSelect('#filterModality', data.options.modalidades || []);
+        populateSelect('#filterShift', data.options.turnos || []);
+        populateSelect('#filterOrigin', data.options.origens || []);
+        populateSelect('#filterStatus', data.options.status || []);
+        populateSelect('#filterDispatchConsultant', data.options.consultores_disparo || []);
+        populateSelect('#filterCommercialConsultant', data.options.consultores_comercial || []);
         optionsLoaded = true;
       }
       lastLoadedAt = Date.now();
@@ -270,12 +284,16 @@
   }
   async function searchLead() {
     const query = ($('#leadSearch')?.value || '').trim(); if (!query) return toast('Digite um nome, CPF ou telefone.', 'warning'); $('#leadResults').innerHTML = '<div class="empty-state">Buscando...</div>';
-    try { const data = await fetchJson(`/api/gestao/leads/buscar?q=${encodeURIComponent(query)}`); const items = data.items || data.data || []; $('#leadResults').innerHTML = items.map((row) => `<article class="lead-card"><div><span>${esc(row.status_atendimento || row.status || 'Lead')}</span><h3>${esc(row.nome || 'Sem nome')}</h3><p>${esc(row.curso || '—')} · ${esc(row.polo || row.unidade || '—')}</p></div><dl><div><dt>CPF</dt><dd>${esc(row.cpf || '—')}</dd></div><div><dt>Celular</dt><dd>${esc(row.celular || '—')}</dd></div><div><dt>Negócio</dt><dd>${esc(row.tipo_negocio || '—')}</dd></div><div><dt>Consultor</dt><dd>${esc(row.consultor_disparo || '—')}</dd></div></dl></article>`).join('') || '<div class="empty-state">Nenhum lead encontrado.</div>'; }
+    try { const data = await fetchJson(`/api/gestao/leads/buscar?q=${encodeURIComponent(query)}`); const items = data.items || data.data || []; $('#leadResults').innerHTML = items.map((row) => `<article class="lead-card"><div><span>${esc(row.status_atendimento || row.status || 'Lead')}</span><h3>${esc(row.nome || 'Sem nome')}</h3><p>${esc(row.curso || '—')} · ${esc(row.unidade || row.polo || '—')}</p></div><dl><div><dt>CPF</dt><dd>${esc(row.cpf || '—')}</dd></div><div><dt>Celular</dt><dd>${esc(row.celular || '—')}</dd></div><div><dt>Negócio</dt><dd>${esc(row.tipo_negocio || '—')}</dd></div><div><dt>Consultor</dt><dd>${esc(row.consultor_disparo || '—')}</dd></div></dl></article>`).join('') || '<div class="empty-state">Nenhum lead encontrado.</div>'; }
     catch (error) { $('#leadResults').innerHTML = `<div class="empty-state error">${esc(error.message)}</div>`; }
   }
 
   function clearFilters() {
-    ['#filterDateStart','#filterDateEnd','#filterBusiness','#filterDispatchType','#filterChannel','#filterUnit','#filterCampaign','#filterCourse'].forEach((selector) => { const el = $(selector); if (el) el.value = ''; });
+    [
+      '#filterDateStart','#filterDateEnd','#filterBusiness','#filterDispatchType','#filterChannel',
+      '#filterModality','#filterShift','#filterOrigin','#filterStatus','#filterUnit',
+      '#filterDispatchConsultant','#filterCommercialConsultant','#filterCampaign','#filterCourse'
+    ].forEach((selector) => { const el = $(selector); if (el) el.value = ''; });
     lastLoadedAt = 0; loadCore(true);
   }
   function bind() {
