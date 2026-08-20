@@ -10,6 +10,21 @@ from . import database as db
 
 INVALID_CONSULTANTS = {"", "N", "NULL", "N/A", "NA", "NONE", "UNDEFINED", "-"}
 
+GESTAO_DIMENSIONS = {
+    "consultor_disparo": "consultor_disparo",
+    "consultor_comercial": "consultor_comercial",
+    "tipo_negocio": "tipo_negocio",
+    "tipo_disparo": "tipo_disparo",
+    "campanha": "campanha",
+    "canal": "canal",
+    "curso": "curso",
+    "modalidade": "modalidade",
+    "turno": "turno",
+    "origem": "origem",
+    "status": "status",
+    "unidade": "unidade",
+}
+
 
 def _rows(sql: str, params: Dict[str, Any] | None = None, name: str = "gestao_sem_lotes"):
     return db._run_gestao_query(sql, params or {}, name)
@@ -47,19 +62,11 @@ def _relation() -> str:
 
 
 def _where_filters() -> tuple[str, Dict[str, Any]]:
-    # Disparos são filtrados por data_disparo; matrículas, exclusivamente por data_matricula.
-    clauses = ["(data_disparo IS NOT NULL OR (matriculado IS TRUE AND data_matricula IS NOT NULL AND UPPER(BTRIM(COALESCE(status::text, ''))) = 'MAT'))"]
+    # Disparos usam data_disparo; matrículas usam exclusivamente data_matricula.
+    clauses = ["(data_disparo IS NOT NULL OR (matriculado IS TRUE AND data_matricula IS NOT NULL))"]
     params: Dict[str, Any] = {}
-    mapping = {
-        "consultor_disparo": "consultor_disparo",
-        "tipo_negocio": "tipo_negocio",
-        "tipo_disparo": "tipo_disparo",
-        "campanha": "campanha",
-        "canal": "canal",
-        "curso": "curso",
-        "unidade": "unidade",
-    }
-    for arg, column in mapping.items():
+
+    for arg, column in GESTAO_DIMENSIONS.items():
         value = str(request.args.get(arg) or "").strip()
         if value:
             clauses.append(f"COALESCE({db._safe_ident(column)}::text, '') ILIKE :{arg}")
@@ -68,20 +75,24 @@ def _where_filters() -> tuple[str, Dict[str, Any]]:
     start = str(request.args.get("data_ini") or "").strip()
     end = str(request.args.get("data_fim") or "").strip()
     if start:
-        clauses.append("((data_disparo IS NOT NULL AND data_disparo >= CAST(:data_ini AS timestamp)) OR (matriculado IS TRUE AND UPPER(BTRIM(COALESCE(status::text, ''))) = 'MAT' AND data_matricula >= CAST(:data_ini AS timestamp)))")
+        clauses.append(
+            "((data_disparo IS NOT NULL AND data_disparo >= CAST(:data_ini AS timestamp)) "
+            "OR (matriculado IS TRUE AND data_matricula >= CAST(:data_ini AS timestamp)))"
+        )
         params["data_ini"] = start
     if end:
-        clauses.append("((data_disparo IS NOT NULL AND data_disparo < (CAST(:data_fim AS date) + INTERVAL '1 day')) OR (matriculado IS TRUE AND UPPER(BTRIM(COALESCE(status::text, ''))) = 'MAT' AND data_matricula < (CAST(:data_fim AS date) + INTERVAL '1 day')))")
+        clauses.append(
+            "((data_disparo IS NOT NULL AND data_disparo < (CAST(:data_fim AS date) + INTERVAL '1 day')) "
+            "OR (matriculado IS TRUE AND data_matricula < (CAST(:data_fim AS date) + INTERVAL '1 day')))"
+        )
         params["data_fim"] = end
     return " AND ".join(clauses), params
 
 
 def _matriculated_sql() -> str:
-    # Matrícula exige os três critérios simultaneamente:
-    # 1) matriculado=true; 2) status=MAT; 3) período definido somente por data_matricula.
+    # Regra única de matrícula da Gestão: flag verdadeira + data de matrícula.
     clauses = [
         "matriculado IS TRUE",
-        "UPPER(BTRIM(COALESCE(status::text, ''))) = 'MAT'",
         "data_matricula IS NOT NULL",
     ]
     if str(request.args.get("data_ini") or "").strip():
@@ -206,7 +217,12 @@ def _consultants_payload() -> Dict[str, Any]:
           ARRAY_REMOVE(ARRAY_AGG(DISTINCT NULLIF(BTRIM(tipo_negocio::text),'')), NULL) AS tipos_negocio,
           ARRAY_REMOVE(ARRAY_AGG(DISTINCT NULLIF(BTRIM(tipo_disparo::text),'')), NULL) AS tipos_disparo,
           ARRAY_REMOVE(ARRAY_AGG(DISTINCT NULLIF(BTRIM(canal::text),'')), NULL) AS canais,
-          ARRAY_REMOVE(ARRAY_AGG(DISTINCT NULLIF(BTRIM(unidade::text),'')), NULL) AS unidades
+          ARRAY_REMOVE(ARRAY_AGG(DISTINCT NULLIF(BTRIM(modalidade::text),'')), NULL) AS modalidades,
+          ARRAY_REMOVE(ARRAY_AGG(DISTINCT NULLIF(BTRIM(turno::text),'')), NULL) AS turnos,
+          ARRAY_REMOVE(ARRAY_AGG(DISTINCT NULLIF(BTRIM(origem::text),'')), NULL) AS origens,
+          ARRAY_REMOVE(ARRAY_AGG(DISTINCT NULLIF(BTRIM(status::text),'')), NULL) AS status,
+          ARRAY_REMOVE(ARRAY_AGG(DISTINCT NULLIF(BTRIM(consultor_disparo::text),'')), NULL) AS consultores_disparo,
+          ARRAY_REMOVE(ARRAY_AGG(DISTINCT NULLIF(BTRIM(consultor_comercial::text),'')), NULL) AS consultores_comercial
         FROM {relation}
         WHERE data_disparo IS NOT NULL OR matriculado IS TRUE
         """,
