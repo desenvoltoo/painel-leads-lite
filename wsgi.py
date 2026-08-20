@@ -103,6 +103,12 @@ try:
     result_metrics_result = apply_upload_result_metrics_guard()
 
     application = create_app()
+    # Arquivos grandes: suporta planilhas de até 100 mil leads. O limite de bytes
+    # pode ser ajustado no EasyPanel por LEADS_UPLOAD_MAX_BYTES; padrão 150 MiB.
+    application.config["MAX_CONTENT_LENGTH"] = max(
+        30 * 1024 * 1024,
+        int(os.getenv("LEADS_UPLOAD_MAX_BYTES", str(150 * 1024 * 1024)) or (150 * 1024 * 1024)),
+    )
     application.logger.info("Gestão multi-instituição ativada: %s", multi_result)
     application.logger.info("Cache da Gestão ativado: %s", cache_result)
     application.logger.info("Serialização da SP UniFECAF ativada: %s", serial_result)
@@ -111,6 +117,7 @@ try:
     application.logger.info("Atualização completa antes da limpeza da staging ativada: %s", existing_full_update_result)
     application.logger.info("Métricas reais das SPs ativadas: %s", result_metrics_result)
     application.logger.info("Blindagem do COPY ativada: %s", upload_copy_guard_result)
+    application.logger.info("Limite de upload configurado: %s bytes", application.config["MAX_CONTENT_LENGTH"])
     register_institution_routes(application)
     register_upload_preview_routes(application)
     register_upload_new_only_routes(application)
