@@ -39,16 +39,9 @@ def _dimension_filters() -> tuple[str, Dict[str, Any]]:
         "'SEM_CONSULTOR', 'SEM RESPONSAVEL', 'SEM RESPONSÁVEL', 'NAO INFORMADO', 'NÃO INFORMADO')"
     ]
     params: Dict[str, Any] = {}
-    mapping = {
-        "consultor_disparo": "consultor_disparo",
-        "tipo_negocio": "tipo_negocio",
-        "tipo_disparo": "tipo_disparo",
-        "campanha": "campanha",
-        "canal": "canal",
-        "curso": "curso",
-        "unidade": "unidade",
-    }
-    for arg, column in mapping.items():
+
+    # Usa o mesmo contrato do serviço base para impedir divergência entre filtros e métricas.
+    for arg, column in base_service.GESTAO_DIMENSIONS.items():
         value = str(request.args.get(arg) or "").strip()
         if value:
             clauses.append(f"COALESCE({db._safe_ident(column)}::text, '') ILIKE :{arg}")
