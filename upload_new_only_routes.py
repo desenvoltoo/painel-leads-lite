@@ -25,7 +25,7 @@ def register_upload_new_only_routes(app) -> None:
         try:
             institution = str(session.get("active_institution") or "anhanguera").strip().lower()
             df = _read_upload_to_df(file_storage)
-            max_rows = int(os.getenv("LEADS_IMPORT_MAX_ROWS", "15000") or 15000)
+            max_rows = int(os.getenv("LEADS_IMPORT_MAX_ROWS", "100000") or 100000)
             if len(df) > max_rows:
                 return jsonify({"ok": False, "error": {"code": "UPLOAD_ROW_LIMIT", "message": f"O limite é de {max_rows} linhas por arquivo."}}), 400
 
