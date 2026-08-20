@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 
+import os
 from typing import Any
 
 from flask import session
@@ -69,11 +70,18 @@ def apply_management_import_compat() -> dict[str, Any]:
     def process_upload_dataframe_compat(df, filename: str = "upload", upload_id: str | None = None, routine_name: str | None = None):
         institution = _institution()
         if institution == "unifecaf":
-            routine = routine_name or "sp_processar_stg_leads"
+            routine = (
+                routine_name
+                or str(os.getenv("UNIFECAF_IMPORT_ROUTINE") or "").strip()
+                or "sp_processar_stg_leads"
+            )
         else:
-            routine = routine_name or "sp_processar_stg_leads_site"
-        # upload_id legado é ignorado: o pipeline oficial cria um identificador consistente
-        # em progresso e staging, chama a SP imediatamente e mantém acompanhamento assíncrono.
+            routine = (
+                routine_name
+                or str(os.getenv("LEADS_IMPORT_ROUTINE") or "").strip()
+                or "sp_importar_leads_diario"
+            )
+
         return enqueue_upload_dataframe(
             df,
             filename=filename,
