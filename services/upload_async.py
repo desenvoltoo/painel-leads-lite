@@ -225,8 +225,11 @@ def _copy_dataframe_to_staging(cfg: Dict[str, str], prepared, upload_id: str, mo
     cursor = None
     try:
         cursor = raw.cursor()
-        cursor.execute("SET LOCAL lock_timeout = '5s'")
-        cursor.execute("SET LOCAL statement_timeout = '180s'")
+        timeout_seconds = max(180, int(os.getenv("LEADS_IMPORT_STAGING_TIMEOUT_SECONDS", "900") or 900))
+        batch_rows = max(1000, min(20000, int(os.getenv("LEADS_IMPORT_COPY_BATCH_ROWS", "5000") or 5000)))
+
+        cursor.execute("SET LOCAL lock_timeout = '10s'")
+        cursor.execute(f"SET LOCAL statement_timeout = '{timeout_seconds}s'")
         cursor.execute("SELECT pg_try_advisory_xact_lock(hashtext(%s))", (f"upload-staging:{cfg['institution']}",))
         if not bool(cursor.fetchone()[0]):
             raise RuntimeError(f"Já existe um arquivo sendo gravado na staging da {cfg['institution']}. Aguarde a conclusão e tente novamente.")
@@ -242,23 +245,50 @@ def _copy_dataframe_to_staging(cfg: Dict[str, str], prepared, upload_id: str, mo
             )
 
         columns = list(prepared.columns)
-        buffer = io.StringIO()
-        prepared.to_csv(buffer, index=False, header=False, sep="\t", na_rep="\\N", quoting=csv.QUOTE_MINIMAL, quotechar='"', escapechar="\\", lineterminator="\n")
-        buffer.seek(0)
         column_sql = ",".join(db._safe_ident(column) for column in columns)
         copy_sql = f"COPY {cfg['schema_ident']}.{db._safe_ident(cfg['staging'])} ({column_sql}) FROM STDIN WITH (FORMAT CSV, DELIMITER E'\\t', NULL '\\N', QUOTE '\"', ESCAPE '\"')"
 
-        if hasattr(cursor, "copy_expert"):
-            cursor.copy_expert(copy_sql, buffer)
-        elif hasattr(cursor, "copy"):
-            with cursor.copy(copy_sql) as copy:
-                while True:
-                    chunk = buffer.read(1024 * 1024)
-                    if not chunk:
-                        break
-                    copy.write(chunk)
-        else:
-            raise RuntimeError("O driver PostgreSQL não oferece suporte a COPY FROM STDIN.")
+        total_rows = len(prepared)
+        copied = 0
+        for start in range(0, total_rows, batch_rows):
+            end = min(start + batch_rows, total_rows)
+            batch = prepared.iloc[start:end]
+            buffer = io.StringIO()
+            batch.to_csv(
+                buffer,
+                index=False,
+                header=False,
+                sep="\t",
+                na_rep="\\N",
+                quoting=csv.QUOTE_MINIMAL,
+                quotechar='"',
+                escapechar="\\",
+                lineterminator="\n",
+            )
+            buffer.seek(0)
+
+            if hasattr(cursor, "copy_expert"):
+                cursor.copy_expert(copy_sql, buffer)
+            elif hasattr(cursor, "copy"):
+                with cursor.copy(copy_sql) as copy:
+                    while True:
+                        chunk = buffer.read(1024 * 1024)
+                        if not chunk:
+                            break
+                        copy.write(chunk)
+            else:
+                raise RuntimeError("O driver PostgreSQL não oferece suporte a COPY FROM STDIN.")
+
+            copied = end
+            progress = 10 + min(9, int((copied / total_rows) * 9)) if total_rows else 19
+            cursor.execute(
+                f"UPDATE {cfg['schema_ident']}.{cfg['progress']} SET progresso=%s, atualizado_em=now() WHERE upload_id=%s",
+                (progress, upload_id),
+            )
+            logger.info(
+                "upload_staging_batch institution=%s upload_id=%s copied=%s total=%s batch=%s",
+                cfg["institution"], upload_id, copied, total_rows, batch_rows,
+            )
 
         cursor.execute(f"UPDATE {cfg['schema_ident']}.{cfg['progress']} SET status='AGUARDANDO', etapa='STAGING_CONCLUIDA', progresso=20, atualizado_em=now() WHERE upload_id=%s", (upload_id,))
         raw.commit()
@@ -281,6 +311,8 @@ def enqueue_upload_dataframe(df, filename: str, mode: str, routine_name: str, in
     total_rows = len(prepared)
     if total_rows <= 0:
         raise ValueError("A planilha não possui linhas para importar.")
+    if total_rows > 100000:
+        raise ValueError("O limite é de 100000 linhas por arquivo.")
 
     stg_cols = STAGING_COLUMNS[cfg["institution"]]
     prepared = prepared[[c for c in prepared.columns if c in stg_cols]].copy()
