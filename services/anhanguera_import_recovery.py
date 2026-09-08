@@ -27,7 +27,11 @@ def _pending_uploads() -> list[dict[str, Any]]:
         SELECT
             s.upload_id,
             COUNT(*)::bigint AS total_rows,
-            COALESCE(MAX(p.rotina), 'sp_processar_stg_leads_site') AS routine_name
+            CASE
+                WHEN UPPER(COALESCE(MAX(p.modo), '')) = 'SOMENTE_NOVOS'
+                    THEN 'sp_importar_leads_novos'
+                ELSE 'sp_importar_leads_diario'
+            END AS routine_name
         FROM {schema}.stg_leads_site s
         LEFT JOIN {schema}.op_importacao_progresso p
           ON p.upload_id = s.upload_id
@@ -52,14 +56,16 @@ def _pending_uploads() -> list[dict[str, Any]]:
 
 def _ensure_progress_row(upload_id: str, total_rows: int, routine_name: str) -> None:
     schema = db._safe_ident(_schema())
+    mode = "SOMENTE_NOVOS" if routine_name == "sp_importar_leads_novos" else "ATUALIZAR_EXISTENTES"
     db._run_gestao_query(
         f"""
         INSERT INTO {schema}.op_importacao_progresso
             (upload_id, modo, rotina, arquivo, status, etapa, linhas_total, progresso, atualizado_em)
         VALUES
-            (:upload_id, 'ATUALIZAR_EXISTENTES', :routine_name, 'RECUPERACAO_AUTOMATICA',
+            (:upload_id, :mode, :routine_name, 'RECUPERACAO_AUTOMATICA',
              'AGUARDANDO', 'RECUPERACAO_AUTOMATICA', :total_rows, 20, now())
         ON CONFLICT (upload_id) DO UPDATE SET
+            modo = EXCLUDED.modo,
             rotina = EXCLUDED.rotina,
             status = 'AGUARDANDO',
             etapa = 'RECUPERACAO_AUTOMATICA',
@@ -69,7 +75,7 @@ def _ensure_progress_row(upload_id: str, total_rows: int, routine_name: str) -> 
             atualizado_em = now(),
             finalizado_em = NULL
         """,
-        {"upload_id": upload_id, "routine_name": routine_name, "total_rows": total_rows},
+        {"upload_id": upload_id, "mode": mode, "routine_name": routine_name, "total_rows": total_rows},
         "anhanguera_recovery_progress",
     )
 
@@ -104,7 +110,7 @@ def _run_recovery() -> None:
             for row in pending:
                 upload_id = str(row.get("upload_id") or "").strip()
                 total_rows = int(row.get("total_rows") or 0)
-                routine_name = str(row.get("routine_name") or "sp_processar_stg_leads_site").strip()
+                routine_name = str(row.get("routine_name") or "sp_importar_leads_diario").strip()
                 if not upload_id or total_rows <= 0:
                     continue
                 _ensure_progress_row(upload_id, total_rows, routine_name)
