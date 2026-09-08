@@ -9,6 +9,13 @@ from app import _read_upload_to_df, _validate_upload_filename
 from services.upload_update_fixed import enqueue_update_existing_dataframe
 
 
+LEGACY_ANHANGUERA_DAILY_ROUTINES = {
+    "sp_processar_stg_leads_site",
+    "sp_processar_stg_leads_site_recovery",
+    "sp_processar_stg_leads_site_reparada",
+}
+
+
 def register_upload_update_existing_routes(app) -> None:
     if "api_upload_atualizar_existentes" in app.view_functions:
         return
@@ -36,6 +43,8 @@ def register_upload_update_existing_routes(app) -> None:
                 routine_name = str(os.getenv("UNIFECAF_IMPORT_ROUTINE") or "sp_processar_stg_leads").strip()
             else:
                 routine_name = str(os.getenv("LEADS_IMPORT_ROUTINE") or "sp_importar_leads_diario").strip()
+                if not routine_name or routine_name in LEGACY_ANHANGUERA_DAILY_ROUTINES:
+                    routine_name = "sp_importar_leads_diario"
 
             result = enqueue_update_existing_dataframe(
                 df,
