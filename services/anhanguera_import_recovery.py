@@ -56,11 +56,6 @@ def _pending_uploads() -> list[dict[str, Any]]:
 
 
 def _still_pending(upload_id: str) -> bool:
-    """Reconfirma a staging imediatamente antes de disparar um worker.
-
-    Evita corrida entre múltiplas instâncias do recovery: uma instância pode ter
-    carregado o upload na lista enquanto outra já terminou e limpou a staging.
-    """
     schema = db._safe_ident(_schema())
     rows = db._run_gestao_query(
         f"""
@@ -74,13 +69,10 @@ def _still_pending(upload_id: str) -> bool:
         {"upload_id": upload_id},
         "anhanguera_recovery_recheck_pending",
     )
-    if not rows:
-        return False
-    return bool(rows[0].get("pendente"))
+    return bool(rows and rows[0].get("pendente"))
 
 
 def _mark_completed_if_empty(upload_id: str) -> None:
-    """Se a staging já foi consumida, normaliza o progresso como concluído."""
     schema = db._safe_ident(_schema())
     db._run_gestao_query(
         f"""
@@ -105,9 +97,10 @@ def _mark_completed_if_empty(upload_id: str) -> None:
     )
 
 
-def _ensure_progress_row(upload_id: str, total_rows: int, routine_name: str) -> None:
+def _claim_upload(upload_id: str, total_rows: int, routine_name: str) -> bool:
+    """Reserva atomicamente um upload para uma única instância do recovery."""
     schema = db._safe_ident(_schema())
-    db._run_gestao_query(
+    rows = db._run_gestao_query(
         f"""
         INSERT INTO {schema}.op_importacao_progresso
             (upload_id, modo, rotina, arquivo, status, etapa, linhas_total, progresso, atualizado_em)
@@ -116,21 +109,30 @@ def _ensure_progress_row(upload_id: str, total_rows: int, routine_name: str) -> 
              CASE WHEN :routine_name = 'sp_importar_leads_novos' THEN 'SOMENTE_NOVOS' ELSE 'ATUALIZAR_EXISTENTES' END,
              :routine_name,
              'RECUPERACAO_AUTOMATICA',
-             'AGUARDANDO', 'RECUPERACAO_AUTOMATICA', :total_rows, 20, now())
+             'PROCESSANDO', 'RECUPERACAO_AUTOMATICA', :total_rows, 25, now())
         ON CONFLICT (upload_id) DO UPDATE SET
             rotina = EXCLUDED.rotina,
-            status = 'AGUARDANDO',
+            status = 'PROCESSANDO',
             etapa = 'RECUPERACAO_AUTOMATICA',
             linhas_total = EXCLUDED.linhas_total,
-            progresso = 20,
+            progresso = 25,
             erro = NULL,
             atualizado_em = now(),
             finalizado_em = NULL
+        WHERE UPPER(COALESCE({schema}.op_importacao_progresso.status, '')) <> 'PROCESSANDO'
+           OR COALESCE({schema}.op_importacao_progresso.atualizado_em,
+                       {schema}.op_importacao_progresso.criado_em,
+                       now()) < now() - interval '20 minutes'
+        RETURNING upload_id
         """,
         {"upload_id": upload_id, "routine_name": routine_name, "total_rows": total_rows},
-        "anhanguera_recovery_progress",
+        "anhanguera_recovery_claim",
     )
+    return bool(rows)
 
+
+def _reopen_log(upload_id: str) -> None:
+    schema = db._safe_ident(_schema())
     db._run_gestao_query(
         f"""
         UPDATE {schema}.logs_importacoes
@@ -159,6 +161,7 @@ def _run_recovery() -> None:
                     len(pending),
                     sum(int(row.get("total_rows") or 0) for row in pending),
                 )
+
             for row in pending:
                 upload_id = str(row.get("upload_id") or "").strip()
                 total_rows = int(row.get("total_rows") or 0)
@@ -166,22 +169,23 @@ def _run_recovery() -> None:
                 if not upload_id or total_rows <= 0:
                     continue
 
-                # A lista pode ficar obsoleta entre SELECT e execução, principalmente
-                # com múltiplas réplicas/processos. Reconfirma antes de reabrir status.
                 if not _still_pending(upload_id):
                     logger.info("anhanguera_recovery_skip_empty upload_id=%s", upload_id)
                     _mark_completed_if_empty(upload_id)
                     continue
 
-                _ensure_progress_row(upload_id, total_rows, routine_name)
+                # Apenas uma instância pode transformar o status em PROCESSANDO.
+                if not _claim_upload(upload_id, total_rows, routine_name):
+                    logger.info("anhanguera_recovery_skip_claimed upload_id=%s", upload_id)
+                    continue
 
-                # Segunda checagem reduz a janela de corrida entre o UPDATE acima
-                # e a criação do worker.
+                # Outra execução manual pode ter concluído entre o claim e o worker.
                 if not _still_pending(upload_id):
                     logger.info("anhanguera_recovery_skip_after_claim upload_id=%s", upload_id)
                     _mark_completed_if_empty(upload_id)
                     continue
 
+                _reopen_log(upload_id)
                 worker = start_upload_worker("anhanguera", upload_id, routine_name, total_rows)
                 worker.join()
         except Exception:
