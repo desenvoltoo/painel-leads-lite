@@ -27,8 +27,9 @@ def _pending_uploads() -> list[dict[str, Any]]:
         SELECT
             s.upload_id,
             COUNT(*)::bigint AS total_rows,
+            COALESCE(MAX(p.modo), 'ATUALIZAR_EXISTENTES') AS mode,
             CASE
-                WHEN UPPER(COALESCE(MAX(p.modo), '')) = 'SOMENTE_NOVOS'
+                WHEN UPPER(COALESCE(MAX(p.modo), '')) IN ('SOMENTE_NOVOS', 'SOMENTE NOVOS', 'NOVOS')
                     THEN 'sp_importar_leads_novos'
                 ELSE 'sp_importar_leads_diario'
             END AS routine_name
@@ -54,18 +55,69 @@ def _pending_uploads() -> list[dict[str, Any]]:
     return list(rows or [])
 
 
+def _still_pending(upload_id: str) -> bool:
+    """Reconfirma a staging imediatamente antes de disparar um worker.
+
+    Evita corrida entre múltiplas instâncias do recovery: uma instância pode ter
+    carregado o upload na lista enquanto outra já terminou e limpou a staging.
+    """
+    schema = db._safe_ident(_schema())
+    rows = db._run_gestao_query(
+        f"""
+        SELECT EXISTS (
+            SELECT 1
+            FROM {schema}.stg_leads_site
+            WHERE upload_id = :upload_id
+              AND COALESCE(processado, false) = false
+        ) AS pendente
+        """,
+        {"upload_id": upload_id},
+        "anhanguera_recovery_recheck_pending",
+    )
+    if not rows:
+        return False
+    return bool(rows[0].get("pendente"))
+
+
+def _mark_completed_if_empty(upload_id: str) -> None:
+    """Se a staging já foi consumida, normaliza o progresso como concluído."""
+    schema = db._safe_ident(_schema())
+    db._run_gestao_query(
+        f"""
+        UPDATE {schema}.op_importacao_progresso p
+           SET status = 'CONCLUIDO',
+               etapa = 'CONCLUIDO',
+               progresso = 100,
+               erro = NULL,
+               mensagem = COALESCE(NULLIF(p.mensagem, ''), 'Importação concluída.'),
+               atualizado_em = now(),
+               finalizado_em = COALESCE(p.finalizado_em, now())
+         WHERE p.upload_id = :upload_id
+           AND NOT EXISTS (
+                SELECT 1
+                FROM {schema}.stg_leads_site s
+                WHERE s.upload_id = p.upload_id
+                  AND COALESCE(s.processado, false) = false
+           )
+        """,
+        {"upload_id": upload_id},
+        "anhanguera_recovery_mark_completed_if_empty",
+    )
+
+
 def _ensure_progress_row(upload_id: str, total_rows: int, routine_name: str) -> None:
     schema = db._safe_ident(_schema())
-    mode = "SOMENTE_NOVOS" if routine_name == "sp_importar_leads_novos" else "ATUALIZAR_EXISTENTES"
     db._run_gestao_query(
         f"""
         INSERT INTO {schema}.op_importacao_progresso
             (upload_id, modo, rotina, arquivo, status, etapa, linhas_total, progresso, atualizado_em)
         VALUES
-            (:upload_id, :mode, :routine_name, 'RECUPERACAO_AUTOMATICA',
+            (:upload_id,
+             CASE WHEN :routine_name = 'sp_importar_leads_novos' THEN 'SOMENTE_NOVOS' ELSE 'ATUALIZAR_EXISTENTES' END,
+             :routine_name,
+             'RECUPERACAO_AUTOMATICA',
              'AGUARDANDO', 'RECUPERACAO_AUTOMATICA', :total_rows, 20, now())
         ON CONFLICT (upload_id) DO UPDATE SET
-            modo = EXCLUDED.modo,
             rotina = EXCLUDED.rotina,
             status = 'AGUARDANDO',
             etapa = 'RECUPERACAO_AUTOMATICA',
@@ -75,7 +127,7 @@ def _ensure_progress_row(upload_id: str, total_rows: int, routine_name: str) -> 
             atualizado_em = now(),
             finalizado_em = NULL
         """,
-        {"upload_id": upload_id, "mode": mode, "routine_name": routine_name, "total_rows": total_rows},
+        {"upload_id": upload_id, "routine_name": routine_name, "total_rows": total_rows},
         "anhanguera_recovery_progress",
     )
 
@@ -113,7 +165,23 @@ def _run_recovery() -> None:
                 routine_name = str(row.get("routine_name") or "sp_importar_leads_diario").strip()
                 if not upload_id or total_rows <= 0:
                     continue
+
+                # A lista pode ficar obsoleta entre SELECT e execução, principalmente
+                # com múltiplas réplicas/processos. Reconfirma antes de reabrir status.
+                if not _still_pending(upload_id):
+                    logger.info("anhanguera_recovery_skip_empty upload_id=%s", upload_id)
+                    _mark_completed_if_empty(upload_id)
+                    continue
+
                 _ensure_progress_row(upload_id, total_rows, routine_name)
+
+                # Segunda checagem reduz a janela de corrida entre o UPDATE acima
+                # e a criação do worker.
+                if not _still_pending(upload_id):
+                    logger.info("anhanguera_recovery_skip_after_claim upload_id=%s", upload_id)
+                    _mark_completed_if_empty(upload_id)
+                    continue
+
                 worker = start_upload_worker("anhanguera", upload_id, routine_name, total_rows)
                 worker.join()
         except Exception:
