@@ -35,7 +35,9 @@ def register_upload_new_only_routes(app) -> None:
                     return jsonify({"ok": False, "error": {"code": "UNIFECAF_IMPORT_DISABLED", "message": "A importação da UniFECAF está desabilitada."}}), 409
                 routine_name = str(os.getenv("UNIFECAF_IMPORT_ROUTINE_MASSIVA") or "sp_importar_somente_leads_novos").strip()
             else:
-                routine_name = str(os.getenv("LEADS_IMPORT_ROUTINE_MASSIVA") or "sp_importar_somente_leads_novos").strip()
+                # Rotina oficial atual do schema modelo_estrela.
+                # Evita cair no nome legado sp_importar_somente_leads_novos.
+                routine_name = str(os.getenv("LEADS_IMPORT_ROUTINE_MASSIVA") or "sp_importar_leads_novos").strip()
 
             result = enqueue_upload_dataframe(df, filename=filename, mode="SOMENTE_NOVOS", routine_name=routine_name, institution=institution)
             return jsonify({"ok": True, "mode": "somente_novos", "message": "Arquivo gravado na staging da instituição ativa. Processamento iniciado.", **result}), 202
