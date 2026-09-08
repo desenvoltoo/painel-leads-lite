@@ -9,6 +9,12 @@ from app import _read_upload_to_df, _validate_upload_filename
 from services.upload_async import enqueue_upload_dataframe
 
 
+LEGACY_ANHANGUERA_NEW_ONLY_ROUTINES = {
+    "sp_importar_somente_leads_novos",
+    "sp_importar_somente_leads_novos_recovery",
+}
+
+
 def register_upload_new_only_routes(app) -> None:
     if "api_upload_somente_novos" in app.view_functions:
         return
@@ -35,9 +41,9 @@ def register_upload_new_only_routes(app) -> None:
                     return jsonify({"ok": False, "error": {"code": "UNIFECAF_IMPORT_DISABLED", "message": "A importação da UniFECAF está desabilitada."}}), 409
                 routine_name = str(os.getenv("UNIFECAF_IMPORT_ROUTINE_MASSIVA") or "sp_importar_somente_leads_novos").strip()
             else:
-                # Rotina oficial atual do schema modelo_estrela.
-                # Evita cair no nome legado sp_importar_somente_leads_novos.
                 routine_name = str(os.getenv("LEADS_IMPORT_ROUTINE_MASSIVA") or "sp_importar_leads_novos").strip()
+                if not routine_name or routine_name in LEGACY_ANHANGUERA_NEW_ONLY_ROUTINES:
+                    routine_name = "sp_importar_leads_novos"
 
             result = enqueue_upload_dataframe(df, filename=filename, mode="SOMENTE_NOVOS", routine_name=routine_name, institution=institution)
             return jsonify({"ok": True, "mode": "somente_novos", "message": "Arquivo gravado na staging da instituição ativa. Processamento iniciado.", **result}), 202
