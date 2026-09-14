@@ -266,6 +266,7 @@ def query_options():
 
 
 _original_json_safe_value = db._json_safe_value
+_original_query_leads = db.query_leads
 
 
 def _json_safe_value(value: Any) -> Any:
@@ -276,9 +277,23 @@ def _json_safe_value(value: Any) -> Any:
     return _original_json_safe_value(value)
 
 
+def _normalize_quick_search_filters(filters):
+    normalized = dict(filters or {})
+    cpf_digits = re.sub(r"[^0-9]", "", str(normalized.get("cpf") or ""))
+    if cpf_digits and not normalized.get("busca") and not normalized.get("celular"):
+        normalized.pop("cpf", None)
+        normalized["busca"] = cpf_digits
+    return normalized
+
+
+def query_leads(filters=None, *args, **kwargs):
+    return _original_query_leads(_normalize_quick_search_filters(filters), *args, **kwargs)
+
+
 db._apply_text_multi_filter = _apply_text_multi_filter
 db._apply_filters = _apply_filters
 db.query_options = query_options
 db._json_safe_value = _json_safe_value
+db.query_leads = query_leads
 
 db.logger.info("Camada de filtros fiéis ao banco instalada.")
