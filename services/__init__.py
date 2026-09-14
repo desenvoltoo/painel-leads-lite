@@ -6,6 +6,8 @@ mudanças amplas nas rotas Flask.
 
 from __future__ import annotations
 
+import importlib
+import logging
 import re
 import sys
 import threading
@@ -14,6 +16,8 @@ from typing import Any, Dict
 
 from . import database as _database
 from .upload_pipeline import process_upload_dataframe
+
+logger = logging.getLogger(__name__)
 
 
 _BLANK_MARKERS = {
@@ -298,6 +302,17 @@ _database.query_leads_count = query_leads_count
 _database.export_leads_rows = export_leads_rows
 _database.export_leads_rows_iter = export_leads_rows_iter
 _database._rows_dataframe_export_order = _rows_dataframe_export_order
+
+
+# Carrega a camada de filtros aqui, no pacote ``services`` que o app importa
+# obrigatoriamente. Isso evita depender do carregamento automático de
+# ``sitecustomize.py`` e garante que ``from services.database import
+# query_options`` já receba a implementação corrigida.
+try:
+    _filter_reliability = importlib.import_module("filter_reliability")
+    logger.info("Camada de filtros confiáveis carregada pelo pacote services.")
+except Exception:
+    logger.exception("Falha ao carregar a camada de filtros confiáveis pelo pacote services.")
 
 
 # Substitui apenas o fluxo de lotes por uma implementação transacional. As rotas
