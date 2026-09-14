@@ -36,6 +36,14 @@ def _install_database_overrides() -> None:
         return " ORDER BY " + ", ".join(parts or ["1"])
 
     def query_leads(filters=None, limit=100, offset=0, order_by=None, order_dir="asc"):
+        try:
+            filter_layer = importlib.import_module("filter_reliability")
+            normalizer = getattr(filter_layer, "_normalize_quick_search_filters", None)
+            if callable(normalizer):
+                filters = normalizer(filters)
+        except Exception:
+            logger.exception("Falha ao normalizar a busca rápida antes da consulta da fila.")
+
         params = []
         select_cols = ", ".join("v." + column for column in db.LEADS_COLUMNS)
         sql = db._apply_filters(
