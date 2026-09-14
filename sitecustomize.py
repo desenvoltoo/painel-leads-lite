@@ -23,7 +23,10 @@ def _install_database_overrides() -> None:
     def dispatch_priority_order_clause() -> str:
         parts: list[str] = []
         if db._has_view_col("data_disparo"):
-            parts.append("CASE WHEN v.data_disparo IS NULL THEN 0 ELSE 1 END ASC")
+            parts.append(
+                "CASE WHEN v.data_disparo IS NULL OR v.data_disparo::text = '-infinity' "
+                "THEN 0 ELSE 1 END ASC"
+            )
         if db._has_view_col("data_inscricao"):
             parts.append("v.data_inscricao DESC NULLS LAST")
         if db._has_view_col("data_atualizacao"):
@@ -62,6 +65,14 @@ def _install_database_overrides() -> None:
     logger.info("Prioridade operacional da fila instalada.")
 
 
+def _install_filter_reliability() -> None:
+    try:
+        importlib.import_module("filter_reliability")
+        logger.info("Camada de confiabilidade dos filtros instalada.")
+    except Exception:
+        logger.exception("Não foi possível instalar a camada de confiabilidade dos filtros.")
+
+
 def _install_flask_extension() -> None:
     try:
         from flask import Flask, jsonify, request
@@ -96,19 +107,27 @@ def _install_flask_extension() -> None:
                 resumo AS (
                     SELECT
                         COUNT(*)::bigint AS total,
-                        COUNT(*) FILTER (WHERE data_disparo IS NULL)::bigint AS fila_disparo,
-                        COUNT(*) FILTER (WHERE data_inscricao::date = CURRENT_DATE)::bigint AS inscritos_hoje,
-                        COUNT(*) FILTER (WHERE data_inscricao::date >= CURRENT_DATE - 6)::bigint AS inscritos_7_dias,
-                        COUNT(*) FILTER (WHERE data_disparo::date = CURRENT_DATE)::bigint AS disparados_hoje,
-                        COUNT(*) FILTER (WHERE flag_matriculado IS TRUE)::bigint AS matriculas,
                         COUNT(*) FILTER (
                             WHERE data_disparo IS NULL
+                               OR data_disparo::text = '-infinity'
+                        )::bigint AS fila_disparo,
+                        COUNT(*) FILTER (WHERE data_inscricao::date = CURRENT_DATE)::bigint AS inscritos_hoje,
+                        COUNT(*) FILTER (WHERE data_inscricao::date >= CURRENT_DATE - 6)::bigint AS inscritos_7_dias,
+                        COUNT(*) FILTER (
+                            WHERE data_disparo IS NOT NULL
+                              AND data_disparo::text <> '-infinity'
+                              AND data_disparo::date = CURRENT_DATE
+                        )::bigint AS disparados_hoje,
+                        COUNT(*) FILTER (WHERE flag_matriculado IS TRUE)::bigint AS matriculas,
+                        COUNT(*) FILTER (
+                            WHERE (data_disparo IS NULL OR data_disparo::text = '-infinity')
                               AND data_inscricao::date < CURRENT_DATE - 3
                         )::bigint AS backlog_3_dias,
                         COALESCE(
                             AVG(EXTRACT(EPOCH FROM (data_disparo - data_inscricao::timestamp)) / 86400.0)
                             FILTER (
                                 WHERE data_disparo IS NOT NULL
+                                  AND data_disparo::text <> '-infinity'
                                   AND data_inscricao IS NOT NULL
                                   AND data_disparo >= data_inscricao::timestamp
                             ),
@@ -207,5 +226,6 @@ def _load_upload_preview_extension() -> None:
 
 
 _install_database_overrides()
+_install_filter_reliability()
 _install_flask_extension()
 _load_upload_preview_extension()
