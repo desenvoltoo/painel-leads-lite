@@ -207,6 +207,7 @@ def _apply_filters(sql: str, filters, params: list) -> str:
 
 
 def query_options():
+    """Carrega os valores reais distintos da view, preservando a grafia do banco."""
     option_map = {
         "status": ("status", "status"),
         "curso": ("curso", "cursos"),
@@ -235,23 +236,18 @@ def query_options():
             rows = db._run_gestao_query(
                 f"""
                 WITH valores AS (
-                    SELECT
+                    SELECT DISTINCT
                         REGEXP_REPLACE(BTRIM({safe_col}::text), '\\s+', ' ', 'g') AS value
                     FROM {db._view_table_id()}
-                ),
-                validos AS (
-                    SELECT value, UPPER(value) AS normalized
-                    FROM valores
-                    WHERE NULLIF(value, '') IS NOT NULL
-                      AND NOT (LOWER(value) = ANY(:blank_markers))
                 )
-                SELECT MIN(value) AS value
-                FROM validos
-                GROUP BY normalized
-                ORDER BY MIN(value)
+                SELECT value
+                FROM valores
+                WHERE NULLIF(value, '') IS NOT NULL
+                  AND NOT (LOWER(value) = ANY(:blank_markers))
+                ORDER BY value
                 """,
                 {"blank_markers": blank_markers},
-                f"options_{col}_reliable",
+                f"options_{col}_exact",
             )
             values = [
                 row["value"]
