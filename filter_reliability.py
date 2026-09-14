@@ -207,7 +207,7 @@ def _apply_filters(sql: str, filters, params: list) -> str:
 
 
 def query_options():
-    """Carrega os valores reais distintos da view, preservando a grafia do banco."""
+    """Retorna um valor por opção lógica, usando a grafia mais frequente no banco."""
     option_map = {
         "status": ("status", "status"),
         "curso": ("curso", "cursos"),
@@ -236,18 +236,38 @@ def query_options():
             rows = db._run_gestao_query(
                 f"""
                 WITH valores AS (
-                    SELECT DISTINCT
+                    SELECT
                         REGEXP_REPLACE(BTRIM({safe_col}::text), '\\s+', ' ', 'g') AS value
                     FROM {db._view_table_id()}
+                ),
+                validos AS (
+                    SELECT
+                        value,
+                        UPPER(value) AS normalized,
+                        COUNT(*)::bigint AS quantidade
+                    FROM valores
+                    WHERE NULLIF(value, '') IS NOT NULL
+                      AND NOT (LOWER(value) = ANY(:blank_markers))
+                    GROUP BY value, UPPER(value)
+                ),
+                ranqueados AS (
+                    SELECT
+                        value,
+                        normalized,
+                        quantidade,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY normalized
+                            ORDER BY quantidade DESC, value ASC
+                        ) AS rn
+                    FROM validos
                 )
                 SELECT value
-                FROM valores
-                WHERE NULLIF(value, '') IS NOT NULL
-                  AND NOT (LOWER(value) = ANY(:blank_markers))
+                FROM ranqueados
+                WHERE rn = 1
                 ORDER BY value
                 """,
                 {"blank_markers": blank_markers},
-                f"options_{col}_exact",
+                f"options_{col}_dominant",
             )
             values = [
                 row["value"]
