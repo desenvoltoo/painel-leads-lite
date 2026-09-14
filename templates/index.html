@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>Central de Disparos | Leads Educação</title>
+  <title>Painel de Leads</title>
   <link href="https://cdn.jsdelivr.net/npm/tom-select@2.2.2/dist/css/tom-select.css" rel="stylesheet">
   <link rel="stylesheet" href="{{ url_for('static', filename='css/styles.css', v=asset_version) }}">
   <link rel="stylesheet" href="{{ url_for('static', filename='css/dashboard-v2.css', v=asset_version) }}">
@@ -12,8 +12,8 @@
 <body class="ops-body">
   <header class="ops-topbar">
     <div class="ops-brand">
-      <div class="ops-logo">D</div>
-      <div><div class="ops-brand-title">Central de Disparos</div><div class="ops-brand-subtitle">Operação educacional · fila priorizada</div></div>
+      <div class="ops-logo" aria-label="Painel de Leads">PL</div>
+      <div><div class="ops-brand-title">Painel de Leads</div><div class="ops-brand-subtitle">Gestão e operação de leads educacionais</div></div>
     </div>
     <div class="ops-top-actions">
       <span class="ops-user">{{ current_user or "Usuário" }}</span>
@@ -26,11 +26,27 @@
 
   <main class="ops-shell">
     <section class="ops-hero">
-      <div><span class="ops-eyebrow">Prioridade automática</span><h1>Leads sem disparo primeiro</h1><p>A fila considera primeiro quem ainda não recebeu disparo e, em seguida, as inscrições mais recentes.</p></div>
-      <div class="ops-hero-actions">
-        <button id="quickQueue" class="quick-action active" type="button">Fila não disparada</button>
-        <button id="quickToday" class="quick-action" type="button">Inscritos hoje</button>
-        <button id="quickClear" class="quick-action" type="button">Visão geral</button>
+      <div><span class="ops-eyebrow">Gestão inteligente de leads</span><h1>Painel de Leads</h1><p>Consulte, filtre e priorize os leads da operação em uma única visão. A fila mantém primeiro quem ainda não recebeu disparo e depois as inscrições mais recentes.</p></div>
+      <div style="display:flex;align-items:center;justify-content:flex-end;gap:18px;flex-wrap:wrap">
+        <div aria-hidden="true" style="display:grid;place-items:center;width:190px;max-width:34vw;min-width:150px;opacity:.97">
+          <svg viewBox="0 0 260 170" role="img" aria-label="Ilustração de painel de leads" style="display:block;width:100%;height:auto;filter:drop-shadow(0 14px 24px rgba(15,23,42,.18))">
+            <defs><linearGradient id="leadCard" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#ffffff" stop-opacity=".98"/><stop offset="1" stop-color="#dbeafe" stop-opacity=".96"/></linearGradient></defs>
+            <rect x="28" y="18" width="204" height="134" rx="20" fill="url(#leadCard)"/>
+            <rect x="45" y="36" width="90" height="10" rx="5" fill="#93c5fd"/>
+            <rect x="45" y="55" width="130" height="8" rx="4" fill="#cbd5e1"/>
+            <circle cx="61" cy="88" r="13" fill="#2563eb"/><circle cx="61" cy="88" r="5" fill="#ffffff"/>
+            <rect x="82" y="78" width="92" height="8" rx="4" fill="#475569"/><rect x="82" y="92" width="66" height="7" rx="3.5" fill="#94a3b8"/>
+            <circle cx="61" cy="124" r="13" fill="#20a464"/><circle cx="61" cy="124" r="5" fill="#ffffff"/>
+            <rect x="82" y="114" width="104" height="8" rx="4" fill="#475569"/><rect x="82" y="128" width="78" height="7" rx="3.5" fill="#94a3b8"/>
+            <rect x="182" y="75" width="31" height="17" rx="8.5" fill="#dbeafe"/><rect x="182" y="111" width="31" height="17" rx="8.5" fill="#dcfce7"/>
+            <circle cx="216" cy="28" r="18" fill="#ffffff"/><path d="M208 28l5 5 11-12" fill="none" stroke="#20a464" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+        </div>
+        <div class="ops-hero-actions">
+          <button id="quickQueue" class="quick-action active" type="button">Fila não disparada</button>
+          <button id="quickToday" class="quick-action" type="button">Inscritos hoje</button>
+          <button id="quickClear" class="quick-action" type="button">Visão geral</button>
+        </div>
       </div>
     </section>
 
@@ -106,7 +122,7 @@
       <div id="exportProgress" class="export-progress" hidden><div class="export-progress-head"><strong>Exportação</strong><span id="exportProgressText">Aguardando...</span></div><div class="progress-track"><div class="progress-bar" id="exportProgressBar"></div></div></div>
     </section>
 
-    <footer class="ops-footer"><span>Central de Disparos · Educação</span><span>PostgreSQL + Modelo Estrela</span><span>{{ ui_version }}</span></footer>
+    <footer class="ops-footer"><span>Painel de Leads · Educação</span><span>PostgreSQL + Modelo Estrela</span><span>{{ ui_version }}</span></footer>
   </main>
 
   <script src="https://cdn.jsdelivr.net/npm/tom-select@2.2.2/dist/js/tom-select.complete.min.js"></script>
@@ -117,6 +133,7 @@
   <script src="{{ url_for('static', filename='js/upload-diagnostics.js', v=asset_version) }}"></script>
   <script src="{{ url_for('static', filename='js/upload-preview.js', v=asset_version) }}"></script>
   <script src="{{ url_for('static', filename='js/app.js', v=asset_version) }}"></script>
+  <script src="{{ url_for('static', filename='js/filter-reliability.js', v=asset_version ~ '-filters2') }}"></script>
   <script src="{{ url_for('static', filename='js/upload-flow-fix.js', v=asset_version ~ '-uploadfix4') }}"></script>
   <script src="{{ url_for('static', filename='js/upload-result.js', v=asset_version) }}"></script>
   <script src="{{ url_for('static', filename='js/dashboard-v2.js', v=asset_version) }}"></script>
