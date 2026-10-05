@@ -8,6 +8,7 @@ como ausência de conteúdo.
 from __future__ import annotations
 
 import re
+import time
 from datetime import date, datetime
 from typing import Any
 
@@ -206,8 +207,17 @@ def _apply_filters(sql: str, filters, params: list) -> str:
     return sql
 
 
+_OPTIONS_CACHE: dict[str, dict[str, Any]] = {}
+_OPTIONS_CACHE_TTL_SECONDS = 120.0
+
+
 def query_options():
-    """Retorna um valor por opção lógica, usando a grafia mais frequente no banco."""
+    """Retorna opções canônicas do banco com cache curto por instituição/view.
+
+    A consulta evita ARRAY/ANY parametrizado e funções de janela sobre toda a
+    view. Cada valor exato é contado no PostgreSQL e a grafia dominante é
+    escolhida em Python, preservando fidelidade sem tornar /api/options frágil.
+    """
     option_map = {
         "status": ("status", "status"),
         "curso": ("curso", "cursos"),
@@ -225,8 +235,13 @@ def query_options():
         "tipo_negocio": ("tipo_negocio", "tipos_negocio"),
     }
 
+    view_id = db._view_table_id()
+    now = time.monotonic()
+    cached = _OPTIONS_CACHE.get(view_id)
+    if cached and (now - cached["at"]) < _OPTIONS_CACHE_TTL_SECONDS:
+        return {key: list(values) for key, values in cached["data"].items()}
+
     opts = {}
-    blank_markers = sorted({item.casefold() for item in EMPTY_MARKERS if item})
 
     for col, (singular_key, plural_key) in option_map.items():
         if not db._has_view_col(col):
@@ -235,51 +250,40 @@ def query_options():
             safe_col = db._safe_ident(col)
             rows = db._run_gestao_query(
                 f"""
-                WITH valores AS (
-                    SELECT
-                        REGEXP_REPLACE(BTRIM({safe_col}::text), '\\s+', ' ', 'g') AS value
-                    FROM {db._view_table_id()}
-                ),
-                validos AS (
-                    SELECT
-                        value,
-                        UPPER(value) AS normalized,
-                        COUNT(*)::bigint AS quantidade
-                    FROM valores
-                    WHERE NULLIF(value, '') IS NOT NULL
-                      AND NOT (LOWER(value) = ANY(:blank_markers))
-                    GROUP BY value, UPPER(value)
-                ),
-                ranqueados AS (
-                    SELECT
-                        value,
-                        normalized,
-                        quantidade,
-                        ROW_NUMBER() OVER (
-                            PARTITION BY normalized
-                            ORDER BY quantidade DESC, value ASC
-                        ) AS rn
-                    FROM validos
-                )
-                SELECT value
-                FROM ranqueados
-                WHERE rn = 1
-                ORDER BY value
+                SELECT
+                    BTRIM({safe_col}::text) AS value,
+                    COUNT(*)::bigint AS quantidade
+                FROM {view_id}
+                WHERE NULLIF(BTRIM({safe_col}::text), '') IS NOT NULL
+                GROUP BY BTRIM({safe_col}::text)
+                ORDER BY quantidade DESC, value ASC
                 """,
-                {"blank_markers": blank_markers},
+                {},
                 f"options_{col}_dominant",
             )
-            values = [
-                row["value"]
-                for row in rows
-                if row.get("value") not in (None, "")
-            ]
+
+            canonical: dict[str, str] = {}
+            for row in rows:
+                value = row.get("value")
+                if value in (None, "") or _is_empty_marker(value):
+                    continue
+                normalized = _normalized_text(value)
+                if normalized not in canonical:
+                    canonical[normalized] = str(value)
+
+            values = sorted(
+                canonical.values(),
+                key=lambda item: (str(item).casefold(), str(item)),
+            )
 
         opts[singular_key] = values
         opts[plural_key] = values
 
+    _OPTIONS_CACHE[view_id] = {
+        "at": now,
+        "data": {key: list(values) for key, values in opts.items()},
+    }
     return opts
-
 
 _original_json_safe_value = db._json_safe_value
 _original_query_leads = db.query_leads
