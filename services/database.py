@@ -91,9 +91,20 @@ def _view_table_id() -> str:
 
 
 def _database_url() -> str:
-    url = os.getenv("DATABASE_URL")
+    url = str(os.getenv("DATABASE_URL") or "").strip()
     if not url:
         raise RuntimeError("Variável DATABASE_URL não configurada.")
+
+    # O projeto usa psycopg2-binary. URLs PostgreSQL sem driver explícito podem
+    # mudar de comportamento entre versões do SQLAlchemy e tentar importar
+    # psycopg (v3), que não faz parte do runtime deste painel.
+    if url.startswith("postgres://"):
+        url = "postgresql+psycopg2://" + url[len("postgres://"):]
+    elif url.startswith("postgresql://"):
+        url = "postgresql+psycopg2://" + url[len("postgresql://"):]
+    elif url.startswith("postgresql+psycopg://"):
+        url = "postgresql+psycopg2://" + url[len("postgresql+psycopg://"):]
+
     return url
 
 
