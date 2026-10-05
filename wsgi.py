@@ -76,6 +76,7 @@ try:
     from upload_update_existing_routes import register_upload_update_existing_routes
     from upload_progress_routes import register_upload_progress_routes
     from institution_routes import register_institution_routes
+    from education_kpi_routes import register_education_kpi_routes
     from services.gestao_sem_lotes import register_gestao_sem_lotes
     from services.gestao_metricas_corrigidas import register_metricas_corrigidas
     from services import produtividade_export as produtividade_export_module
@@ -139,6 +140,8 @@ try:
     application.logger.info("Blindagem do COPY ativada: %s", upload_copy_guard_result)
     application.logger.info("Limite de upload configurado: %s bytes", application.config["MAX_CONTENT_LENGTH"])
     register_institution_routes(application)
+    education_kpis_result = register_education_kpi_routes(application)
+    application.logger.info("KPIs educacionais registrados: %s", education_kpis_result)
     register_upload_preview_routes(application)
     register_upload_new_only_routes(application)
     register_upload_update_existing_routes(application)
