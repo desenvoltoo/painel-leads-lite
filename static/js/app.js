@@ -411,15 +411,42 @@ function deleteSavedFilterView() {
 
 async function loadLeadsAndKpis() {
   if (isLoadingLeads) return;
-  isLoadingLeads = true; setStatus("Consultando PostgreSQL...", "ok"); renderTable([], { loading: true }); setSearchLoading(true);
+  isLoadingLeads = true;
+  setStatus("Consultando PostgreSQL...", "ok");
+  renderTable([], { loading: true });
+  setSearchLoading(true);
   const params = buildLeadsParams();
+
   try {
-    const [leadsResp, kpisResp] = await Promise.all([apiPostJson("/api/leads/search", params), apiPostJson("/api/kpis/search", params)]);
-    const rows = leadsResp?.data || []; const total = leadsResp?.total ?? rows.length; totalLeads = Number(total) || 0;
-    renderTable(rows); renderTotals(total, rows.length); renderKpis(kpisResp); setStatus(`${rows.length} registros carregados.${getActiveFilterSummary()}`, "ok");
+    // A tabela é a prioridade. Falha de KPI nunca mais apaga leads válidos.
+    const leadsResp = await apiPostJson("/api/leads/search", params);
+    const rows = leadsResp?.data || [];
+    const total = leadsResp?.total ?? rows.length;
+    totalLeads = Number(total) || 0;
+
+    renderTable(rows);
+    renderTotals(total, rows.length);
+    setStatus(`${rows.length} registros carregados.${getActiveFilterSummary()}`, "ok");
+
+    // KPI legado roda isolado e em segundo plano.
+    apiPostJson("/api/kpis/search", params)
+      .then((kpisResp) => renderKpis(kpisResp))
+      .catch((error) => console.warn("KPI secundário indisponível; tabela preservada:", error));
   } catch (e) {
-    console.error(e); setStatus("Não foi possível buscar os leads. Verifique os filtros e tente novamente.", "err"); renderTable([]); renderTotals(0, 0);
-  } finally { isLoadingLeads = false; setSearchLoading(false); }
+    console.error("Falha ao carregar /api/leads/search:", e);
+    const detail = String(e?.message || "").trim();
+    setStatus(
+      detail && detail !== "[object Object]"
+        ? `Não foi possível buscar os leads: ${detail}`
+        : "Não foi possível buscar os leads. A consulta ao PostgreSQL falhou.",
+      "err"
+    );
+    renderTable([]);
+    renderTotals(0, 0);
+  } finally {
+    isLoadingLeads = false;
+    setSearchLoading(false);
+  }
 }
 const loadLeadsAndKpisDebounced = (() => { let t; return () => { clearTimeout(t); t = setTimeout(loadLeadsAndKpis, 450); }; })();
 function renderTotals(total, shown) {
@@ -529,12 +556,14 @@ document.addEventListener("DOMContentLoaded", async () => {
   $("#btnApply")?.addEventListener("click", () => { currentPage = 1; loadLeadsAndKpis(); });
   $("#btnSaveFilterView")?.addEventListener("click", saveCurrentFilterView); $("#btnDeleteFilterView")?.addEventListener("click", deleteSavedFilterView);
   $("#savedFilterSelect")?.addEventListener("change", () => { const selectedId = ($("#savedFilterSelect")?.value || "").trim(); if (selectedId) applySavedFilterView(); });
-  $("#btnReload")?.addEventListener("click", async () => { await loadOptions(); await loadLeadsAndKpis(); }); $("#btnClear")?.addEventListener("click", clearFilters);
+  $("#btnReload")?.addEventListener("click", async () => { await loadLeadsAndKpis(); void loadOptions(); }); $("#btnClear")?.addEventListener("click", clearFilters);
   $("#btnUpload")?.addEventListener("click", doUpload); $("#btnExport")?.addEventListener("click", exportXlsxServerSide); $("#btnBatchExport")?.addEventListener("click", startBatchExport);
   $("#btnPrevPage")?.addEventListener("click", () => { if (currentPage <= 1) return; currentPage -= 1; loadLeadsAndKpis(); });
   $("#btnNextPage")?.addEventListener("click", () => { const limit = Number($("#fLimit")?.value || 500) || 500; if ((currentPage * limit) >= totalLeads) return; currentPage += 1; loadLeadsAndKpis(); });
   ["#fIni", "#fFim", "#fMesDisparo", "#fMatriculado", "#fLimit"].forEach((selector) => $(selector)?.addEventListener("change", () => { currentPage = 1; loadLeadsAndKpisDebounced(); }));
   $("#fDataDisparoSituacao")?.addEventListener("change", () => { updateDataDisparoMonthState(); currentPage = 1; loadLeadsAndKpisDebounced(); });
   $("#fBusca")?.addEventListener("input", () => { currentPage = 1; loadLeadsAndKpisDebounced(); });
-  await loadOptions(); await loadLeadsAndKpis();
+  // Prioriza dados da tabela. Opções são carregadas em paralelo e não bloqueiam a fila.
+  await loadLeadsAndKpis();
+  void loadOptions();
 });
