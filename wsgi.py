@@ -102,6 +102,26 @@ try:
     existing_full_update_result = apply_upload_existing_full_update_guard()
     result_metrics_result = apply_upload_result_metrics_guard()
 
+    # Sincroniza as referências usadas pelas rotas com a camada de banco já
+    # patchada. app.py importa funções por valor; sem esta sincronização um
+    # rebuild pode manter referências antigas mesmo com services.database
+    # atualizado.
+    import app as app_module
+    from services import database as runtime_db
+
+    for runtime_name in (
+        "query_leads",
+        "query_leads_iter",
+        "query_leads_count",
+        "query_options",
+        "export_leads_rows",
+        "export_leads_rows_iter",
+        "rows_to_xlsx",
+    ):
+        runtime_value = getattr(runtime_db, runtime_name, None)
+        if runtime_value is not None:
+            setattr(app_module, runtime_name, runtime_value)
+
     application = create_app()
     # Arquivos grandes: suporta planilhas de até 100 mil leads. O limite de bytes
     # pode ser ajustado no EasyPanel por LEADS_UPLOAD_MAX_BYTES; padrão 150 MiB.
