@@ -195,8 +195,9 @@
       text('#topOrigin', d.top_origem?.nome ? `${d.top_origem.nome} (${nf.format(d.top_origem.total)})` : null);
       text('#topModality', d.top_modalidade?.nome ? `${d.top_modalidade.nome} (${nf.format(d.top_modalidade.total)})` : null);
     } catch (err) {
-      console.warn('Endpoint educacional indisponível; usando fallback:', err);
-      await loadFallbackKpis(base).catch((fallbackError) => console.error('Falha também no fallback dos KPIs:', fallbackError));
+      // Não dispara várias contagens completas em paralelo quando o KPI falha.
+      // A tabela e o total principal continuam sendo atualizados pelo app.js.
+      console.warn('KPIs educacionais indisponíveis; mantendo a tabela operacional:', err);
     } finally {
       $$('.ops-kpi strong, .ops-mini-metric strong').forEach((el) => el.classList.remove('ops-number-loading'));
     }
